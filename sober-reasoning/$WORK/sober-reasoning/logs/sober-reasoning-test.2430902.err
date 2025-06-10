@@ -1,0 +1,19 @@
+Lmod has detected the following error: The following module(s) are unknown:
+"conda"
+
+Please check the spelling or version number. Also try "module spider ..."
+It is also possible your cache file is out-of-date; it may help to try:
+  $ module --ignore_cache load "conda"
+
+Also make sure that all modulefiles written in TCL start with the string
+#%Module
+
+
+
+Traceback (most recent call last):
+  File "/home1/10757/manasp123/sober-reasoning/main.py", line 162, in <module>
+    main()
+  File "/home1/10757/manasp123/sober-reasoning/main.py", line 60, in main
+    fname = f"{args.seed}-{args.temperature}-{args.top_p}-{args.task.split('|')[1]}-{args.max_new_tokens}"
+IndexError: list index out of range
+srun: error: v330-020: task 0: Exited with exit code 1
