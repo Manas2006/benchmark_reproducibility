@@ -18,11 +18,15 @@ DEFAULT_TASKS = {
 
 # =====================
 # Default system prompt for math tasks (editable by user)
-DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful math assistant. "
-    "Think step by step, show your reasoning, and give your final answer after '####'. "
-    "For example: '...solution steps... #### 42'"
-)
+DEFAULT_SYSTEM_PROMPT = """
+Solve the following math problem efficiently and clearly. Think step by step before answering. Your response must end with the following line and nothing after it:
+
+Therefore, the final answer is: $\\boxed{{ANSWER}}$. I hope it is correct
+
+where ANSWER is just the final number or expression that solves the problem. Do not output anything after this line.
+
+{Question}
+""".strip()
 # =====================
 
 ##############################################################################

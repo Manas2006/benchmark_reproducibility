@@ -4,7 +4,7 @@
 #SBATCH -J lighteval-vllm                # Job name
 #SBATCH -o /work/10757/manasp123/runs/slurm-%j.out  # Standard output file
 #SBATCH -e /work/10757/manasp123/runs/slurm-%j.err  # Standard error file
-#SBATCH -p gpu-a100-small                # Partition (queue) name
+#SBATCH -p gpu-a100-dev                  # Partition (queue) name
 #SBATCH -N 1                             # Number of nodes
 #SBATCH -n 1                             # Number of tasks
 #SBATCH -c 8                             # Number of CPU cores per task
