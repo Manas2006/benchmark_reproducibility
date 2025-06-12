@@ -15,5 +15,7 @@
 source ~/.bashrc                         # Source user bash config
 conda activate benchmark-reproducibility # Activate the Conda environment
 
+cd /home1/10757/manasp123/benchmark_reproducibility # Change to the correct directory
+
 # Run the main benchmarking script with debug output
-python -u benchmark_reproducibility/main.py --model Qwen/Qwen2.5-Math-1.5B --task 'lighteval|gsm8k|0|0' --output_dir /work/10757/manasp123/runs --debug --save_details 
+python -u main.py --model Qwen/Qwen2.5-Math-1.5B --task 'lighteval|gsm8k|0|0' --output_dir /work/10757/manasp123/runs --debug --save_details 
