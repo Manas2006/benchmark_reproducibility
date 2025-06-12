@@ -41,7 +41,7 @@ python train.py library=verl
 ```yaml
 # Required fields
 model:
-  pretrained_name: "Qwen2.5-1.5B"
+  pretrained_name: "Qwen/Qwen2.5-Math-1.5B"
 dataset:
   name: "your_dataset"
 reward_model:
@@ -96,8 +96,6 @@ See `configs/default.yaml` for all available options.
 ## Documentation
 
 - [Optimizer and Scheduler Support](docs/optimizer_scheduler.md): Detailed comparison of optimizer and scheduler capabilities
-- [Configuration Guide](docs/configuration.md): How to configure your experiments
-- [Examples](examples/): Example configurations and training scripts
 
 ## Project Structure
 
