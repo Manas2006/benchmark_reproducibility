@@ -1,0 +1,158 @@
+
+# Supported libraries: [trl, openr1, verl]
+library: trl  # Default to TRL
+
+# Output settings
+output_dir: "outputs"  # Base directory for all outputs
+experiment_name: "default"  # Name of this experiment run
+
+seed: 42
+algorithm:
+  name: ppo  # one of [ppo, grpo, dpo]
+verbose: true
+
+# Model settings
+model:
+  pretrained_name: "Qwen/Qwen2.5-Math-1.5B" 
+  device_map: "auto"  
+  load_in_8bit: false  
+  load_in_4bit: false  
+
+# Dataset settings
+dataset:
+  name: ""  # Must be set (HF dataset ID or local path)
+  split: train
+  batch_size: 8
+  max_length: 512
+  num_workers: 4
+  data_files: null  # Optional local data files
+
+# Reward model settings
+# for using reward function, set type to custom and use custom_path to file path of reward function
+reward_model:
+  type: ""  # Must be set (pipeline or custom)
+  name: ""  # Must be set for pipeline type
+  custom_path: ""  # Must be set for custom type
+  device: "cuda" if torch.cuda.is_available() else "cpu"
+
+# Training settings
+training:
+  output_dir: "${output_dir}/${experiment_name}"  # Where to save model and metrics
+  learning_rate: 3e-5
+  num_train_epochs: 3
+  batch_size: 8
+  max_grad_norm: 1.0
+  do_eval: true  # Whether to run evaluation
+  system_prompt: "You are a helpful AI Assistant that provides well-reasoned and detailed responses. You first think about the reasoning process as an internal monologue and then provide the user with the answer. Respond in the following format: <think>\n...\n</think>\n<answer>\n...\n</answer>"  # Optional system prompt for chat models
+
+
+
+
+
+
+# Optional configurations - uncomment and modify as needed
+# Common optimizer settings (supported by all libraries)
+#optimizer:
+#  type: AdamW  # one of [AdamW, Adam, SGD, Lion]
+#  args:
+#    lr: 3e-5
+#    weight_decay: 0.01
+#    betas: [0.9, 0.999]
+#    eps: 1e-8
+
+# Common scheduler settings (supported by all libraries)
+#scheduler:
+#  type: linear  # one of [linear, cosine, constant, constant_with_warmup]
+#  args:
+#    warmup_ratio: 0.1
+#    total_steps: 100000
+
+# Library-specific settings
+# These settings are only used by the specified library
+# Uncomment and modify the section for your chosen library
+#library_specific:
+  # TRL-specific settings
+  # trl:
+  #   # Additional TRL-specific optimizer settings
+  #   optimizer:
+  #     # TRL supports all common optimizer settings plus:
+  #     gradient_accumulation_steps: 1
+  #     max_grad_norm: 1.0
+  #   
+  #   # Additional TRL-specific scheduler settings
+  #   scheduler:
+  #     # TRL supports all common scheduler settings plus:
+  #     num_cycles: 1.0  # for cosine scheduler
+  #     min_lr: 0.0  # for cosine scheduler
+  #     num_warmup_steps: 1000  # for constant_with_warmup
+
+  # Verl-specific settings
+  # verl:
+  #   # Verl supports both FSDP and Megatron backends
+  #   backend: fsdp  # one of [fsdp, megatron]
+  #   
+  #   # Verl-specific optimizer settings
+  #   optimizer:
+  #     # Verl supports all common optimizer settings plus:
+  #     clip_grad: 1.0
+  #     lr_warmup_init: 0.0
+  #     lr_warmup_steps_ratio: 0.0
+  #     lr_decay_style: linear  # one of [constant, linear, cosine, inverse_square_root]
+  #     min_lr: 0.0
+  #     weight_decay_incr_style: constant  # one of [constant, linear, cosine]
+  #     lr_wsd_decay_style: exponential  # one of [constant, exponential, cosine]
+  #     use_checkpoint_opt_param_scheduler: false
+  #   
+  #   # Verl-specific distributed training settings
+  #   distributed:
+  #     nnodes: 1
+  #     n_gpus_per_node: 8
+  #     num_cpus: null  # null means use all CPUs
+
+  # Open-R1 specific settings (built on TRL)
+  # openr1:
+  #   # Open-R1 inherits TRL's optimizer and scheduler settings
+  #   # Plus these GRPO-specific settings:
+  #   grpo:
+  #     use_score_scaling: true
+  #     use_score_norm: true
+  #     score_clip: 0.5
+
+# Optional batch settings
+#batch:
+#  rollout_length: 512
+#  minibatch_size: 8
+#  epochs_per_update: 4
+#  gradient_accumulation_steps: 1
+
+# Optional regularization
+#regularization:
+#  max_grad_norm: 1.0
+#  clip_epsilon: 0.2
+#  kl_penalty: 0.02
+#  entropy_coef: 0.01
+
+# Optional discounting
+#discounting:
+#  gamma: 0.99
+#  gae_lambda: 0.95
+
+# Logging
+logging:
+  # Logs will be saved to: {output_dir}/{experiment_name}/logs
+  save_every: 1000  # Save checkpoint every N steps
+  eval_every: 1000  # Evaluate every N steps
+  
+  # Optional: Weights & Biases integration
+  # Note: Each library handles wandb differently:
+  # - TRL: Uses report_to="wandb" in trainer config
+  # - Open-R1: Uses wandb environment variables
+  # - Verl: Uses unified tracking interface
+  # To use wandb:
+  # 1. Install wandb: pip install wandb
+  # 2. Login: wandb login
+  # 3. Uncomment and configure the wandb section below
+  #wandb:
+  #  project: "unified-rl"  # Your wandb project name
+  #  entity: null  # Your wandb username/team
+  #  tags: []  # Optional tags for this run 
