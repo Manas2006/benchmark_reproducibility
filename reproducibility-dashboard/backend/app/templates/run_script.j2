@@ -1,0 +1,64 @@
+#!/bin/bash
+{% for line in raw_sbatch_directives.splitlines() %}
+{{ line }}
+{% endfor %}
+
+cd {{ local_dir }}
+{{ environment_settings }}
+
+{% if existing_result_path %}
+# Skip generation, evaluate existing results
+echo "Evaluating existing results from {{ existing_result_path }}"
+bash evaluate.sh \
+  --input {{ existing_result_path }} \
+  --output_dir {{ output_dir }} \
+  --evaluation_metric {{ evaluation_metric }} \
+  --at_k {{ at_k_value }} \
+  --evaluation_prompt "{{ evaluation_prompt | replace('"', '\\"') }}" \
+  --evaluation_tool {{ evaluation_tool }}\
+  --extraction_method {{ extraction_method }}\
+  {% if predefined_extractor %} --predefined_extractor {{ predefined_extractor }}{% endif %}\
+  {% if judge_model_type %} --judge_model_type {{ judge_model_type }}{% endif %}\
+  {% if judge_model %} --judge_model {{ judge_model }}{% endif %}\
+  {% if judge_api_key %} --judge_api_key {{ judge_api_key }}{% endif %}\
+  {% if local_llm_path %} --local_llm_path {{ local_llm_path }}{% endif %}\
+  {% if custom_extractor_code %} --custom_extractor_code "{{ custom_extractor_code | replace('"', '\\"') }}"{% endif %}
+
+{% else %}
+# Full generation + evaluation loop
+{% for model in models %}
+{% for ds in datasets %}
+  IFS="|" read -r dataset split <<< "{{ ds }}"
+  for temp in {{ temps }}; do
+  for top_p in {{ top_ps }}; do
+  for top_k in {{ top_ks }}; do
+  for seed in {{ seeds }}; do
+    echo "Running experiment: model={{ model }}, dataset=$dataset, split=$split, temp=$temp, top_p=$top_p, top_k=$top_k, seed=$seed"
+    bash run.sh \
+      --model "{{ model }}" \
+      --dataset "$dataset" \
+      --split "$split" \
+      --temperature $temp \
+      --top_p $top_p \
+      --top_k $top_k \
+      --max_length {{ max_lengths[0] }} \
+      --max_new_tokens {{ max_new_tokens[0] }} \
+      --seed $seed \
+      --prompt "{{ prompt | replace('"', '\\"') }}" \
+      --output_dir {{ output_dir }} \
+      --evaluation_metric {{ evaluation_metric }} \
+      --at_k {{ at_k_value }} \
+      --evaluation_prompt "{{ evaluation_prompt | replace('"', '\\"') }}" \
+      --evaluation_tool {{ evaluation_tool }}\
+      --extraction_method {{ extraction_method }}\
+      {% if predefined_extractor %} --predefined_extractor {{ predefined_extractor }}{% endif %}\
+      {% if judge_model_type %} --judge_model_type {{ judge_model_type }}{% endif %}\
+      {% if judge_model %} --judge_model {{ judge_model }}{% endif %}\
+      {% if judge_api_key %} --judge_api_key {{ judge_api_key }}{% endif %}\
+      {% if local_llm_path %} --local_llm_path {{ local_llm_path }}{% endif %}\
+      {% if custom_extractor_code %} --custom_extractor_code "{{ custom_extractor_code | replace('"', '\\"') }}"{% endif %}
+    
+    echo "Completed experiment: model={{ model }}, dataset=$dataset, split=$split, temp=$temp, top_p=$top_p, top_k=$top_k, seed=$seed"
+  done; done; done; done; done
+{% endfor %}
+{% endif %} 

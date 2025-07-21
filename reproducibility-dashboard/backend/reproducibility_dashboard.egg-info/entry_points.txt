@@ -1,0 +1,3 @@
+[console_scripts]
+repro-cli = app.cli:app
+reproducibility-cli = app.cli:app
