@@ -4,7 +4,7 @@ import json
 import asyncio
 
 from .schemas import EvalRequest, JobStatus
-from .runner import launch_job, job_db, get_job_status
+from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job
 
 app = FastAPI(title="Qwen Math Evaluation API", version="1.0.0")
 
@@ -29,125 +29,108 @@ async def health_check():
 async def create_job(req: EvalRequest):
     """Create a new evaluation job"""
     jid = launch_job(req)
-    
     # Return only serializable data
     job_info = job_db[jid].copy()
-    # Remove non-serializable objects
     job_info.pop("proc", None)
     job_info.pop("cli", None)
-    
-    return {"job_id": jid, **job_info}
+    # Add slurm_jid if present
+    slurm_jid = job_info.get("slurm_jid")
+    return {"job_id": jid, "slurm_jid": slurm_jid, **job_info}
+
+@app.post("/jobs/{jid}/cancel")
+async def cancel_job_endpoint(jid: str):
+    """Cancel a running job (local or SLURM)"""
+    success = cancel_job(jid)
+    return {"job_id": jid, "cancelled": success}
+
+@app.delete("/jobs/{jid}")
+async def delete_job_endpoint(jid: str):
+    """Delete a job (and cancel if running)"""
+    success = delete_job(jid)
+    return {"job_id": jid, "deleted": success}
 
 @app.get("/jobs/{jid}")
 async def job_status(jid: str):
     """Get the status of a job"""
     status_info = get_job_status(jid)
-    
-    # Return only serializable data
     if isinstance(status_info, dict):
         status_info = status_info.copy()
         status_info.pop("proc", None)
         status_info.pop("cli", None)
-    
-    return {"job_id": jid, **status_info}
+    slurm_jid = status_info.get("slurm_jid")
+    result_file = status_info.get("result_file")
+    return {"job_id": jid, "slurm_jid": slurm_jid, **status_info, "result_file": result_file}
 
 @app.websocket("/stream/{jid}")
 async def stream(jid: str, ws: WebSocket):
     await ws.accept()
-    # Allow jid to be either backend UUID or SLURM job number
     info = job_db.get(jid)
-    if not info:
-        # Try to find by SLURM job number
-        for uuid, job in job_db.items():
-            if str(job.get("slurm_jid")) == jid:
-                info = job
-                jid = uuid
-                break
     if not info:
         await ws.send_text(json.dumps({"error": f"Job {jid} not found (UUID or SLURM job number)"}))
         await ws.close()
         return
 
-    # Local job: stream process output
-    if "proc" in info:
-        proc = info["proc"]
-        try:
-            # Try to import pynvml for GPU monitoring
+    import os
+    import asyncio
+    out_path = info.get("out_file")
+    err_path = info.get("err_file")
+    # For SLURM jobs, if the files do not exist, try to parse the SBATCH script for the real paths
+    if info.get("backend") == "slurm":
+        sbatch_path = info.get("sbatch_path")
+        if sbatch_path and (not out_path or not err_path):
             try:
-                import pynvml
-                pynvml.nvmlInit()
-                gpu_available = True
-            except ImportError:
-                gpu_available = False
+                with open(sbatch_path, "r") as f:
+                    lines = f.readlines()
+                for line in lines:
+                    if line.startswith("#SBATCH -o"):
+                        out_path = line.split(None, 2)[-1].strip()
+                    if line.startswith("#SBATCH -e"):
+                        err_path = line.split(None, 2)[-1].strip()
+            except Exception:
+                pass
+    # Wait for the files to appear (up to 60 seconds)
+    wait_time = 0
+    while (not out_path or not os.path.exists(out_path) or not err_path or not os.path.exists(err_path)) and wait_time < 60:
+        await ws.send_text(json.dumps({"waiting": f"Waiting for job output files to appear... ({wait_time}s)"}))
+        await asyncio.sleep(2)
+        wait_time += 2
+    if not out_path or not os.path.exists(out_path) or not err_path or not os.path.exists(err_path):
+        await ws.send_text(json.dumps({"error": f"Output or error file not found for this job after waiting. (out: {out_path}, err: {err_path})"}))
+        await ws.close()
+        return
+    try:
+        with open(out_path, "r") as outf, open(err_path, "r") as errf:
+            outf.seek(0, os.SEEK_END)
+            errf.seek(0, os.SEEK_END)
             while True:
-                line = proc.stdout.readline()
-                if line:
-                    await ws.send_text(json.dumps({"log": line.strip()}))
-                if gpu_available:
-                    try:
-                        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                        await ws.send_text(json.dumps({
-                            "gpu": {
-                                "mem_used": mem.used,
-                                "mem_total": mem.total,
-                                "utilization": util.gpu
-                            }
-                        }))
-                    except Exception as e:
-                        await ws.send_text(json.dumps({"gpu_error": str(e)}))
-                if proc.poll() is not None:
-                    if proc.returncode == 0:
-                        job_db[jid]["status"] = JobStatus.DONE
-                    else:
-                        job_db[jid]["status"] = JobStatus.ERROR
-                    await ws.send_text(json.dumps({
-                        "status": job_db[jid]["status"],
-                        "return_code": proc.returncode
-                    }))
+                out_line = outf.readline()
+                err_line = errf.readline()
+                sent = False
+                if out_line:
+                    await ws.send_text(json.dumps({"out": out_line.rstrip()}))
+                    sent = True
+                if err_line:
+                    await ws.send_text(json.dumps({"err": err_line.rstrip()}))
+                    sent = True
+                # Check if job is still running
+                status = info.get("status")
+                if status not in ["RUNNING", "QUEUED"]:
+                    # Drain any remaining lines
+                    for line in outf:
+                        await ws.send_text(json.dumps({"out": line.rstrip()}))
+                    for line in errf:
+                        await ws.send_text(json.dumps({"err": line.rstrip()}))
                     break
-                await asyncio.sleep(2)
-        except Exception as e:
-            await ws.send_text(json.dumps({"error": str(e)}))
-        finally:
-            await ws.close()
-        return
-
-    # SLURM job: tail output file
-    if "slurm_jid" in info:
-        import os
-        log_path = f"/work/10757/manasp123/qwen-eval-ui/logs/qwen-math-{jid}.out"
+                if not sent:
+                    await asyncio.sleep(1)
+    except Exception as e:
         try:
-            # Wait for the file to appear
-            for _ in range(30):  # Wait up to 30*2=60 seconds
-                if os.path.exists(log_path):
-                    break
-                await asyncio.sleep(2)
-            if not os.path.exists(log_path):
-                await ws.send_text(json.dumps({"error": f"Log file {log_path} not found."}))
-                await ws.close()
-                return
-            with open(log_path, "r") as f:
-                f.seek(0, os.SEEK_END)  # Start at end of file
-                while True:
-                    line = f.readline()
-                    if line:
-                        await ws.send_text(json.dumps({"log": line.strip()}))
-                    else:
-                        # Check if job is still running
-                        status = get_job_status(jid)
-                        if status.get("status") not in ["RUNNING", "QUEUED"]:
-                            break
-                        await asyncio.sleep(2)
-        except Exception as e:
             await ws.send_text(json.dumps({"error": str(e)}))
-        finally:
-            await ws.close()
-        return
-
-    # If neither, just close
-    await ws.close()
+        except Exception:
+            pass
+    finally:
+        await ws.close()
+    return
 
 @app.get("/jobs")
 async def list_jobs():
@@ -157,7 +140,9 @@ async def list_jobs():
             job_info = info.copy()
             job_info.pop("proc", None)
             job_info.pop("cli", None)
-            jobs.append({"job_id": jid, **job_info})
+            slurm_jid = job_info.get("slurm_jid")
+            result_file = job_info.get("result_file")
+            jobs.append({"job_id": jid, "slurm_jid": slurm_jid, **job_info, "result_file": result_file})
         return {"jobs": jobs}
     except Exception as e:
         print(f"Error in /jobs: {e}")
