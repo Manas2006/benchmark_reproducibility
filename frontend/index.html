@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qwen Math Evaluation UI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .log-container { 
+            height: 400px; 
+            overflow-y: auto; 
+            background: #1a1a1a; 
+            color: #00ff00; 
+            font-family: monospace; 
+            padding: 10px;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-white shadow-sm border-b">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center py-6">
+                    <div class="flex items-center">
+                        <h1 class="text-2xl font-bold text-gray-900">
+                            Qwen Math Evaluation UI
+                        </h1>
+                        <span class="ml-3 px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">
+                            v1.0.0
+                        </span>
+                    </div>
+                    <div class="flex space-x-4">
+                        <button onclick="showTab('configure')" class="tab-btn px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white">
+                            Configure
+                        </button>
+                        <button onclick="showTab('monitor')" class="tab-btn px-4 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
+                            Monitor
+                        </button>
+                        <button onclick="showTab('jobs')" class="tab-btn px-4 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
+                            Jobs
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            <!-- Configure Tab -->
+            <div id="configure" class="tab-content active">
+                <div class="bg-white shadow rounded-lg p-6">
+                    <h2 class="text-xl font-semibold mb-4">Configure Evaluation</h2>
+                    
+                    <div id="model-configs">
+                        <!-- Model configs will be added here -->
+                    </div>
+                    
+                    <button onclick="addModelConfig()" class="mt-4 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700">
+                        + Add Model Configuration
+                    </button>
+                    
+                    <button onclick="submitEvaluation()" class="mt-4 ml-4 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                        Submit Evaluation
+                    </button>
+                </div>
+            </div>
+
+            <!-- Monitor Tab -->
+            <div id="monitor" class="tab-content">
+                <div class="bg-white shadow rounded-lg p-6">
+                    <h2 class="text-xl font-semibold mb-4">Job Monitor</h2>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700">Job ID:</label>
+                        <input type="text" id="monitor-job-id" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" placeholder="Enter job ID">
+                        <button onclick="startMonitoring()" class="mt-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                            Start Monitoring
+                        </button>
+                    </div>
+                    <div class="log-container" id="log-output">
+                        <!-- Logs will appear here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Jobs Tab -->
+            <div id="jobs" class="tab-content">
+                <div class="bg-white shadow rounded-lg p-6">
+                    <h2 class="text-xl font-semibold mb-4">Job List</h2>
+                    <button onclick="refreshJobs()" class="mb-4 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                        Refresh Jobs
+                    </button>
+                    <div id="jobs-list">
+                        <!-- Jobs will be listed here -->
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html> 
