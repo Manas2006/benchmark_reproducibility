@@ -3,8 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import asyncio
 
-from .schemas import EvalRequest, JobStatus
+from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse
 from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job
+from .path_manager import path_manager
 
 app = FastAPI(title="Qwen Math Evaluation API", version="1.0.0")
 
@@ -24,6 +25,35 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+# Path configuration endpoints
+@app.get("/config/paths")
+async def get_path_config():
+    """Get current path configuration"""
+    current_config = path_manager.get_config()
+    default_config = path_manager._get_default_config()
+    return PathConfigResponse(
+        current_config=current_config,
+        default_config=default_config
+    )
+
+@app.post("/config/paths")
+async def update_path_config(config: PathConfig):
+    """Update path configuration"""
+    path_manager.update_config(config)
+    return {"message": "Path configuration updated successfully", "config": config}
+
+@app.post("/config/paths/reset")
+async def reset_path_config():
+    """Reset path configuration to defaults"""
+    path_manager.reset_to_default()
+    return {"message": "Path configuration reset to defaults", "config": path_manager.get_config()}
+
+@app.get("/config/paths/validate")
+async def validate_paths():
+    """Validate current path configuration"""
+    validation = path_manager.validate_paths()
+    return validation
 
 @app.post("/jobs")
 async def create_job(req: EvalRequest):

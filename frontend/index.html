@@ -1,23 +1,31 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Qwen Math Evaluation UI</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
-        .log-container { 
-            height: 400px; 
-            overflow-y: auto; 
-            background: #1a1a1a; 
-            color: #00ff00; 
-            font-family: monospace; 
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .log-container {
+            height: 400px;
+            overflow-y: auto;
+            background: #1a1a1a;
+            color: #00ff00;
+            font-family: monospace;
             padding: 10px;
         }
     </style>
 </head>
+
 <body class="bg-gray-50">
     <div class="min-h-screen">
         <!-- Header -->
@@ -33,14 +41,21 @@
                         </span>
                     </div>
                     <div class="flex space-x-4">
-                        <button onclick="showTab('configure')" class="tab-btn px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white">
+                        <button onclick="showTab('configure')"
+                            class="tab-btn px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white">
                             Configure
                         </button>
-                        <button onclick="showTab('monitor')" class="tab-btn px-4 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
+                        <button onclick="showTab('monitor')"
+                            class="tab-btn px-4 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
                             Monitor
                         </button>
-                        <button onclick="showTab('jobs')" class="tab-btn px-4 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
+                        <button onclick="showTab('jobs')"
+                            class="tab-btn px-4 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
                             Jobs
+                        </button>
+                        <button onclick="showTab('settings')"
+                            class="tab-btn px-4 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
+                            Settings
                         </button>
                     </div>
                 </div>
@@ -53,15 +68,16 @@
             <div id="configure" class="tab-content active">
                 <div class="bg-white shadow rounded-lg p-6">
                     <h2 class="text-xl font-semibold mb-4">Configure Evaluation</h2>
-                    
+
                     <div id="model-configs">
                         <!-- Model configs will be added here -->
                     </div>
-                    
-                    <button onclick="addModelConfig()" class="mt-4 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700">
+
+                    <button onclick="addModelConfig()"
+                        class="mt-4 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700">
                         + Add Model Configuration
                     </button>
-                    
+
                     <div class="mt-4 p-3 bg-gray-100 rounded-md">
                         <p class="text-sm text-gray-700">
                             Total jobs to be created: <span id="job-count" class="font-bold text-blue-600">0</span>
@@ -70,8 +86,9 @@
                             This is calculated based on all combinations of your specified values.
                         </p>
                     </div>
-                    
-                    <button onclick="submitEvaluation()" class="mt-4 ml-4 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+
+                    <button onclick="submitEvaluation()"
+                        class="mt-4 ml-4 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
                         Submit Evaluation
                     </button>
                 </div>
@@ -83,8 +100,11 @@
                     <h2 class="text-xl font-semibold mb-4">Job Monitor</h2>
                     <div class="mb-4">
                         <label class="block text-sm font-medium text-gray-700">Job ID:</label>
-                        <input type="text" id="monitor-job-id" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" placeholder="Enter job ID">
-                        <button onclick="startMonitoring()" class="mt-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                        <input type="text" id="monitor-job-id"
+                            class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                            placeholder="Enter job ID">
+                        <button onclick="startMonitoring()"
+                            class="mt-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
                             Start Monitoring
                         </button>
                     </div>
@@ -98,7 +118,8 @@
             <div id="jobs" class="tab-content">
                 <div class="bg-white shadow rounded-lg p-6">
                     <h2 class="text-xl font-semibold mb-4">Job List</h2>
-                    <button onclick="refreshJobs()" class="mb-4 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                    <button onclick="refreshJobs()"
+                        class="mb-4 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
                         Refresh Jobs
                     </button>
                     <div id="jobs-list">
@@ -106,9 +127,154 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Settings Tab -->
+            <div id="settings" class="tab-content">
+                <div class="bg-white shadow rounded-lg p-6">
+                    <h2 class="text-xl font-semibold mb-4">Path Configuration</h2>
+                    <p class="text-sm text-gray-600 mb-6">
+                        Configure all system paths for the evaluation pipeline. These settings are saved and will be
+                        used for all future jobs.
+                    </p>
+
+                    <div class="mb-4 flex space-x-4">
+                        <button onclick="loadPathConfig()"
+                            class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                            Load Current Config
+                        </button>
+                        <button onclick="validatePaths()"
+                            class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700">
+                            Validate Paths
+                        </button>
+                        <button onclick="resetPathConfig()"
+                            class="px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700">
+                            Reset to Defaults
+                        </button>
+                    </div>
+
+                    <div id="path-validation-result" class="mb-4"></div>
+
+                    <form id="path-config-form" class="space-y-6">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Workspace Directory</label>
+                                <input type="text" id="workspace_dir"
+                                    class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                    placeholder="/path/to/workspace">
+                                <p class="text-xs text-gray-500 mt-1">Base workspace directory</p>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Evaluation Directory</label>
+                                <input type="text" id="evaluation_dir"
+                                    class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                    placeholder="/path/to/evaluation">
+                                <p class="text-xs text-gray-500 mt-1">Path to evaluation directory containing
+                                    math_eval.py</p>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Backend Directory</label>
+                                <input type="text" id="backend_dir"
+                                    class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                    placeholder="/path/to/backend">
+                                <p class="text-xs text-gray-500 mt-1">Path to backend directory</p>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Python Path</label>
+                                <input type="text" id="python_path"
+                                    class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                    placeholder="/path/to/python">
+                                <p class="text-xs text-gray-500 mt-1">Path to Python executable</p>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Conda Environment Path</label>
+                                <input type="text" id="conda_env_path"
+                                    class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                    placeholder="/path/to/conda/env">
+                                <p class="text-xs text-gray-500 mt-1">Path to conda environment</p>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Output Directory</label>
+                                <input type="text" id="output_dir"
+                                    class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                    placeholder="/path/to/output">
+                                <p class="text-xs text-gray-500 mt-1">Directory for evaluation results</p>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Logs Directory</label>
+                                <input type="text" id="logs_dir"
+                                    class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                    placeholder="/path/to/logs">
+                                <p class="text-xs text-gray-500 mt-1">Directory for log files</p>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Scripts Directory</label>
+                                <input type="text" id="scripts_dir"
+                                    class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                    placeholder="/path/to/scripts">
+                                <p class="text-xs text-gray-500 mt-1">Directory for SLURM scripts</p>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Job Database Path</label>
+                                <input type="text" id="job_db_path"
+                                    class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                    placeholder="/path/to/job_db.json">
+                                <p class="text-xs text-gray-500 mt-1">Path to job database file</p>
+                            </div>
+                        </div>
+
+                        <div class="border-t pt-6">
+                            <h3 class="text-lg font-medium mb-4">SLURM Configuration</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700">SLURM Partition</label>
+                                    <input type="text" id="slurm_partition"
+                                        class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                        placeholder="gpu-a100-dev">
+                                    <p class="text-xs text-gray-500 mt-1">SLURM partition name</p>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700">SLURM Account</label>
+                                    <input type="text" id="slurm_account"
+                                        class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                        placeholder="CCR24036">
+                                    <p class="text-xs text-gray-500 mt-1">SLURM account name</p>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700">Wall Time Limit</label>
+                                    <input type="text" id="slurm_wall_time"
+                                        class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                        placeholder="1:00:00">
+                                    <p class="text-xs text-gray-500 mt-1">SLURM wall time limit (hh:mm:ss)</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-end space-x-4">
+                            <button type="button" onclick="loadPathConfig()"
+                                class="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50">
+                                Cancel
+                            </button>
+                            <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                                Save Configuration
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
         </main>
     </div>
 
     <script src="app.js"></script>
 </body>
-</html> 
+
+</html>

@@ -5,28 +5,30 @@ import os
 import uuid
 from typing import Dict, Any, Optional
 from pathlib import Path
-from .schemas import EvalRequest, JobStatus
+from .schemas import EvalRequest, JobStatus, PathConfig
 from .enums import Backend
+from .path_manager import path_manager
 import json
 
 # Global job database
 job_db: dict[str, dict] = {}
-JOB_DB_PATH = "/work/10757/manasp123/qwen-eval-ui/backend/job_db.json"
 
 def save_job_db():
+    config = path_manager.get_config()
     serializable_db = {}
     for jid, info in job_db.items():
         d = info.copy()
         d.pop("proc", None)
         d.pop("cli", None)
         serializable_db[jid] = d
-    with open(JOB_DB_PATH, "w") as f:
+    with open(config.job_db_path, "w") as f:
         json.dump(serializable_db, f)
 
 def load_job_db():
     global job_db
+    config = path_manager.get_config()
     try:
-        with open(JOB_DB_PATH, "r") as f:
+        with open(config.job_db_path, "r") as f:
             job_db = json.load(f)
     except Exception:
         job_db = {}
@@ -34,16 +36,15 @@ def load_job_db():
 # Load job_db on startup
 load_job_db()
 
-LOGS_DIR = "/home1/10757/manasp123/qwen-eval-ui/logs"
-COUNTER_FILE = os.path.join(LOGS_DIR, "job_counter.txt")
-
 def get_next_local_job_id():
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    if not os.path.exists(COUNTER_FILE):
-        with open(COUNTER_FILE, 'w') as f:
+    config = path_manager.get_config()
+    os.makedirs(config.logs_dir, exist_ok=True)
+    counter_file = os.path.join(config.logs_dir, "job_counter.txt")
+    if not os.path.exists(counter_file):
+        with open(counter_file, 'w') as f:
             f.write('1')
         return 1
-    with open(COUNTER_FILE, 'r+') as f:
+    with open(counter_file, 'r+') as f:
         val = int(f.read().strip() or '1')
         f.seek(0)
         f.write(str(val + 1))
@@ -52,18 +53,23 @@ def get_next_local_job_id():
 
 class MathEvalRunner:
     def __init__(self):
-        self.evaluation_dir = Path(__file__).parent.parent.parent / "evaluation"
-        self.scripts_dir = Path("/work/10757/manasp123/qwen-eval-ui/backend/scripts")
-        self.scripts_dir.mkdir(exist_ok=True)
+        self.config = path_manager.get_config()
+        self.evaluation_dir = Path(self.config.evaluation_dir)
+        self.scripts_dir = Path(self.config.scripts_dir)
+        # Create scripts directory and its parent directories if they don't exist
+        self.scripts_dir.mkdir(parents=True, exist_ok=True)
         
     def _build_cli_args(self, req: EvalRequest) -> list[str]:
         """Build command line arguments for math_eval.py"""
+        # Use path config from request if provided, otherwise use default
+        path_config = req.path_config if req.path_config else self.config
+        
         cli = [
-            "/work/10757/manasp123/ls6/miniconda3/envs/qwen-eval/bin/python", "-u", str(self.evaluation_dir / "math_eval.py"),
+            path_config.python_path, "-u", str(self.evaluation_dir / "math_eval.py"),
             "--model_name_or_path", req.model,
             "--data_names", req.dataset,
-            # Use absolute output_dir in /work
-            "--output_dir", f"/work/10757/manasp123/qwen-eval-ui/output/{req.model.split('/')[-1]}",
+            # Use configurable output_dir
+            "--output_dir", f"{path_config.output_dir}/{req.model.split('/')[-1]}",
             "--prompt_type", "tool-integrated",  # Default to TIR
             "--split", "test",
             "--num_test_sample", "-1",  # Full dataset
@@ -99,7 +105,7 @@ class MathEvalRunner:
         end = "-1"
         model_name = req.model.split("/")[-1]
         dataset = req.dataset.replace(",", "_")
-        result_file = f"/work/10757/manasp123/qwen-eval-ui/output/{model_name}/{dataset}/{split}_{prompt_type}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
+        result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
         return cli
     
     def launch_job(self, req: EvalRequest) -> str:
@@ -115,12 +121,16 @@ class MathEvalRunner:
         end = "-1"
         model_name = req.model.split("/")[-1]
         dataset = req.dataset.replace(",", "_")
-        result_file = f"/work/10757/manasp123/qwen-eval-ui/output/{model_name}/{dataset}/{split}_{prompt_type}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
+        
+        # Use path config from request if provided, otherwise use default
+        path_config = req.path_config if req.path_config else self.config
+        result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
+        
         cli = self._build_cli_args(req)
         if req.backend == Backend.local:
             local_job_id = get_next_local_job_id()
-            out_file = os.path.join(LOGS_DIR, f"qwen-math-{local_job_id}.out")
-            err_file = os.path.join(LOGS_DIR, f"qwen-math-{local_job_id}.err")
+            out_file = os.path.join(path_config.logs_dir, f"qwen-math-{local_job_id}.out")
+            err_file = os.path.join(path_config.logs_dir, f"qwen-math-{local_job_id}.err")
             proc = subprocess.Popen(
                 cli, 
                 stdout=open(out_file, 'w'),
@@ -144,8 +154,8 @@ class MathEvalRunner:
         else:
             script_path = self.scripts_dir / f"run_{uuid_jid}.sh"
             sbatch_path = self.scripts_dir / f"job_{uuid_jid}.sbatch"
-            out_file_pattern = os.path.join(LOGS_DIR, "qwen-math-%j.out")
-            err_file_pattern = os.path.join(LOGS_DIR, "qwen-math-%j.err")
+            out_file_pattern = os.path.join(path_config.logs_dir, "qwen-math-%j.out")
+            err_file_pattern = os.path.join(path_config.logs_dir, "qwen-math-%j.err")
             script_content = f"""#!/bin/bash
 cd {self.evaluation_dir}
 {' '.join(cli)}
@@ -157,12 +167,12 @@ cd {self.evaluation_dir}
 #SBATCH -J qwen-math-{uuid_jid}   # Job name
 #SBATCH -o {out_file_pattern}      # Name of stdout output file (uses %j)
 #SBATCH -e {err_file_pattern}      # Name of stderr error file (uses %j)
-#SBATCH -p gpu-a100-dev              # Queue (partition) name
+#SBATCH -p {path_config.slurm_partition}              # Queue (partition) name
 #SBATCH -N 1                    # Total # of nodes
 #SBATCH -n 1                    # Total # of tasks (single process for all GPUs)
-#SBATCH -t 1:00:00              # Run time (hh:mm:ss)
+#SBATCH -t {path_config.slurm_wall_time}              # Run time (hh:mm:ss)
 #SBATCH --mail-type=all         # Send email at begin and end of job
-#SBATCH -A CCR24036             # Project/Allocation name
+#SBATCH -A {path_config.slurm_account}             # Project/Allocation name
 
 export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
 
@@ -178,8 +188,8 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     )
                     if result.returncode == 0:
                         slurm_jid = result.stdout.strip().split()[-1]
-                        out_file = os.path.join(LOGS_DIR, f"qwen-math-{slurm_jid}.out")
-                        err_file = os.path.join(LOGS_DIR, f"qwen-math-{slurm_jid}.err")
+                        out_file = os.path.join(path_config.logs_dir, f"qwen-math-{slurm_jid}.out")
+                        err_file = os.path.join(path_config.logs_dir, f"qwen-math-{slurm_jid}.err")
                         job_db[uuid_jid] = {
                             "status": JobStatus.QUEUED,
                             "request": req.dict(),
@@ -303,7 +313,8 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                         job_info["status"] = JobStatus.RUNNING
                     else:
                         # Job is no longer in queue, check if it completed successfully
-                        output_file = Path(job_info.get("out_file", f"/home1/10757/manasp123/qwen-eval-ui/logs/qwen-math-{job_info.get('slurm_jid','')}.out"))
+                        config = path_manager.get_config()
+                        output_file = Path(job_info.get("out_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.out"))
                         if output_file.exists():
                             job_info["status"] = JobStatus.DONE
                         else:

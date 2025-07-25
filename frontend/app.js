@@ -39,16 +39,16 @@ function showTab(tabName) {
     document.querySelectorAll('.tab-content').forEach(tab => {
         tab.classList.remove('active');
     });
-    
+
     // Remove active class from all tab buttons
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.classList.remove('bg-blue-600', 'text-white');
         btn.classList.add('text-gray-500', 'hover:text-gray-700');
     });
-    
+
     // Show selected tab
     document.getElementById(tabName).classList.add('active');
-    
+
     // Highlight selected tab button
     event.target.classList.remove('text-gray-500', 'hover:text-gray-700');
     event.target.classList.add('bg-blue-600', 'text-white');
@@ -64,6 +64,144 @@ function showTab(tabName) {
             clearInterval(jobListInterval);
             jobListInterval = null;
         }
+    }
+
+    // Load path config when settings tab is shown
+    if (tabName === 'settings') {
+        loadPathConfig();
+    }
+}
+
+// Path configuration functions
+async function loadPathConfig() {
+    try {
+        const response = await fetch(`${API_BASE}/config/paths`);
+        const data = await response.json();
+
+        // Populate form fields with current config
+        const config = data.current_config;
+        document.getElementById('workspace_dir').value = config.workspace_dir || '';
+        document.getElementById('evaluation_dir').value = config.evaluation_dir || '';
+        document.getElementById('backend_dir').value = config.backend_dir || '';
+        document.getElementById('python_path').value = config.python_path || '';
+        document.getElementById('conda_env_path').value = config.conda_env_path || '';
+        document.getElementById('output_dir').value = config.output_dir || '';
+        document.getElementById('logs_dir').value = config.logs_dir || '';
+        document.getElementById('scripts_dir').value = config.scripts_dir || '';
+        document.getElementById('job_db_path').value = config.job_db_path || '';
+        document.getElementById('slurm_partition').value = config.slurm_partition || '';
+        document.getElementById('slurm_account').value = config.slurm_account || '';
+        document.getElementById('slurm_wall_time').value = config.slurm_wall_time || '';
+
+        console.log('Path configuration loaded:', config);
+    } catch (error) {
+        console.error('Error loading path configuration:', error);
+        alert('Error loading path configuration: ' + error.message);
+    }
+}
+
+async function savePathConfig(event) {
+    event.preventDefault();
+
+    try {
+        const config = {
+            workspace_dir: document.getElementById('workspace_dir').value,
+            evaluation_dir: document.getElementById('evaluation_dir').value,
+            backend_dir: document.getElementById('backend_dir').value,
+            python_path: document.getElementById('python_path').value,
+            conda_env_path: document.getElementById('conda_env_path').value,
+            output_dir: document.getElementById('output_dir').value,
+            logs_dir: document.getElementById('logs_dir').value,
+            scripts_dir: document.getElementById('scripts_dir').value,
+            job_db_path: document.getElementById('job_db_path').value,
+            slurm_partition: document.getElementById('slurm_partition').value,
+            slurm_account: document.getElementById('slurm_account').value,
+            slurm_wall_time: document.getElementById('slurm_wall_time').value
+        };
+
+        const response = await fetch(`${API_BASE}/config/paths`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(config)
+        });
+
+        const data = await response.json();
+        if (response.ok) {
+            alert('Path configuration saved successfully!');
+            console.log('Path configuration saved:', data);
+        } else {
+            alert('Error saving path configuration: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (error) {
+        console.error('Error saving path configuration:', error);
+        alert('Error saving path configuration: ' + error.message);
+    }
+}
+
+async function validatePaths() {
+    try {
+        const response = await fetch(`${API_BASE}/config/paths/validate`);
+        const data = await response.json();
+
+        const resultDiv = document.getElementById('path-validation-result');
+        let html = '<div class="p-4 rounded-md ';
+
+        if (data.valid) {
+            html += 'bg-green-50 border border-green-200">';
+            html += '<h4 class="text-green-800 font-medium">✓ Path validation successful</h4>';
+        } else {
+            html += 'bg-red-50 border border-red-200">';
+            html += '<h4 class="text-red-800 font-medium">✗ Path validation failed</h4>';
+        }
+
+        if (data.errors && data.errors.length > 0) {
+            html += '<div class="mt-2"><h5 class="text-red-700 font-medium">Errors:</h5><ul class="list-disc list-inside text-red-600 text-sm">';
+            data.errors.forEach(error => {
+                html += `<li>${error}</li>`;
+            });
+            html += '</ul></div>';
+        }
+
+        if (data.warnings && data.warnings.length > 0) {
+            html += '<div class="mt-2"><h5 class="text-yellow-700 font-medium">Warnings:</h5><ul class="list-disc list-inside text-yellow-600 text-sm">';
+            data.warnings.forEach(warning => {
+                html += `<li>${warning}</li>`;
+            });
+            html += '</ul></div>';
+        }
+
+        html += '</div>';
+        resultDiv.innerHTML = html;
+
+    } catch (error) {
+        console.error('Error validating paths:', error);
+        alert('Error validating paths: ' + error.message);
+    }
+}
+
+async function resetPathConfig() {
+    if (!confirm('Are you sure you want to reset the path configuration to defaults? This will overwrite your current settings.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`${API_BASE}/config/paths/reset`, {
+            method: 'POST'
+        });
+
+        const data = await response.json();
+        if (response.ok) {
+            alert('Path configuration reset to defaults successfully!');
+            loadPathConfig(); // Reload the form with new defaults
+            console.log('Path configuration reset:', data);
+        } else {
+            alert('Error resetting path configuration: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (error) {
+        console.error('Error resetting path configuration:', error);
+        alert('Error resetting path configuration: ' + error.message);
     }
 }
 
@@ -86,7 +224,7 @@ function addModelConfig() {
         max_tokens: '2048',
         prompt: ''
     };
-    
+
     modelConfigs.push(config);
     renderModelConfigs();
 }
@@ -115,9 +253,9 @@ function calculateJobCount() {
         const n_samplings = config.n_sampling.split('\n').filter(n => n.trim());
         const ks = config.k.split('\n').filter(k => k.trim());
         const max_tokens = config.max_tokens.split('\n').filter(m => m.trim());
-        
-        const combinations = models.length * datasets.length * temperatures.length * 
-                           top_ps.length * seeds.length * n_samplings.length * ks.length * max_tokens.length;
+
+        const combinations = models.length * datasets.length * temperatures.length *
+            top_ps.length * seeds.length * n_samplings.length * ks.length * max_tokens.length;
         totalJobs += combinations;
     });
     return totalJobs;
@@ -135,7 +273,7 @@ function updateJobCount() {
 function renderModelConfigs() {
     const container = document.getElementById('model-configs');
     container.innerHTML = '';
-    
+
     modelConfigs.forEach(config => {
         const configDiv = document.createElement('div');
         configDiv.className = 'border border-gray-200 rounded-lg p-4 mb-4';
@@ -251,17 +389,17 @@ async function submitEvaluation() {
         alert('Please add at least one model configuration');
         return;
     }
-    
+
     const totalJobs = calculateJobCount();
     if (totalJobs > 100) {
         if (!confirm(`This will create ${totalJobs} jobs. Are you sure you want to continue?`)) {
             return;
         }
     }
-    
+
     try {
         const allJobs = [];
-        
+
         modelConfigs.forEach(config => {
             const models = config.customModel ? [config.customModel] : [config.model];
             const datasets = config.dataset.split('\n').filter(d => d.trim());
@@ -272,7 +410,7 @@ async function submitEvaluation() {
             const n_samplings = config.n_sampling.split('\n').filter(n => n.trim());
             const ks = config.k.split('\n').filter(k => k.trim());
             const max_tokens = config.max_tokens.split('\n').filter(m => m.trim());
-            
+
             // Generate all combinations
             models.forEach(model => {
                 datasets.forEach(dataset => {
@@ -310,9 +448,9 @@ async function submitEvaluation() {
                 });
             });
         });
-        
+
         // Submit all jobs
-        const promises = allJobs.map(jobData => 
+        const promises = allJobs.map(jobData =>
             fetch(`${API_BASE}/jobs`, {
                 method: 'POST',
                 headers: {
@@ -321,17 +459,17 @@ async function submitEvaluation() {
                 body: JSON.stringify(jobData)
             }).then(response => response.json())
         );
-        
+
         const results = await Promise.all(promises);
         console.log('Submitted jobs:', results);
-        
+
         // Show success message
         alert(`Successfully submitted ${results.length} evaluation job(s)!`);
-        
+
         // Switch to jobs tab to see the new jobs
         showTab('jobs');
         refreshJobs();
-        
+
     } catch (error) {
         console.error('Error submitting evaluation:', error);
         alert('Error submitting evaluation: ' + error.message);
@@ -442,23 +580,23 @@ function startMonitoring() {
         alert('Please enter a job ID');
         return;
     }
-    
+
     // Close existing WebSocket
     if (currentWebSocket) {
         currentWebSocket.close();
     }
-    
+
     const logOutput = document.getElementById('log-output');
     logOutput.innerHTML = 'Connecting...\n';
-    
+
     // Connect to WebSocket
     currentWebSocket = new WebSocket(`${WS_BASE}/stream/${jobId}`);
-    
-    currentWebSocket.onopen = function() {
+
+    currentWebSocket.onopen = function () {
         logOutput.innerHTML += 'Connected to job stream\n';
     };
-    
-    currentWebSocket.onmessage = function(event) {
+
+    currentWebSocket.onmessage = function (event) {
         try {
             const data = JSON.parse(event.data);
             if (data.out) {
@@ -485,18 +623,18 @@ function startMonitoring() {
             logOutput.scrollTop = logOutput.scrollHeight;
         }
     };
-    
-    currentWebSocket.onerror = function(error) {
+
+    currentWebSocket.onerror = function (error) {
         logOutput.innerHTML += 'WebSocket error: ' + error + '\n';
     };
-    
-    currentWebSocket.onclose = function() {
+
+    currentWebSocket.onclose = function () {
         logOutput.innerHTML += 'WebSocket connection closed\n';
     };
 }
 
 function escapeHtml(text) {
-    return text.replace(/[&<>"']/g, function(m) {
+    return text.replace(/[&<>"']/g, function (m) {
         switch (m) {
             case '&': return '&amp;';
             case '<': return '&lt;';
@@ -529,10 +667,10 @@ function showResultFile(resultFilePath) {
 }
 
 // Initialize
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function () {
     // Add initial model config
     addModelConfig();
-    
+
     // Load jobs on page load
     refreshJobs();
     // Add monitor controls container
@@ -545,4 +683,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (document.getElementById('jobs').classList.contains('active')) {
         jobListInterval = setInterval(refreshJobs, 5000);
     }
+
+    // Add form submit handler for path configuration
+    document.getElementById('path-config-form').addEventListener('submit', savePathConfig);
 }); 
