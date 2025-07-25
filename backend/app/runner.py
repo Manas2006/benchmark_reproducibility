@@ -70,7 +70,7 @@ class MathEvalRunner:
             "--data_names", req.dataset,
             # Use configurable output_dir
             "--output_dir", f"{path_config.output_dir}/{req.model.split('/')[-1]}",
-            "--prompt_type", "tool-integrated",  # Default to TIR
+            "--prompt", req.prompt,  # Use custom prompt template
             "--split", "test",
             "--num_test_sample", "-1",  # Full dataset
             "--seed", str(req.seed),
@@ -95,8 +95,7 @@ class MathEvalRunner:
             cli.extend(["--max_tokens_per_call", "2048"])
         # Compute result file path
         # This matches the math_eval.py output naming convention
-        # Example: test_tool-integrated_-1_seed42_t0.0_s0_e-1.jsonl
-        prompt_type = "tool-integrated"
+        # Example: test_custom_-1_seed42_t0.0_s0_e-1.jsonl
         split = "test"
         num_test_sample = "-1"
         seed = str(req.seed)
@@ -105,14 +104,13 @@ class MathEvalRunner:
         end = "-1"
         model_name = req.model.split("/")[-1]
         dataset = req.dataset.replace(",", "_")
-        result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
+        result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_custom_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
         return cli
     
     def launch_job(self, req: EvalRequest) -> str:
         """Launch a math evaluation job using math_eval.py"""
         uuid_jid = str(uuid.uuid4())
         # Always define result_file at the top
-        prompt_type = "tool-integrated"
         split = "test"
         num_test_sample = "-1"
         seed = str(req.seed)
@@ -124,7 +122,7 @@ class MathEvalRunner:
         
         # Use path config from request if provided, otherwise use default
         path_config = req.path_config if req.path_config else self.config
-        result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
+        result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_custom_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
         
         cli = self._build_cli_args(req)
         if req.backend == Backend.local:

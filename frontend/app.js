@@ -5,9 +5,9 @@ const WS_BASE = 'ws://localhost:8000';
 // Available options
 const AVAILABLE_MODELS = [
     'Qwen/Qwen2.5-Math-1.5B',
-    'Qwen/Qwen2.5-Math-3B',
     'Qwen/Qwen2.5-Math-7B',
-    'Qwen/Qwen2.5-Math-14B'
+    'Qwen/Qwen2.5-Math-14B',
+    'Qwen/Qwen2.5-Math-72B'
 ];
 
 const AVAILABLE_DATASETS = [
@@ -22,11 +22,7 @@ const EVAL_METHODS = [
     'rm@k'
 ];
 
-const BACKEND_OPTIONS = [
-    'local',
-    'bash',
-    'slurm'
-];
+const BACKEND_OPTIONS = ['local', 'slurm'];
 
 // Global state
 let modelConfigs = [];
@@ -222,7 +218,7 @@ function addModelConfig() {
         eval_method: EVAL_METHODS[0],
         k: '1',
         max_tokens: '2048',
-        prompt: ''
+        prompt: 'Solve this math problem step by step: {question}'
     };
 
     modelConfigs.push(config);
@@ -371,10 +367,13 @@ function renderModelConfigs() {
                 </div>
                 
                 <div class="md:col-span-2 lg:col-span-3">
-                    <label class="block text-sm font-medium text-gray-700">Prompt (Optional)</label>
+                    <label class="block text-sm font-medium text-gray-700">Custom Prompt Template (Required)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'prompt', this.value)" 
-                              class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
-                              rows="3" placeholder="Custom prompt template...">${config.prompt}</textarea>
+                              class="mt-1 block w-full border border-blue-300 rounded-md px-3 py-2 bg-blue-50" 
+                              rows="6" placeholder="Enter your custom prompt template here...">${config.prompt}</textarea>
+                    <p class="text-xs text-blue-600 mt-1 font-medium">
+                        ⚡ Use {question} to insert the math problem. Example: "Solve this math problem step by step: {question}"
+                    </p>
                 </div>
             </div>
         `;
@@ -421,9 +420,15 @@ async function submitEvaluation() {
                                     n_samplings.forEach(n_sampling => {
                                         ks.forEach(k => {
                                             max_tokens.forEach(max_token => {
+                                                // Validate that prompt is provided
+                                                if (!config.prompt || config.prompt.trim() === '') {
+                                                    throw new Error(`Prompt is required for model configuration ${config.id}`);
+                                                }
+                                                
                                                 const requestData = {
                                                     model: model,
                                                     dataset: dataset,
+                                                    prompt: config.prompt.trim(),
                                                     backend: config.backend,
                                                     temperature: parseFloat(temp),
                                                     top_p: parseFloat(top_p),
@@ -434,9 +439,6 @@ async function submitEvaluation() {
                                                     k: parseInt(k),
                                                     max_tokens: parseInt(max_token)
                                                 };
-                                                if (config.prompt) {
-                                                    requestData.prompt = config.prompt;
-                                                }
                                                 allJobs.push(requestData);
                                             });
                                         });
@@ -496,7 +498,7 @@ function renderJobList(jobs) {
         // Compute metrics file path
         let metricsFile = '';
         if (job.result_file) {
-            metricsFile = job.result_file.replace(/(\.jsonl|\.json)$/g, '_tool-integrated_metrics.json');
+            metricsFile = job.result_file.replace(/(\.jsonl|\.json)$/g, `_metrics.json`);
         }
         // Buttons for viewing results
         let resultButtonHtml = '';

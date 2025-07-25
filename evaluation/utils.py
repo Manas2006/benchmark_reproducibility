@@ -166,6 +166,12 @@ PROMPT_TEMPLATES = {
 
 
 def construct_prompt(example, data_name, args):
+    # Check if custom prompt is provided
+    if hasattr(args, 'prompt') and args.prompt:
+        # Use custom prompt directly - replace {question} with the actual question
+        return args.prompt.format(question=example["question"])
+    
+    # Otherwise use the original prompt_type logic
     if args.adapt_few_shot and data_name in [
         "gaokao2024_I",
         "gaokao2024_II",
