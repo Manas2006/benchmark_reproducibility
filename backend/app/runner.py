@@ -315,13 +315,34 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                         # Job is no longer in queue, check if it completed successfully
                         config = path_manager.get_config()
                         output_file = Path(job_info.get("out_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.out"))
-                        if output_file.exists():
+                        result_file = Path(job_info.get("result_file", ""))
+                        # Check if result file exists and is non-empty
+                        if result_file.exists() and result_file.stat().st_size > 0:
                             job_info["status"] = JobStatus.DONE
+                            job_info.pop("error", None)
+                        # Fallback: check if output file exists and has content
+                        elif output_file.exists() and output_file.stat().st_size > 0:
+                            job_info["status"] = JobStatus.DONE
+                            job_info.pop("error", None)
                         else:
                             job_info["status"] = JobStatus.ERROR
+                            job_info["error"] = f"Job completed but output/result files missing or empty"
                 else:
-                    job_info["status"] = JobStatus.ERROR
-                    job_info["error"] = f"Failed to check SLURM status: {result.stderr}"
+                    # Failed to check SLURM status
+                    config = path_manager.get_config()
+                    output_file = Path(job_info.get("out_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.out"))
+                    result_file = Path(job_info.get("result_file", ""))
+                    # If result file exists and is non-empty, mark as DONE
+                    if result_file.exists() and result_file.stat().st_size > 0:
+                        job_info["status"] = JobStatus.DONE
+                        job_info.pop("error", None)
+                    # Fallback: check if output file exists and has content
+                    elif output_file.exists() and output_file.stat().st_size > 0:
+                        job_info["status"] = JobStatus.DONE
+                        job_info.pop("error", None)
+                    else:
+                        job_info["status"] = JobStatus.ERROR
+                        job_info["error"] = f"Failed to check SLURM status: {result.stderr}"
             except Exception as e:
                 job_info["status"] = JobStatus.ERROR
                 job_info["error"] = f"Error checking SLURM status: {str(e)}"
