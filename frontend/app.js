@@ -498,7 +498,14 @@ function renderJobList(jobs) {
         // Compute metrics file path
         let metricsFile = '';
         if (job.result_file) {
-            metricsFile = job.result_file.replace(/(\.jsonl|\.json)$/g, `_metrics.json`);
+            // Handle both old format (with prompt_type in filename) and new format (custom)
+            if (job.result_file.includes('tool-integrated')) {
+                // Old format: test_tool-integrated_-1_seed42_t1.0_s0_e-1.jsonl -> test_tool-integrated_-1_seed42_t1.0_s0_e-1_tool-integrated_metrics.json
+                metricsFile = job.result_file.replace(/(\.jsonl|\.json)$/g, `_tool-integrated_metrics.json`);
+            } else {
+                // New format: test_custom_-1_seed42_t0.0_s0_e-1.jsonl -> test_custom_-1_seed42_t0.0_s0_e-1_metrics.json
+                metricsFile = job.result_file.replace(/(\.jsonl|\.json)$/g, `_metrics.json`);
+            }
         }
         // Buttons for viewing results
         let resultButtonHtml = '';
