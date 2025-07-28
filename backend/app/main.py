@@ -1,7 +1,11 @@
-from fastapi import FastAPI, BackgroundTasks, WebSocket
+from fastapi import FastAPI, BackgroundTasks, WebSocket, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 import json
 import asyncio
+import os
+from pathlib import Path
 
 from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse
 from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job
@@ -18,9 +22,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static files for frontend
+app.mount("/static", StaticFiles(directory="../frontend"), name="static")
+
 @app.get("/")
 async def root():
-    return {"message": "Qwen Math Evaluation API"}
+    """Serve the main frontend page"""
+    return FileResponse("../frontend/index.html")
 
 @app.get("/health")
 async def health_check():
@@ -162,14 +170,64 @@ async def stream(jid: str, ws: WebSocket):
         await ws.close()
     return
 
+@app.get("/file")
+async def serve_file(path: str):
+    """Serve a file from the filesystem"""
+    try:
+        # Decode the URL-encoded path
+        import urllib.parse
+        decoded_path = urllib.parse.unquote(path)
+        
+        # Convert to Path object for better handling
+        file_path = Path(decoded_path)
+        
+        # Security check: ensure the path is within allowed directories
+        allowed_dirs = [
+            Path("/home1/10757/manasp123/qwen-eval-ui/output"),
+            Path("/home1/10757/manasp123/qwen-eval-ui/logs"),
+        ]
+        
+        is_allowed = False
+        for allowed_dir in allowed_dirs:
+            try:
+                file_path.relative_to(allowed_dir)
+                is_allowed = True
+                break
+            except ValueError:
+                continue
+        
+        if not is_allowed:
+            raise HTTPException(status_code=403, detail="Access denied to this file path")
+        
+        # Check if file exists
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+        
+        # Check if it's actually a file
+        if not file_path.is_file():
+            raise HTTPException(status_code=400, detail=f"Path is not a file: {file_path}")
+        
+        # Return the file
+        return FileResponse(
+            path=str(file_path),
+            filename=file_path.name,
+            media_type='application/octet-stream'
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error serving file: {str(e)}")
+
 @app.get("/jobs")
 async def list_jobs():
     jobs = []
     try:
         for jid, info in job_db.items():
-            job_info = info.copy()
-            job_info.pop("proc", None)
-            job_info.pop("cli", None)
+            # Get real-time status for each job
+            job_info = get_job_status(jid)
+            if isinstance(job_info, dict):
+                job_info = job_info.copy()
+                job_info.pop("proc", None)
+                job_info.pop("cli", None)
             slurm_jid = job_info.get("slurm_jid")
             result_file = job_info.get("result_file")
             jobs.append({"job_id": jid, "slurm_jid": slurm_jid, **job_info, "result_file": result_file})

@@ -6,7 +6,8 @@ const WS_BASE = 'ws://localhost:8000';
 const AVAILABLE_MODELS = [
     'Qwen/Qwen2.5-Math-1.5B',
     'Qwen/Qwen2.5-Math-7B',
-    'Qwen/Qwen2.5-Math-14B'
+    'Qwen/Qwen2.5-Math-14B',
+    'Qwen/Qwen2.5-Math-72B'
 ];
 
 const AVAILABLE_DATASETS = [
@@ -21,11 +22,7 @@ const EVAL_METHODS = [
     'rm@k'
 ];
 
-const BACKEND_OPTIONS = [
-    'local',
-    'bash',
-    'slurm'
-];
+const BACKEND_OPTIONS = ['local', 'slurm'];
 
 // Global state
 let modelConfigs = [];
@@ -221,7 +218,7 @@ function addModelConfig() {
         eval_method: EVAL_METHODS[0],
         k: '1',
         max_tokens: '2048',
-        prompt: ''
+        prompt: 'Solve this math problem step by step: {question}'
     };
 
     modelConfigs.push(config);
@@ -370,10 +367,13 @@ function renderModelConfigs() {
                 </div>
                 
                 <div class="md:col-span-2 lg:col-span-3">
-                    <label class="block text-sm font-medium text-gray-700">Prompt (Optional)</label>
+                    <label class="block text-sm font-medium text-gray-700">Custom Prompt Template (Required)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'prompt', this.value)" 
-                              class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
-                              rows="3" placeholder="Custom prompt template...">${config.prompt}</textarea>
+                              class="mt-1 block w-full border border-blue-300 rounded-md px-3 py-2 bg-blue-50" 
+                              rows="6" placeholder="Enter your custom prompt template here...">${config.prompt}</textarea>
+                    <p class="text-xs text-blue-600 mt-1 font-medium">
+                        ⚡ Use {question} to insert the math problem. Example: "Solve this math problem step by step: {question}"
+                    </p>
                 </div>
             </div>
         `;
@@ -420,9 +420,15 @@ async function submitEvaluation() {
                                     n_samplings.forEach(n_sampling => {
                                         ks.forEach(k => {
                                             max_tokens.forEach(max_token => {
+                                                // Validate that prompt is provided
+                                                if (!config.prompt || config.prompt.trim() === '') {
+                                                    throw new Error(`Prompt is required for model configuration ${config.id}`);
+                                                }
+                                                
                                                 const requestData = {
                                                     model: model,
                                                     dataset: dataset,
+                                                    prompt: config.prompt.trim(),
                                                     backend: config.backend,
                                                     temperature: parseFloat(temp),
                                                     top_p: parseFloat(top_p),
@@ -433,9 +439,6 @@ async function submitEvaluation() {
                                                     k: parseInt(k),
                                                     max_tokens: parseInt(max_token)
                                                 };
-                                                if (config.prompt) {
-                                                    requestData.prompt = config.prompt;
-                                                }
                                                 allJobs.push(requestData);
                                             });
                                         });
@@ -484,7 +487,7 @@ function renderJobList(jobs) {
     }
     jobs.forEach(job => {
         const jobDiv = document.createElement('div');
-        jobDiv.className = 'border border-gray-200 rounded-lg p-4 mb-4';
+        jobDiv.className = 'border border-gray-200 rounded-lg p-4 mb-4 relative';
         // Always use UUID for job_id, but display SLURM job ID if present
         let jobIdDisplay = job.job_id;
         let slurmIdLine = '';
@@ -492,11 +495,41 @@ function renderJobList(jobs) {
             jobIdDisplay = job.slurm_jid;
             slurmIdLine = `<p class="text-xs text-gray-400">UUID: ${job.job_id}</p>`;
         }
+        // Compute metrics file path
+        let metricsFile = '';
+        if (job.result_file) {
+            // Handle both old format (with prompt_type in filename) and new format (custom)
+            if (job.result_file.includes('tool-integrated')) {
+                // Old format: test_tool-integrated_-1_seed42_t1.0_s0_e-1.jsonl -> test_tool-integrated_-1_seed42_t1.0_s0_e-1_tool-integrated_metrics.json
+                metricsFile = job.result_file.replace(/(\.jsonl|\.json)$/g, `_tool-integrated_metrics.json`);
+            } else {
+                // New format: test_custom_-1_seed42_t0.0_s0_e-1.jsonl -> test_custom_-1_seed42_t0.0_s0_e-1_metrics.json
+                metricsFile = job.result_file.replace(/(\.jsonl|\.json)$/g, `_metrics.json`);
+            }
+        }
+        // Buttons for viewing results
         let resultButtonHtml = '';
         if (job.status === 'DONE' && job.result_file) {
-            resultButtonHtml = `<button onclick="showResultFile('${job.result_file}')" class="ml-2 px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700">View Results</button>`;
+            resultButtonHtml = `
+                <div class="flex space-x-2 mt-4">
+                    <button onclick="showResultModal('${metricsFile}', 'Metrics')" class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">View Metrics Inline</button>
+                    <button onclick="showResultModal('${job.result_file}', 'Model Outputs')" class="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700">View Model Outputs Inline</button>
+                </div>
+            `;
+        }
+        // Delete button always at top right
+        const deleteButtonHtml = `
+            <button onclick="deleteJob('${job.job_id}')" title="Delete job" class="absolute top-2 right-2 px-2 py-1 text-red-600 hover:text-red-800 z-10">
+                <svg xmlns='http://www.w3.org/2000/svg' class='h-5 w-5' fill='none' viewBox='0 0 24 24' stroke='currentColor'><path stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M6 18L18 6M6 6l12 12'/></svg>
+            </button>
+        `;
+        // Monitor button only for non-completed jobs
+        let monitorButtonHtml = '';
+        if (job.status !== 'DONE' && job.status !== 'ERROR') {
+            monitorButtonHtml = `<button onclick="monitorJob('${job.job_id}')" class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">Monitor</button>`;
         }
         jobDiv.innerHTML = `
+            ${deleteButtonHtml}
             <div class="flex justify-between items-start">
                 <div>
                     <h3 class="font-medium">Job ID: ${jobIdDisplay}</h3>
@@ -505,16 +538,11 @@ function renderJobList(jobs) {
                     <p class="text-sm text-gray-600">Dataset: ${job.request?.dataset || 'N/A'}</p>
                     <p class="text-sm text-gray-600">Status: <span class="font-medium ${getStatusColor(job.status)}">${job.status}</span></p>
                 </div>
-                <div class="flex space-x-2">
-                    <button onclick="monitorJob('${job.job_id}')" class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
-                        Monitor
-                    </button>
-                    <button onclick="deleteJob('${job.job_id}')" title="Delete job" class="px-2 py-1 text-red-600 hover:text-red-800">
-                        <svg xmlns='http://www.w3.org/2000/svg' class='h-5 w-5' fill='none' viewBox='0 0 24 24' stroke='currentColor'><path stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M6 18L18 6M6 6l12 12'/></svg>
-                    </button>
-                    ${resultButtonHtml}
+                <div class="flex space-x-2 items-start">
+                    ${monitorButtonHtml}
                 </div>
             </div>
+            ${resultButtonHtml}
         `;
         jobsList.appendChild(jobDiv);
     });
@@ -656,13 +684,37 @@ async function refreshJobs() {
     }
 }
 
-function showResultFile(resultFilePath) {
-    // Try to open as a file URL (works if served by a static file server)
-    // Otherwise, just show the path in an alert
-    const url = `/file?path=${encodeURIComponent(resultFilePath)}`;
-    window.open(url, '_blank');
-    // If you want to just show the path:
-    // alert('Result file path: ' + resultFilePath);
+async function showResultModal(resultFilePath, title = 'Results') {
+    try {
+        const url = `http://localhost:8000/file?path=${encodeURIComponent(resultFilePath)}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        const content = await response.text();
+        // Create modal
+        const modal = document.createElement('div');
+        modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+        modal.innerHTML = `
+            <div class="bg-white rounded-lg p-6 max-w-4xl max-h-96 overflow-auto">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-semibold">${title}: ${resultFilePath.split('/').pop()}</h3>
+                    <button onclick="this.closest('.fixed').remove()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+                </div>
+                <pre class="text-sm bg-gray-100 p-4 rounded overflow-auto max-h-64">${escapeHtml(content)}</pre>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        // Close modal when clicking outside
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                modal.remove();
+            }
+        });
+    } catch (error) {
+        console.error('Error loading result file:', error);
+        alert('Error loading result file: ' + error.message);
+    }
 }
 
 // Initialize

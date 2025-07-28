@@ -35,7 +35,7 @@ class PathConfig(BaseModel):
 class EvalRequest(BaseModel):
     model: str = "Qwen/Qwen2.5-Math-1.5B"
     dataset: str = "gsm8k,math"
-    prompt: Optional[str] = None
+    prompt: str = Field(description="Custom prompt template to use for evaluation")
     temperature: confloat(ge=0, le=5) = 0.0
     top_p: confloat(gt=0, le=1) = 1.0
     top_k: conint(ge=0) = 0  # 0 = disabled
@@ -56,7 +56,7 @@ class EvalResponse(BaseModel):
 class EvalConfig(BaseModel):
     model: str
     dataset: str
-    prompt_type: str = "tool-integrated"
+    prompt: str
     temperature: float
     top_p: float
     n_sampling: int
