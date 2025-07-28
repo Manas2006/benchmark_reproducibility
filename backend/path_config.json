@@ -8,7 +8,7 @@
   "logs_dir": "/work/10757/cc123456/ls6/benchmark-reproducibility/mathevalUI/backend/backend/logs",
   "scripts_dir": "/work/10757/cc123456/ls6/benchmark-reproducibility/mathevalUI/backend/backend/scripts",
   "job_db_path": "/work/10757/cc123456/ls6/benchmark-reproducibility/mathevalUI/backend/backend/job_db.json",
-  "slurm_partition": "gpu-a100-dev",
+  "slurm_partition": "gpu-a100-small",
   "slurm_account": "CCR24036",
-  "slurm_wall_time": "1:00:00"
+  "slurm_wall_time": "01:00:00"
 }

@@ -5,7 +5,6 @@ const WS_BASE = 'ws://localhost:8000';
 // Available options
 const AVAILABLE_MODELS = [
     'Qwen/Qwen2.5-Math-1.5B',
-    'Qwen/Qwen2.5-Math-3B',
     'Qwen/Qwen2.5-Math-7B',
     'Qwen/Qwen2.5-Math-14B'
 ];
@@ -34,7 +33,7 @@ let currentWebSocket = null;
 let jobListInterval = null;
 
 // Tab management
-function showTab(tabName) {
+function showTab(tabName, event=null) {
     // Hide all tab contents
     document.querySelectorAll('.tab-content').forEach(tab => {
         tab.classList.remove('active');
