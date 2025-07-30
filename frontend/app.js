@@ -30,7 +30,7 @@ let currentWebSocket = null;
 let jobListInterval = null;
 
 // Tab management
-function showTab(tabName, event=null) {
+function showTab(tabName, event = null) {
     // Hide all tab contents
     document.querySelectorAll('.tab-content').forEach(tab => {
         tab.classList.remove('active');
@@ -46,8 +46,10 @@ function showTab(tabName, event=null) {
     document.getElementById(tabName).classList.add('active');
 
     // Highlight selected tab button
-    event.target.classList.remove('text-gray-500', 'hover:text-gray-700');
-    event.target.classList.add('bg-blue-600', 'text-white');
+    if (event && event.target) {
+        event.target.classList.remove('text-gray-500', 'hover:text-gray-700');
+        event.target.classList.add('bg-blue-600', 'text-white');
+    }
 
     // Start/stop job list auto-refresh
     if (tabName === 'jobs') {
@@ -384,6 +386,7 @@ function renderModelConfigs() {
 
 // API functions
 async function submitEvaluation() {
+    console.log('submitEvaluation called');
     if (modelConfigs.length === 0) {
         alert('Please add at least one model configuration');
         return;
@@ -424,7 +427,7 @@ async function submitEvaluation() {
                                                 if (!config.prompt || config.prompt.trim() === '') {
                                                     throw new Error(`Prompt is required for model configuration ${config.id}`);
                                                 }
-                                                
+
                                                 const requestData = {
                                                     model: model,
                                                     dataset: dataset,
@@ -474,6 +477,7 @@ async function submitEvaluation() {
 
     } catch (error) {
         console.error('Error submitting evaluation:', error);
+        console.error('Error stack:', error.stack);
         alert('Error submitting evaluation: ' + error.message);
     }
 }
@@ -495,25 +499,21 @@ function renderJobList(jobs) {
             jobIdDisplay = job.slurm_jid;
             slurmIdLine = `<p class="text-xs text-gray-400">UUID: ${job.job_id}</p>`;
         }
-        // Compute metrics file path
-        let metricsFile = '';
-        if (job.result_file) {
-            // Handle both old format (with prompt_type in filename) and new format (custom)
-            if (job.result_file.includes('tool-integrated')) {
-                // Old format: test_tool-integrated_-1_seed42_t1.0_s0_e-1.jsonl -> test_tool-integrated_-1_seed42_t1.0_s0_e-1_tool-integrated_metrics.json
-                metricsFile = job.result_file.replace(/(\.jsonl|\.json)$/g, `_tool-integrated_metrics.json`);
-            } else {
-                // New format: test_custom_-1_seed42_t0.0_s0_e-1.jsonl -> test_custom_-1_seed42_t0.0_s0_e-1_metrics.json
-                metricsFile = job.result_file.replace(/(\.jsonl|\.json)$/g, `_metrics.json`);
-            }
-        }
         // Buttons for viewing results
         let resultButtonHtml = '';
         if (job.status === 'DONE' && job.result_file) {
             resultButtonHtml = `
                 <div class="flex space-x-2 mt-4">
-                    <button onclick="showResultModal('${metricsFile}', 'Metrics')" class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">View Metrics Inline</button>
+                    <button onclick="showMetricsModal('${job.job_id}', 'Metrics')" class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">View Metrics Inline</button>
                     <button onclick="showResultModal('${job.result_file}', 'Model Outputs')" class="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700">View Model Outputs Inline</button>
+                </div>
+            `;
+        } else if (job.status !== 'DONE' && job.result_file) {
+            // Show disabled buttons for jobs that are not done but have result_file
+            resultButtonHtml = `
+                <div class="flex space-x-2 mt-4">
+                    <button disabled class="px-3 py-1 bg-gray-400 text-white text-sm rounded cursor-not-allowed" title="Results not available yet - job is ${job.status.toLowerCase()}">View Metrics Inline</button>
+                    <button disabled class="px-3 py-1 bg-gray-400 text-white text-sm rounded cursor-not-allowed" title="Results not available yet - job is ${job.status.toLowerCase()}">View Model Outputs Inline</button>
                 </div>
             `;
         }
@@ -684,12 +684,76 @@ async function refreshJobs() {
     }
 }
 
+async function showMetricsModal(jobId, title = 'Metrics') {
+    try {
+        const url = `http://localhost:8000/metrics/${jobId}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+            let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            if (response.status === 404) {
+                // Try to get more detailed error message from response
+                try {
+                    const errorData = await response.json();
+                    errorMessage = errorData.detail || errorMessage;
+                } catch (e) {
+                    // If we can't parse the error response, use the status text
+                    errorMessage = `Metrics file not found for job ${jobId}. The job may still be running or may have failed.`;
+                }
+            }
+            throw new Error(errorMessage);
+        }
+        const content = await response.text();
+        // Create modal
+        const modal = document.createElement('div');
+        modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+        modal.innerHTML = `
+            <div class="bg-white rounded-lg p-6 max-w-4xl max-h-96 overflow-auto">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-semibold">${title}: Job ${jobId}</h3>
+                    <button onclick="this.closest('.fixed').remove()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+                </div>
+                <pre class="text-sm bg-gray-100 p-4 rounded overflow-auto max-h-64">${escapeHtml(content)}</pre>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        // Close modal when clicking outside
+        modal.addEventListener('click', (e) => {
+            if (e && e.target === modal) {
+                modal.remove();
+            }
+        });
+    } catch (error) {
+        console.error('Error loading metrics file:', error);
+        // Show a more user-friendly error message
+        let userMessage = error.message;
+        if (error.message.includes('Metrics file not found') || error.message.includes('Job not found')) {
+            userMessage = 'The metrics file is not available yet. This could be because:\n\n' +
+                        '• The job is still running\n' +
+                        '• The job failed to complete\n' +
+                        '• The job was cancelled\n\n' +
+                        'Please check the job status and try again later.';
+        }
+        alert('Error loading metrics file:\n\n' + userMessage);
+    }
+}
+
 async function showResultModal(resultFilePath, title = 'Results') {
     try {
         const url = `http://localhost:8000/file?path=${encodeURIComponent(resultFilePath)}`;
         const response = await fetch(url);
         if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            if (response.status === 404) {
+                // Try to get more detailed error message from response
+                try {
+                    const errorData = await response.json();
+                    errorMessage = errorData.detail || errorMessage;
+                } catch (e) {
+                    // If we can't parse the error response, use the status text
+                    errorMessage = `File not found: ${resultFilePath.split('/').pop()}. The job may still be running or may have failed.`;
+                }
+            }
+            throw new Error(errorMessage);
         }
         const content = await response.text();
         // Create modal
@@ -707,13 +771,22 @@ async function showResultModal(resultFilePath, title = 'Results') {
         document.body.appendChild(modal);
         // Close modal when clicking outside
         modal.addEventListener('click', (e) => {
-            if (e.target === modal) {
+            if (e && e.target === modal) {
                 modal.remove();
             }
         });
     } catch (error) {
         console.error('Error loading result file:', error);
-        alert('Error loading result file: ' + error.message);
+        // Show a more user-friendly error message
+        let userMessage = error.message;
+        if (error.message.includes('File not found') || error.message.includes('Result file not found')) {
+            userMessage = 'The result file is not available yet. This could be because:\n\n' +
+                        '• The job is still running\n' +
+                        '• The job failed to complete\n' +
+                        '• The job was cancelled\n\n' +
+                        'Please check the job status and try again later.';
+        }
+        alert('Error loading result file:\n\n' + userMessage);
     }
 }
 

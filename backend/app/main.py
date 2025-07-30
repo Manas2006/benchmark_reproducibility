@@ -182,9 +182,11 @@ async def serve_file(path: str):
         file_path = Path(decoded_path)
         
         # Security check: ensure the path is within allowed directories
+        config = path_manager.get_config()
         allowed_dirs = [
-            Path("/home1/10757/manasp123/qwen-eval-ui/output"),
-            Path("/home1/10757/manasp123/qwen-eval-ui/logs"),
+            Path(config.output_dir),
+            Path(config.logs_dir),
+            Path(config.evaluation_dir),
         ]
         
         is_allowed = False
@@ -201,7 +203,14 @@ async def serve_file(path: str):
         
         # Check if file exists
         if not file_path.exists():
-            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+            # Check if this might be a job result file that hasn't been generated yet
+            if "test_" in file_path.name and file_path.suffix in [".jsonl", ".json"]:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"Result file not found: {file_path.name}. The job may still be running or may have failed."
+                )
+            else:
+                raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
         
         # Check if it's actually a file
         if not file_path.is_file():
@@ -214,8 +223,79 @@ async def serve_file(path: str):
             media_type='application/octet-stream'
         )
         
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error serving file: {str(e)}")
+
+@app.get("/metrics/{job_id}")
+async def get_metrics_file(job_id: str):
+    """Find and serve metrics file for a specific job"""
+    try:
+        if job_id not in job_db:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        job_info = job_db[job_id]
+        result_file = job_info.get("result_file")
+        
+        if not result_file:
+            raise HTTPException(status_code=404, detail="No result file found for this job")
+        
+        # Convert result file path to Path object
+        result_path = Path(result_file)
+        
+        # Security check
+        config = path_manager.get_config()
+        allowed_dirs = [Path(config.output_dir), Path(config.logs_dir), Path(config.evaluation_dir)]
+        
+        is_allowed = False
+        for allowed_dir in allowed_dirs:
+            try:
+                result_path.relative_to(allowed_dir)
+                is_allowed = True
+                break
+            except ValueError:
+                continue
+        
+        if not is_allowed:
+            raise HTTPException(status_code=403, detail="Access denied to this file path")
+        
+        # Try different patterns for metrics file
+        base_name = result_path.stem  # Remove extension
+        prompt_type = job_info.get("request", {}).get("prompt_type", "cot")
+        
+        possible_metrics_files = [
+            result_path.parent / f"{base_name}_{prompt_type}_metrics.json",
+            result_path.parent / f"{base_name}_metrics.json",
+            result_path.parent / f"{result_path.stem}_{prompt_type}_metrics.json",
+            result_path.parent / f"{result_path.stem}_metrics.json"
+        ]
+        
+        # Find the first existing metrics file
+        metrics_file = None
+        for possible_file in possible_metrics_files:
+            if possible_file.exists():
+                metrics_file = possible_file
+                break
+        
+        if not metrics_file:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Metrics file not found for job {job_id}. The job may still be running or may have failed."
+            )
+        
+        # Return the metrics file
+        return FileResponse(
+            path=str(metrics_file),
+            filename=metrics_file.name,
+            media_type='application/json'
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error finding metrics file: {str(e)}")
 
 @app.get("/jobs")
 async def list_jobs():

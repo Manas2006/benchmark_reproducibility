@@ -41,6 +41,8 @@ def parse_args():
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--use_safetensors", action="store_true")
     parser.add_argument("--num_shots", type=int, default=0)
+    parser.add_argument("--top_k", type=int, default=0)
+    parser.add_argument("--job_id", type=str, help="Job ID to include in output filename")
     parser.add_argument(
         "--apply_chat_template",
         action="store_true",
@@ -78,13 +80,27 @@ def prepare_data(data_name, args):
     # get out_file name
     dt_string = datetime.now().strftime("%m-%d_%H-%M")
     model_name = "/".join(args.model_name_or_path.split("/")[-2:])
-    # Use 'custom' for file naming when custom prompt is provided
-    prompt_type_for_file = "custom" if hasattr(args, 'prompt') and args.prompt else args.prompt_type
+    # Use consistent naming logic with runner.py
+    if hasattr(args, 'prompt') and args.prompt and args.prompt_type:
+        prompt_type_for_file = f"{args.prompt_type}_custom"
+    elif hasattr(args, 'prompt') and args.prompt:
+        prompt_type_for_file = "custom"
+    elif args.prompt_type:
+        prompt_type_for_file = args.prompt_type
+    else:
+        prompt_type_for_file = "cot"
+    
     out_file_prefix = f"{args.split}_{prompt_type_for_file}_{args.num_test_sample}_seed{args.seed}_t{args.temperature}"
     output_dir = args.output_dir
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
-    out_file = f"{output_dir}/{data_name}/{out_file_prefix}_s{args.start}_e{args.end}.jsonl"
+    
+    # Add job_id to filename if provided
+    if hasattr(args, 'job_id') and args.job_id:
+        out_file = f"{output_dir}/{data_name}/{out_file_prefix}_s{args.start}_e{args.end}_{args.job_id}.jsonl"
+    else:
+        out_file = f"{output_dir}/{data_name}/{out_file_prefix}_s{args.start}_e{args.end}.jsonl"
+    
     os.makedirs(f"{output_dir}/{data_name}", exist_ok=True)
 
     # load all processed samples
@@ -110,7 +126,8 @@ def prepare_data(data_name, args):
 
 def setup(args):
     # load model
-    available_gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
+    available_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")
+    ##available_gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
     if args.use_vllm:
         llm = LLM(
             model=args.model_name_or_path,
@@ -266,6 +283,7 @@ def main(llm, tokenizer, data_name, args):
                 SamplingParams(
                     temperature=args.temperature,
                     top_p=args.top_p,
+                    top_k=args.top_k,
                     max_tokens=args.max_tokens_per_call,
                     n=1,
                     stop=stop_words,
@@ -299,6 +317,9 @@ def main(llm, tokenizer, data_name, args):
         for (i, query), output in zip(current_prompts, outputs):
             output = output.rstrip()
             query += output
+            # Check if using custom prompt (disable code execution for custom prompts)
+            using_custom_prompt = hasattr(args, 'prompt') and args.prompt
+            
             if args.prompt_type == "pal":
                 remain_prompts.append((i, query))
                 if "```python" in output:
@@ -306,15 +327,18 @@ def main(llm, tokenizer, data_name, args):
                 remain_codes.append(output)
             elif args.prompt_type == "cot":
                 end_prompts.append((i, query))
-            elif "boxed" not in output and output.endswith("```"):
+            elif not using_custom_prompt and "boxed" not in output and output.endswith("```"):
+                # Only extract and execute code if not using custom prompt
                 program = extract_program(query)
                 remain_prompts.append((i, query))
                 remain_codes.append(program)
             else:
                 end_prompts.append((i, query))
 
-        # execute the remain prompts
-        remain_results = executor.batch_apply(remain_codes)
+        # execute the remain prompts (only if not using custom prompt)
+        using_custom_prompt = hasattr(args, 'prompt') and args.prompt
+        if not using_custom_prompt and remain_codes:
+            remain_results = executor.batch_apply(remain_codes)
         for k in range(len(remain_prompts)):
             i, query = remain_prompts[k]
             res, report = remain_results[k]
@@ -346,9 +370,15 @@ def main(llm, tokenizer, data_name, args):
         codes.append(code)
 
     # extract preds
-    results = [
-        run_execute(executor, code, args.prompt_type, data_name) for code in codes
-    ]
+    using_custom_prompt = hasattr(args, 'prompt') and args.prompt
+    if using_custom_prompt:
+        # For custom prompts, just extract the text without code execution
+        results = [(code, "") for code in codes]
+    else:
+        # For standard prompts, execute code
+        results = [
+            run_execute(executor, code, args.prompt_type, data_name) for code in codes
+        ]
     time_use = time.time() - start_time
 
     # put results back to examples
@@ -358,20 +388,41 @@ def main(llm, tokenizer, data_name, args):
         result = results[i * args.n_sampling : (i + 1) * args.n_sampling]
         preds = [item[0] for item in result]
         reports = [item[1] for item in result]
-        for j in range(len(preds)):
-            if sample["gt"] in ["A", "B", "C", "D", "E"] and preds[j] not in [
-                "A",
-                "B",
-                "C",
-                "D",
-                "E",
-            ]:
-                preds[j] = choice_answer_clean(code[j])
-            elif is_multi_choice(sample["gt"]) and not is_multi_choice(preds[j]):
-                # remove any non-choice char
-                preds[j] = "".join(
-                    [c for c in preds[j] if c in ["A", "B", "C", "D", "E"]]
-                )
+        
+        if using_custom_prompt:
+            # For custom prompts, the code is just the model's response text
+            # Extract the final answer from the response
+            for j in range(len(preds)):
+                # Try to extract answer from the response
+                response_text = code[j]
+                # Look for patterns like "Therefore, the final answer is: \boxed{ANSWER}"
+                import re
+                boxed_match = re.search(r'\\boxed\{([^}]+)\}', response_text)
+                if boxed_match:
+                    preds[j] = boxed_match.group(1)
+                else:
+                    # If no boxed format, just use the last line or the whole response
+                    lines = response_text.strip().split('\n')
+                    if lines:
+                        preds[j] = lines[-1].strip()
+                    else:
+                        preds[j] = response_text.strip()
+        else:
+            # For standard prompts, use the original logic
+            for j in range(len(preds)):
+                if sample["gt"] in ["A", "B", "C", "D", "E"] and preds[j] not in [
+                    "A",
+                    "B",
+                    "C",
+                    "D",
+                    "E",
+                ]:
+                    preds[j] = choice_answer_clean(code[j])
+                elif is_multi_choice(sample["gt"]) and not is_multi_choice(preds[j]):
+                    # remove any non-choice char
+                    preds[j] = "".join(
+                        [c for c in preds[j] if c in ["A", "B", "C", "D", "E"]]
+                    )
 
         sample.pop("prompt")
         sample.update({"code": code, "pred": preds, "report": reports})
@@ -395,9 +446,13 @@ def main(llm, tokenizer, data_name, args):
         f"{int(time_use // 60)}:{int(time_use % 60):02d}"
     )
 
-    with open(
-        out_file.replace(".jsonl", f"_{args.prompt_type}_metrics.json"), "w"
-    ) as f:
+    # Create metrics filename with job_id if provided
+    if hasattr(args, 'job_id') and args.job_id:
+        metrics_file = out_file.replace(".jsonl", f"_{args.prompt_type}_metrics.json")
+    else:
+        metrics_file = out_file.replace(".jsonl", f"_{args.prompt_type}_metrics.json")
+    
+    with open(metrics_file, "w") as f:
         json.dump(result_json, f, indent=4)
     return result_json
 

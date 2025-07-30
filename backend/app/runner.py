@@ -3,6 +3,7 @@ import subprocess
 import sys
 import os
 import uuid
+import shlex
 from typing import Dict, Any, Optional
 from pathlib import Path
 from .schemas import EvalRequest, JobStatus, PathConfig
@@ -59,7 +60,7 @@ class MathEvalRunner:
         # Create scripts directory and its parent directories if they don't exist
         self.scripts_dir.mkdir(parents=True, exist_ok=True)
         
-    def _build_cli_args(self, req: EvalRequest) -> list[str]:
+    def _build_cli_args(self, req: EvalRequest, job_id: str = None) -> list[str]:
         """Build command line arguments for math_eval.py"""
         # Use path config from request if provided, otherwise use default
         path_config = req.path_config if req.path_config else self.config
@@ -70,7 +71,6 @@ class MathEvalRunner:
             "--data_names", req.dataset,
             # Use configurable output_dir
             "--output_dir", f"{path_config.output_dir}/{req.model.split('/')[-1]}",
-            "--prompt", req.prompt,  # Use custom prompt template
             "--split", "test",
             "--num_test_sample", "-1",  # Full dataset
             "--seed", str(req.seed),
@@ -84,18 +84,35 @@ class MathEvalRunner:
             "--save_outputs",
             "--overwrite"
         ]
+        
+        # Add prompt-related arguments
+        if req.prompt:
+            # Use custom prompt template
+            cli.extend(["--prompt", shlex.quote(req.prompt)])
+        if req.prompt_type:
+            # Use standard prompt type
+            cli.extend(["--prompt_type", req.prompt_type])
+        elif not req.prompt:
+            # Default to cot if neither prompt nor prompt_type is provided
+            cli.extend(["--prompt_type", "cot"])
         # Add optional parameters
         if req.top_k > 0:
             cli.extend(["--top_k", str(req.top_k)])
+        elif req.top_k == 0:
+            cli.extend(["--top_k", "-1"])  # Use -1 to disable top_k in vLLM
         # Add max_tokens if present
         max_tokens = getattr(req, 'max_tokens', None)
         if max_tokens is not None:
             cli.extend(["--max_tokens_per_call", str(max_tokens)])
         else:
             cli.extend(["--max_tokens_per_call", "2048"])
+        
+        # Add job_id if provided
+        if job_id:
+            cli.extend(["--job_id", job_id])
+        
         # Compute result file path
         # This matches the math_eval.py output naming convention
-        # Example: test_custom_-1_seed42_t0.0_s0_e-1.jsonl
         split = "test"
         num_test_sample = "-1"
         seed = str(req.seed)
@@ -104,27 +121,34 @@ class MathEvalRunner:
         end = "-1"
         model_name = req.model.split("/")[-1]
         dataset = req.dataset.replace(",", "_")
-        result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_custom_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
-        return cli
+        
+        # Determine prompt type for filename
+        if req.prompt and req.prompt_type:
+            prompt_type_for_file = f"{req.prompt_type}_custom"
+        elif req.prompt:
+            prompt_type_for_file = "custom"
+        elif req.prompt_type:
+            prompt_type_for_file = req.prompt_type
+        else:
+            prompt_type_for_file = "cot"
+        
+        # Add job_id to filename if provided to avoid overwrites
+        if job_id:
+            result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}_{job_id}.jsonl"
+        else:
+            result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
+        
+        return cli, result_file
     
     def launch_job(self, req: EvalRequest) -> str:
         """Launch a math evaluation job using math_eval.py"""
         uuid_jid = str(uuid.uuid4())
-        # Always define result_file at the top
-        split = "test"
-        num_test_sample = "-1"
-        seed = str(req.seed)
-        temperature = str(req.temperature)
-        start = "0"
-        end = "-1"
-        model_name = req.model.split("/")[-1]
-        dataset = req.dataset.replace(",", "_")
         
         # Use path config from request if provided, otherwise use default
         path_config = req.path_config if req.path_config else self.config
-        result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_custom_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
         
-        cli = self._build_cli_args(req)
+        # Build CLI args with job_id to avoid overwrites
+        cli, result_file = self._build_cli_args(req, uuid_jid)
         if req.backend == Backend.local:
             local_job_id = get_next_local_job_id()
             out_file = os.path.join(path_config.logs_dir, f"qwen-math-{local_job_id}.out")
@@ -154,9 +178,25 @@ class MathEvalRunner:
             sbatch_path = self.scripts_dir / f"job_{uuid_jid}.sbatch"
             out_file_pattern = os.path.join(path_config.logs_dir, "qwen-math-%j.out")
             err_file_pattern = os.path.join(path_config.logs_dir, "qwen-math-%j.err")
+            # Properly escape the command for shell execution
+            escaped_cli = []
+            for arg in cli:
+                if arg == '--prompt':
+                    # Skip the --prompt flag, we'll handle it specially
+                    continue
+                elif arg == shlex.quote(req.prompt):
+                    # This is the prompt value, skip it
+                    continue
+                else:
+                    escaped_cli.append(shlex.quote(arg))
+            
+            # Add the prompt argument properly quoted
+            escaped_cli.append('--prompt')
+            escaped_cli.append(shlex.quote(req.prompt))
+            
             script_content = f"""#!/bin/bash
 cd {self.evaluation_dir}
-{' '.join(cli)}
+{' '.join(escaped_cli)}
 """
             script_path.write_text(script_content)
             script_path.chmod(0o755)
@@ -313,7 +353,18 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                         # Job is no longer in queue, check if it completed successfully
                         config = path_manager.get_config()
                         output_file = Path(job_info.get("out_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.out"))
+                        error_file = Path(job_info.get("err_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.err"))
                         result_file = Path(job_info.get("result_file", ""))
+                        
+                        # Check error file first for failure indicators
+                        if error_file.exists():
+                            with open(error_file, 'r') as f:
+                                error_content = f.read()
+                                if "Traceback" in error_content or "Error" in error_content or "Exception" in error_content:
+                                    job_info["status"] = JobStatus.ERROR
+                                    job_info["error"] = f"Job failed with errors. Check error log for details."
+                                    return job_info
+                        
                         # Check if result file exists and is non-empty
                         if result_file.exists() and result_file.stat().st_size > 0:
                             job_info["status"] = JobStatus.DONE
@@ -329,7 +380,18 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     # Failed to check SLURM status
                     config = path_manager.get_config()
                     output_file = Path(job_info.get("out_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.out"))
+                    error_file = Path(job_info.get("err_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.err"))
                     result_file = Path(job_info.get("result_file", ""))
+                    
+                    # Check error file first for failure indicators
+                    if error_file.exists():
+                        with open(error_file, 'r') as f:
+                            error_content = f.read()
+                            if "Traceback" in error_content or "Error" in error_content or "Exception" in error_content:
+                                job_info["status"] = JobStatus.ERROR
+                                job_info["error"] = f"Job failed with errors. Check error log for details."
+                                return job_info
+                    
                     # If result file exists and is non-empty, mark as DONE
                     if result_file.exists() and result_file.stat().st_size > 0:
                         job_info["status"] = JobStatus.DONE

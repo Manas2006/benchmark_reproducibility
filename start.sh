@@ -11,7 +11,6 @@ fi
 # Start backend
 echo "📡 Starting backend server on http://localhost:8000..."
 cd backend
-source /work/10757/manasp123/ls6/miniconda3/bin/activate qwen-eval
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 &
 BACKEND_PID=$!
 cd ..
