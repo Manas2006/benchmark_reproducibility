@@ -220,7 +220,8 @@ function addModelConfig() {
         eval_method: EVAL_METHODS[0],
         k: '1',
         max_tokens: '2048',
-        prompt: 'Solve this math problem step by step: {question}'
+        prompt: 'Solve this math problem step by step: {question}',
+        prompt_type: ''
     };
 
     modelConfigs.push(config);
@@ -368,6 +369,21 @@ function renderModelConfigs() {
                               rows="3" placeholder="2048\n4096">${config.max_tokens}</textarea>
                 </div>
                 
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Prompt Type (Optional)</label>
+                    <select onchange="updateModelConfig(${config.id}, 'prompt_type', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                        <option value="" ${!config.prompt_type || config.prompt_type === '' ? 'selected' : ''}>No Standard Prompt</option>
+                        <option value="tool-integrated" ${config.prompt_type === 'tool-integrated' ? 'selected' : ''}>Tool Integrated</option>
+                        <option value="cot" ${config.prompt_type === 'cot' ? 'selected' : ''}>Chain of Thought (CoT)</option>
+                        <option value="pal" ${config.prompt_type === 'pal' ? 'selected' : ''}>Program-aided Language (PAL)</option>
+                        <option value="qwen25-math-cot" ${config.prompt_type === 'qwen25-math-cot' ? 'selected' : ''}>Qwen2.5 Math CoT</option>
+                        <option value="direct" ${config.prompt_type === 'direct' ? 'selected' : ''}>Direct</option>
+                        <option value="self-instruct" ${config.prompt_type === 'self-instruct' ? 'selected' : ''}>Self Instruct</option>
+                        <option value="wizard_zs" ${config.prompt_type === 'wizard_zs' ? 'selected' : ''}>Wizard Zero Shot</option>
+                        <option value="platypus_fs" ${config.prompt_type === 'platypus_fs' ? 'selected' : ''}>Platypus Few Shot</option>
+                    </select>
+                </div>
+                
                 <div class="md:col-span-2 lg:col-span-3">
                     <label class="block text-sm font-medium text-gray-700">Custom Prompt Template (Required)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'prompt', this.value)" 
@@ -432,6 +448,7 @@ async function submitEvaluation() {
                                                     model: model,
                                                     dataset: dataset,
                                                     prompt: config.prompt.trim(),
+                                                    prompt_type: config.prompt_type || '',
                                                     backend: config.backend,
                                                     temperature: parseFloat(temp),
                                                     top_p: parseFloat(top_p),
@@ -728,10 +745,10 @@ async function showMetricsModal(jobId, title = 'Metrics') {
         let userMessage = error.message;
         if (error.message.includes('Metrics file not found') || error.message.includes('Job not found')) {
             userMessage = 'The metrics file is not available yet. This could be because:\n\n' +
-                        '• The job is still running\n' +
-                        '• The job failed to complete\n' +
-                        '• The job was cancelled\n\n' +
-                        'Please check the job status and try again later.';
+                '• The job is still running\n' +
+                '• The job failed to complete\n' +
+                '• The job was cancelled\n\n' +
+                'Please check the job status and try again later.';
         }
         alert('Error loading metrics file:\n\n' + userMessage);
     }
@@ -781,10 +798,10 @@ async function showResultModal(resultFilePath, title = 'Results') {
         let userMessage = error.message;
         if (error.message.includes('File not found') || error.message.includes('Result file not found')) {
             userMessage = 'The result file is not available yet. This could be because:\n\n' +
-                        '• The job is still running\n' +
-                        '• The job failed to complete\n' +
-                        '• The job was cancelled\n\n' +
-                        'Please check the job status and try again later.';
+                '• The job is still running\n' +
+                '• The job failed to complete\n' +
+                '• The job was cancelled\n\n' +
+                'Please check the job status and try again later.';
         }
         alert('Error loading result file:\n\n' + userMessage);
     }

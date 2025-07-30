@@ -104,8 +104,14 @@ async def stream(jid: str, ws: WebSocket):
     await ws.accept()
     info = job_db.get(jid)
     if not info:
-        await ws.send_text(json.dumps({"error": f"Job {jid} not found (UUID or SLURM job number)"}))
-        await ws.close()
+        try:
+            await ws.send_text(json.dumps({"error": f"Job {jid} not found (UUID or SLURM job number)"}))
+        except Exception:
+            pass
+        try:
+            await ws.close()
+        except Exception:
+            pass
         return
 
     import os
@@ -129,12 +135,22 @@ async def stream(jid: str, ws: WebSocket):
     # Wait for the files to appear (up to 60 seconds)
     wait_time = 0
     while (not out_path or not os.path.exists(out_path) or not err_path or not os.path.exists(err_path)) and wait_time < 60:
-        await ws.send_text(json.dumps({"waiting": f"Waiting for job output files to appear... ({wait_time}s)"}))
+        try:
+            await ws.send_text(json.dumps({"waiting": f"Waiting for job output files to appear... ({wait_time}s)"}))
+        except Exception:
+            # WebSocket connection lost during waiting
+            return
         await asyncio.sleep(2)
         wait_time += 2
     if not out_path or not os.path.exists(out_path) or not err_path or not os.path.exists(err_path):
-        await ws.send_text(json.dumps({"error": f"Output or error file not found for this job after waiting. (out: {out_path}, err: {err_path})"}))
-        await ws.close()
+        try:
+            await ws.send_text(json.dumps({"error": f"Output or error file not found for this job after waiting. (out: {out_path}, err: {err_path})"}))
+        except Exception:
+            pass
+        try:
+            await ws.close()
+        except Exception:
+            pass
         return
     try:
         with open(out_path, "r") as outf, open(err_path, "r") as errf:
@@ -145,19 +161,31 @@ async def stream(jid: str, ws: WebSocket):
                 err_line = errf.readline()
                 sent = False
                 if out_line:
-                    await ws.send_text(json.dumps({"out": out_line.rstrip()}))
-                    sent = True
+                    try:
+                        await ws.send_text(json.dumps({"out": out_line.rstrip()}))
+                        sent = True
+                    except Exception:
+                        # WebSocket connection lost
+                        break
                 if err_line:
-                    await ws.send_text(json.dumps({"err": err_line.rstrip()}))
-                    sent = True
+                    try:
+                        await ws.send_text(json.dumps({"err": err_line.rstrip()}))
+                        sent = True
+                    except Exception:
+                        # WebSocket connection lost
+                        break
                 # Check if job is still running
                 status = info.get("status")
                 if status not in ["RUNNING", "QUEUED"]:
                     # Drain any remaining lines
-                    for line in outf:
-                        await ws.send_text(json.dumps({"out": line.rstrip()}))
-                    for line in errf:
-                        await ws.send_text(json.dumps({"err": line.rstrip()}))
+                    try:
+                        for line in outf:
+                            await ws.send_text(json.dumps({"out": line.rstrip()}))
+                        for line in errf:
+                            await ws.send_text(json.dumps({"err": line.rstrip()}))
+                    except Exception:
+                        # WebSocket connection lost during drain
+                        pass
                     break
                 if not sent:
                     await asyncio.sleep(1)
@@ -165,9 +193,14 @@ async def stream(jid: str, ws: WebSocket):
         try:
             await ws.send_text(json.dumps({"error": str(e)}))
         except Exception:
+            # WebSocket connection already closed
             pass
     finally:
-        await ws.close()
+        try:
+            await ws.close()
+        except Exception:
+            # WebSocket already closed
+            pass
     return
 
 @app.get("/file")
