@@ -29,8 +29,8 @@ class PathManager:
         # Try to detect conda environment
         conda_env = os.environ.get('CONDA_PREFIX', '/work/10757/cc123456/ls6/miniconda3/envs/mathevalUI')
         
-        # Default output directories
-        output_dir = str(Path(backend_dir) / "output")
+        # Default output directories - Fix path construction issues
+        output_dir = str(Path(workspace_dir) / "evaluation" / "outputs")
         logs_dir = str(Path(backend_dir) / "logs")
         scripts_dir = str(Path(backend_dir) / "scripts")
         job_db_path = str(Path(backend_dir) / "job_db.json")
@@ -62,6 +62,12 @@ class PathManager:
                 with open(self.config_file, 'r') as f:
                     config_data = json.load(f)
                 self._config = PathConfig(**config_data)
+                # Validate and fix scripts_dir path
+                if self._config.scripts_dir and "backend/backend" in self._config.scripts_dir:
+                    # Fix duplicate backend path
+                    fixed_scripts_dir = self._config.scripts_dir.replace("backend/backend", "backend")
+                    print(f"Fixing scripts_dir path: {self._config.scripts_dir} -> {fixed_scripts_dir}")
+                    self._config.scripts_dir = fixed_scripts_dir
             else:
                 self._config = self._get_default_config()
                 self._save_config()

@@ -147,6 +147,18 @@ class MathEvalRunner:
         # Use path config from request if provided, otherwise use default
         path_config = req.path_config if req.path_config else self.config
         
+        # Debug info: check scripts_dir path
+        print(f"Debug: scripts_dir = {self.scripts_dir}")
+        print(f"Debug: scripts_dir type = {type(self.scripts_dir)}")
+        print(f"Debug: scripts_dir exists = {Path(self.scripts_dir).exists()}")
+        
+        # Ensure scripts_dir exists
+        scripts_path = Path(self.scripts_dir)
+        if not scripts_path.exists():
+            print(f"Warning: scripts_dir does not exist: {scripts_path}")
+            scripts_path.mkdir(parents=True, exist_ok=True)
+            print(f"Created scripts_dir: {scripts_path}")
+        
         # Build CLI args with job_id to avoid overwrites
         cli, result_file = self._build_cli_args(req, uuid_jid)
         if req.backend == Backend.local:
@@ -176,6 +188,11 @@ class MathEvalRunner:
         else:
             script_path = self.scripts_dir / f"run_{uuid_jid}.sh"
             sbatch_path = self.scripts_dir / f"job_{uuid_jid}.sbatch"
+            
+            # Debug info: check script_path
+            print(f"Debug: script_path = {script_path}")
+            print(f"Debug: script_path parent exists = {script_path.parent.exists()}")
+            
             out_file_pattern = os.path.join(path_config.logs_dir, "qwen-math-%j.out")
             err_file_pattern = os.path.join(path_config.logs_dir, "qwen-math-%j.err")
             # Properly escape the command for shell execution
@@ -198,8 +215,16 @@ class MathEvalRunner:
 cd {self.evaluation_dir}
 {' '.join(escaped_cli)}
 """
-            script_path.write_text(script_content)
-            script_path.chmod(0o755)
+            try:
+                script_path.write_text(script_content)
+                script_path.chmod(0o755)
+                print(f"Successfully created script: {script_path}")
+            except Exception as e:
+                print(f"Error creating script {script_path}: {e}")
+                print(f"Script parent directory: {script_path.parent}")
+                print(f"Script parent exists: {script_path.parent.exists()}")
+                print(f"Script parent is_dir: {script_path.parent.is_dir()}")
+                raise
             if req.backend == Backend.slurm:
                 sbatch_content = f"""#!/bin/bash
 #SBATCH -J qwen-math-{uuid_jid}   # Job name
@@ -323,6 +348,7 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
             return {"status": "NOT_FOUND", "message": "Job not found"}
         
         job_info = job_db[jid]
+        original_status = job_info.get("status")
         
         # Check if process is still running (local jobs)
         if "proc" in job_info:
@@ -363,6 +389,9 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                                 if "Traceback" in error_content or "Error" in error_content or "Exception" in error_content:
                                     job_info["status"] = JobStatus.ERROR
                                     job_info["error"] = f"Job failed with errors. Check error log for details."
+                                    # Save updated status to file
+                                    if original_status != job_info["status"]:
+                                        save_job_db()
                                     return job_info
                         
                         # Check if result file exists and is non-empty
@@ -390,6 +419,9 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                             if "Traceback" in error_content or "Error" in error_content or "Exception" in error_content:
                                 job_info["status"] = JobStatus.ERROR
                                 job_info["error"] = f"Job failed with errors. Check error log for details."
+                                # Save updated status to file
+                                if original_status != job_info["status"]:
+                                    save_job_db()
                                 return job_info
                     
                     # If result file exists and is non-empty, mark as DONE
@@ -406,6 +438,10 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
             except Exception as e:
                 job_info["status"] = JobStatus.ERROR
                 job_info["error"] = f"Error checking SLURM status: {str(e)}"
+        
+        # Save updated status to file if it changed
+        if original_status != job_info.get("status"):
+            save_job_db()
         
         return job_info
     
@@ -428,6 +464,8 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     job_db[jid]["status"] = JobStatus.DONE
                 else:
                     job_db[jid]["status"] = JobStatus.ERROR
+                # Save updated status to file
+                save_job_db()
                 yield {"status": job_db[jid]["status"], "return_code": proc.returncode}
                 break
             
