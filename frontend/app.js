@@ -216,10 +216,10 @@ function addModelConfig() {
         top_p: '1.0',
         top_k: '0',
         n_sampling: '1',
+        max_tokens: '2048',
         seed: '42',
         eval_method: EVAL_METHODS[0],
         k: '1',
-        max_tokens: '2048',
         prompt: 'Solve this math problem step by step: {question}',
         prompt_type: ''
     };
@@ -248,13 +248,14 @@ function calculateJobCount() {
         const datasets = config.dataset.split('\n').filter(d => d.trim());
         const temperatures = config.temperature.split('\n').filter(t => t.trim());
         const top_ps = config.top_p.split('\n').filter(t => t.trim());
+        const top_ks = config.top_k.split('\n').filter(k => k.trim());
         const seeds = config.seed.split('\n').filter(s => s.trim());
         const n_samplings = config.n_sampling.split('\n').filter(n => n.trim());
         const ks = config.k.split('\n').filter(k => k.trim());
         const max_tokens = config.max_tokens.split('\n').filter(m => m.trim());
 
         const combinations = models.length * datasets.length * temperatures.length *
-            top_ps.length * seeds.length * n_samplings.length * ks.length * max_tokens.length;
+            top_ps.length * top_ks.length * seeds.length * n_samplings.length * ks.length * max_tokens.length;
         totalJobs += combinations;
     });
     return totalJobs;
@@ -733,26 +734,43 @@ async function showMetricsModal(jobId, title = 'Metrics') {
         }
         const content = await response.text();
 
+        // Try to parse metrics as JSON to extract configuration
+        let metricsData = null;
+        try {
+            metricsData = JSON.parse(content);
+        } catch (e) {
+            console.warn('Could not parse metrics as JSON:', e);
+        }
+
         // Create configuration display
         let configDisplay = '';
-        if (jobConfig && jobConfig.request) {
-            const req = jobConfig.request;
+
+        // Try to get configuration from metrics file first, then fallback to job config
+        let config = null;
+        if (metricsData && metricsData.job_configuration) {
+            config = metricsData.job_configuration;
+        } else if (jobConfig && jobConfig.request) {
+            config = jobConfig.request;
+        }
+
+        if (config) {
             configDisplay = `
                 <div class="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
                     <h4 class="font-semibold text-blue-800 mb-2">Job Configuration:</h4>
                     <div class="grid grid-cols-2 gap-2 text-sm">
-                        <div><span class="font-medium">Model:</span> ${req.model || 'N/A'}</div>
-                        <div><span class="font-medium">Dataset:</span> ${req.dataset || 'N/A'}</div>
-                        <div><span class="font-medium">Temperature:</span> ${req.temperature || 'N/A'}</div>
-                        <div><span class="font-medium">Top P:</span> ${req.top_p || 'N/A'}</div>
-                        <div><span class="font-medium">Top K:</span> ${req.top_k || 'N/A'}</div>
-                        <div><span class="font-medium">Random Seed:</span> ${req.seed || 'N/A'}</div>
-                        <div><span class="font-medium">N Sampling:</span> ${req.n_sampling || 'N/A'}</div>
-                        <div><span class="font-medium">Eval Method:</span> ${req.eval_method || 'N/A'}</div>
-                        ${req.prompt_type ? `<div><span class="font-medium">Prompt Type:</span> ${req.prompt_type}</div>` : ''}
-                        ${req.k ? `<div><span class="font-medium">K:</span> ${req.k}</div>` : ''}
+                        <div><span class="font-medium">Model:</span> ${config.model || 'N/A'}</div>
+                        <div><span class="font-medium">Dataset:</span> ${config.dataset || 'N/A'}</div>
+                        <div><span class="font-medium">Temperature:</span> ${config.temperature || 'N/A'}</div>
+                        <div><span class="font-medium">Top P:</span> ${config.top_p || 'N/A'}</div>
+                        <div><span class="font-medium">Top K:</span> ${config.top_k || 'N/A'}</div>
+                        <div><span class="font-medium">Random Seed:</span> ${config.seed || 'N/A'}</div>
+                        <div><span class="font-medium">N Sampling:</span> ${config.n_sampling || 'N/A'}</div>
+                        <div><span class="font-medium">Max Tokens:</span> ${config.max_tokens || 'N/A'}</div>
+                        <div><span class="font-medium">Eval Method:</span> ${config.eval_method || 'N/A'}</div>
+                        ${config.prompt_type ? `<div><span class="font-medium">Prompt Type:</span> ${config.prompt_type}</div>` : ''}
+                        ${config.k ? `<div><span class="font-medium">K:</span> ${config.k}</div>` : ''}
                     </div>
-                    ${req.prompt ? `<div class="mt-2"><span class="font-medium">Custom Prompt:</span><br><code class="text-xs bg-gray-100 p-1 rounded">${escapeHtml(req.prompt)}</code></div>` : ''}
+                    ${config.prompt ? `<div class="mt-2"><span class="font-medium">Custom Prompt:</span><br><code class="text-xs bg-gray-100 p-1 rounded">${escapeHtml(config.prompt)}</code></div>` : ''}
                 </div>
             `;
         }

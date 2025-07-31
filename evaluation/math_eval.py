@@ -446,6 +446,31 @@ def main(llm, tokenizer, data_name, args):
         f"{int(time_use // 60)}:{int(time_use % 60):02d}"
     )
 
+    # Add job configuration to metrics
+    job_config = {
+        "model": args.model_name_or_path,
+        "dataset": data_name,
+        "prompt_type": args.prompt_type,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "top_k": args.top_k,
+        "seed": args.seed,
+        "n_sampling": args.n_sampling,
+        "max_tokens": args.max_tokens_per_call,
+        "eval_method": "pass@k",  # Default value
+        "k": 1,  # Default value
+    }
+    
+    # Add custom prompt if provided
+    if hasattr(args, 'prompt') and args.prompt:
+        job_config["prompt"] = args.prompt
+    
+    # Add job_id if provided
+    if hasattr(args, 'job_id') and args.job_id:
+        job_config["job_id"] = args.job_id
+    
+    result_json["job_configuration"] = job_config
+
     # Create metrics filename with job_id if provided
     if hasattr(args, 'job_id') and args.job_id:
         metrics_file = out_file.replace(".jsonl", f"_{args.prompt_type}_metrics.json")

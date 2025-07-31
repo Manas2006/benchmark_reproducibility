@@ -41,6 +41,7 @@ class EvalRequest(BaseModel):
     top_p: confloat(gt=0, le=1) = 1.0
     top_k: conint(ge=0) = 0  # 0 = disabled
     n_sampling: conint(ge=1, le=32) = 1
+    max_tokens: conint(ge=1, le=8192) = 2048
     seed: conint(ge=0) = 42
     eval_method: str = "pass@k"  # enum later
     k: conint(ge=1, le=32) = 1
