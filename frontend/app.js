@@ -703,6 +703,18 @@ async function refreshJobs() {
 
 async function showMetricsModal(jobId, title = 'Metrics') {
     try {
+        // First, get job configuration information
+        let jobConfig = null;
+        try {
+            const jobResponse = await fetch(`${API_BASE}/jobs/${jobId}`);
+            if (jobResponse.ok) {
+                jobConfig = await jobResponse.json();
+            }
+        } catch (e) {
+            console.warn('Could not fetch job configuration:', e);
+        }
+
+        // Then get metrics
         const url = `http://localhost:8000/metrics/${jobId}`;
         const response = await fetch(url);
         if (!response.ok) {
@@ -720,16 +732,45 @@ async function showMetricsModal(jobId, title = 'Metrics') {
             throw new Error(errorMessage);
         }
         const content = await response.text();
+
+        // Create configuration display
+        let configDisplay = '';
+        if (jobConfig && jobConfig.request) {
+            const req = jobConfig.request;
+            configDisplay = `
+                <div class="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                    <h4 class="font-semibold text-blue-800 mb-2">Job Configuration:</h4>
+                    <div class="grid grid-cols-2 gap-2 text-sm">
+                        <div><span class="font-medium">Model:</span> ${req.model || 'N/A'}</div>
+                        <div><span class="font-medium">Dataset:</span> ${req.dataset || 'N/A'}</div>
+                        <div><span class="font-medium">Temperature:</span> ${req.temperature || 'N/A'}</div>
+                        <div><span class="font-medium">Top P:</span> ${req.top_p || 'N/A'}</div>
+                        <div><span class="font-medium">Top K:</span> ${req.top_k || 'N/A'}</div>
+                        <div><span class="font-medium">Random Seed:</span> ${req.seed || 'N/A'}</div>
+                        <div><span class="font-medium">N Sampling:</span> ${req.n_sampling || 'N/A'}</div>
+                        <div><span class="font-medium">Eval Method:</span> ${req.eval_method || 'N/A'}</div>
+                        ${req.prompt_type ? `<div><span class="font-medium">Prompt Type:</span> ${req.prompt_type}</div>` : ''}
+                        ${req.k ? `<div><span class="font-medium">K:</span> ${req.k}</div>` : ''}
+                    </div>
+                    ${req.prompt ? `<div class="mt-2"><span class="font-medium">Custom Prompt:</span><br><code class="text-xs bg-gray-100 p-1 rounded">${escapeHtml(req.prompt)}</code></div>` : ''}
+                </div>
+            `;
+        }
+
         // Create modal
         const modal = document.createElement('div');
         modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
         modal.innerHTML = `
-            <div class="bg-white rounded-lg p-6 max-w-4xl max-h-96 overflow-auto">
+            <div class="bg-white rounded-lg p-6 max-w-4xl max-h-[80vh] overflow-auto">
                 <div class="flex justify-between items-center mb-4">
                     <h3 class="text-lg font-semibold">${title}: Job ${jobId}</h3>
                     <button onclick="this.closest('.fixed').remove()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
                 </div>
-                <pre class="text-sm bg-gray-100 p-4 rounded overflow-auto max-h-64">${escapeHtml(content)}</pre>
+                ${configDisplay}
+                <div class="mt-4">
+                    <h4 class="font-semibold mb-2">Metrics Results:</h4>
+                    <pre class="text-sm bg-gray-100 p-4 rounded overflow-auto max-h-64">${escapeHtml(content)}</pre>
+                </div>
             </div>
         `;
         document.body.appendChild(modal);
