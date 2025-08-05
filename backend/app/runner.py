@@ -65,12 +65,19 @@ class MathEvalRunner:
         # Use path config from request if provided, otherwise use default
         path_config = req.path_config if req.path_config else self.config
         
+        # Extract repository ID from Hugging Face URL if needed
+        model_name = req.model
+        if model_name.startswith('https://huggingface.co/'):
+            model_name = model_name.replace('https://huggingface.co/', '')
+        elif model_name.startswith('http://huggingface.co/'):
+            model_name = model_name.replace('http://huggingface.co/', '')
+        
         cli = [
             path_config.python_path, "-u", str(self.evaluation_dir / "math_eval.py"),
-            "--model_name_or_path", req.model,
+            "--model_name_or_path", model_name,
             "--data_names", req.dataset,
-            # Use configurable output_dir
-            "--output_dir", f"{path_config.output_dir}/{req.model.split('/')[-1]}",
+                    # Use configurable output_dir
+        "--output_dir", f"{path_config.output_dir}/{model_name.split('/')[-1]}",
             "--split", "test",
             "--num_test_sample", "-1",  # Full dataset
             "--seed", str(req.seed),
@@ -86,14 +93,14 @@ class MathEvalRunner:
         ]
         
         # Add prompt-related arguments
-        if req.prompt:
-            # Use custom prompt template
+        if req.prompt and req.prompt.strip():
+            # Use custom prompt template - only add if not empty
             cli.extend(["--prompt", shlex.quote(req.prompt)])
         if req.prompt_type:
             # Use standard prompt type
             cli.extend(["--prompt_type", req.prompt_type])
-        elif not req.prompt:
-            # Default to cot if neither prompt nor prompt_type is provided
+        else:
+            # Default to cot if no prompt_type is provided
             cli.extend(["--prompt_type", "cot"])
         # Add optional parameters
         if req.top_k > 0:
@@ -119,13 +126,11 @@ class MathEvalRunner:
         temperature = str(req.temperature)
         start = "0"
         end = "-1"
-        model_name = req.model.split("/")[-1]
+        model_name = model_name.split("/")[-1]
         dataset = req.dataset.replace(",", "_")
         
         # Determine prompt type for filename
-        if req.prompt and req.prompt_type:
-            prompt_type_for_file = f"{req.prompt_type}_custom"
-        elif req.prompt:
+        if req.prompt and req.prompt.strip() and req.prompt_type == "custom":
             prompt_type_for_file = "custom"
         elif req.prompt_type:
             prompt_type_for_file = req.prompt_type
@@ -213,6 +218,14 @@ class MathEvalRunner:
             
             script_content = f"""#!/bin/bash
 cd {self.evaluation_dir}
+
+# Set Hugging Face cache to work directory
+export HF_HOME=/work/10757/manasp123/models
+export HF_DATASETS_CACHE=/work/10757/manasp123/models
+
+# Activate conda environment
+source {path_config.conda_env_path}/etc/profile.d/conda.sh
+conda activate qwen-eval
 {' '.join(escaped_cli)}
 """
             try:
@@ -236,6 +249,10 @@ cd {self.evaluation_dir}
 #SBATCH -t {path_config.slurm_wall_time}              # Run time (hh:mm:ss)
 #SBATCH --mail-type=all         # Send email at begin and end of job
 #SBATCH -A {path_config.slurm_account}             # Project/Allocation name
+
+# Set Hugging Face cache to work directory
+export HF_HOME=/work/10757/manasp123/models
+export HF_DATASETS_CACHE=/work/10757/manasp123/models
 
 export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
 

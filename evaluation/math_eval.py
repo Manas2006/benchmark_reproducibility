@@ -2,6 +2,7 @@ import random
 import os
 import argparse
 import time
+import json
 from vllm import LLM, SamplingParams
 from datetime import datetime
 from tqdm import tqdm
@@ -202,6 +203,8 @@ def main(llm, tokenizer, data_name, args):
 
         if idx == args.start:
             print(full_prompt)
+            # Output structured information for monitoring
+            print(f"MONITOR_PROMPT: {json.dumps({'idx': idx, 'question': example['question'], 'prompt': full_prompt})}")
 
         sample = {
             "idx": idx,
@@ -271,6 +274,7 @@ def main(llm, tokenizer, data_name, args):
     start_time = time.time()
     for epoch in range(max_func_call):
         print("-" * 20, "Epoch", epoch)
+        print(f"MONITOR_EPOCH: {json.dumps({'epoch': epoch, 'total_epochs': max_func_call, 'remaining_prompts': len(remain_prompts)})}")
         current_prompts = remain_prompts
         if len(current_prompts) == 0:
             break
@@ -317,6 +321,8 @@ def main(llm, tokenizer, data_name, args):
         for (i, query), output in zip(current_prompts, outputs):
             output = output.rstrip()
             query += output
+            # Output structured information for monitoring
+            print(f"MONITOR_RESPONSE: {json.dumps({'epoch': epoch, 'prompt_idx': i, 'response': output, 'full_query': query})}")
             # Check if using custom prompt (disable code execution for custom prompts)
             using_custom_prompt = hasattr(args, 'prompt') and args.prompt
             

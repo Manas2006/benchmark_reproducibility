@@ -162,7 +162,28 @@ async def stream(jid: str, ws: WebSocket):
                 sent = False
                 if out_line:
                     try:
-                        await ws.send_text(json.dumps({"out": out_line.rstrip()}))
+                        line = out_line.rstrip()
+                        # Check for structured monitoring information
+                        if line.startswith("MONITOR_PROMPT:"):
+                            try:
+                                monitor_data = json.loads(line[15:])  # Remove "MONITOR_PROMPT: "
+                                await ws.send_text(json.dumps({"monitor_prompt": monitor_data}))
+                            except:
+                                await ws.send_text(json.dumps({"out": line}))
+                        elif line.startswith("MONITOR_EPOCH:"):
+                            try:
+                                monitor_data = json.loads(line[14:])  # Remove "MONITOR_EPOCH: "
+                                await ws.send_text(json.dumps({"monitor_epoch": monitor_data}))
+                            except:
+                                await ws.send_text(json.dumps({"out": line}))
+                        elif line.startswith("MONITOR_RESPONSE:"):
+                            try:
+                                monitor_data = json.loads(line[17:])  # Remove "MONITOR_RESPONSE: "
+                                await ws.send_text(json.dumps({"monitor_response": monitor_data}))
+                            except:
+                                await ws.send_text(json.dumps({"out": line}))
+                        else:
+                            await ws.send_text(json.dumps({"out": line}))
                         sent = True
                     except Exception:
                         # WebSocket connection lost

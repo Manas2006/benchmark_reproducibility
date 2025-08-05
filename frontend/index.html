@@ -107,6 +107,11 @@
                             class="mt-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
                             Start Monitoring
                         </button>
+                        <button onclick="toggleViewMode()"
+                            class="mt-2 ml-2 px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700">
+                            Toggle View Mode
+                        </button>
+                        <span id="view-mode-indicator" class="ml-2 text-sm text-gray-600">Structured View</span>
                     </div>
                     <div class="log-container" id="log-output">
                         <!-- Logs will appear here -->
@@ -274,7 +279,7 @@
         </main>
     </div>
 
-    <script src="app.js?v=1.3"></script>
+            <script src="app.js?v=1.6"></script>
 </body>
 
 </html>

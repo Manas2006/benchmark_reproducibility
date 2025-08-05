@@ -7,7 +7,8 @@ const AVAILABLE_MODELS = [
     'Qwen/Qwen2.5-Math-1.5B',
     'Qwen/Qwen2.5-Math-7B',
     'Qwen/Qwen2.5-Math-14B',
-    'Qwen/Qwen2.5-Math-72B'
+    'Qwen/Qwen2.5-Math-72B',
+    'Link from Hugging Face'
 ];
 
 const AVAILABLE_DATASETS = [
@@ -28,6 +29,7 @@ const BACKEND_OPTIONS = ['local', 'slurm'];
 let modelConfigs = [];
 let currentWebSocket = null;
 let jobListInterval = null;
+let structuredViewMode = true; // true for structured view, false for raw view
 
 // Tab management
 function showTab(tabName, event = null) {
@@ -220,8 +222,8 @@ function addModelConfig() {
         seed: '42',
         eval_method: EVAL_METHODS[0],
         k: '1',
-        prompt: 'Solve this math problem step by step: {question}',
-        prompt_type: ''
+        prompt: '',
+        prompt_type: 'custom'
     };
 
     modelConfigs.push(config);
@@ -241,10 +243,54 @@ function updateModelConfig(configId, field, value) {
     }
 }
 
+function updatePromptField(configId) {
+    const config = modelConfigs.find(c => c.id === configId);
+    if (!config) return;
+    
+    const promptField = document.getElementById(`prompt-field-${configId}`);
+    if (!promptField) return;
+    
+    if (config.prompt_type === 'custom') {
+        // Show custom prompt field
+        promptField.style.display = 'block';
+        promptField.querySelector('label').textContent = 'Custom Prompt Template';
+        promptField.querySelector('textarea').placeholder = 'Enter your custom prompt template here... Use {question} to insert the math problem. Example: \'Solve this math problem step by step: {question}\'';
+    } else {
+        // Hide custom prompt field for standard prompt types
+        promptField.style.display = 'none';
+        // Clear the prompt field when switching to standard prompt types
+        const textarea = promptField.querySelector('textarea');
+        if (textarea) {
+            textarea.value = '';
+            updateModelConfig(configId, 'prompt', '');
+        }
+    }
+}
+
+function handleModelSelection(configId, selectedValue) {
+    const urlInput = document.getElementById(`url-input-${configId}`);
+    if (selectedValue === 'Link from Hugging Face') {
+        urlInput.classList.remove('hidden');
+    } else {
+        urlInput.classList.add('hidden');
+        // Clear the custom model field when switching away from Link option
+        updateModelConfig(configId, 'customModel', '');
+    }
+}
+
+function toggleViewMode() {
+    structuredViewMode = !structuredViewMode;
+    const indicator = document.getElementById('view-mode-indicator');
+    if (indicator) {
+        indicator.textContent = structuredViewMode ? 'Structured View' : 'Raw View';
+    }
+}
+
 function calculateJobCount() {
     let totalJobs = 0;
     modelConfigs.forEach(config => {
-        const models = config.customModel ? [config.customModel] : [config.model];
+        // Use customModel if it's set (for Link from Hugging Face), otherwise use model
+        const models = (config.model === 'Link from Hugging Face' && config.customModel) ? [config.customModel] : [config.model];
         const datasets = config.dataset.split('\n').filter(d => d.trim());
         const temperatures = config.temperature.split('\n').filter(t => t.trim());
         const top_ps = config.top_p.split('\n').filter(t => t.trim());
@@ -288,13 +334,16 @@ function renderModelConfigs() {
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Model (or Hugging Face URL)</label>
-                    <select onchange="updateModelConfig(${config.id}, 'model', this.value); updateModelConfig(${config.id}, 'customModel', '')" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                    <select onchange="updateModelConfig(${config.id}, 'model', this.value); handleModelSelection(${config.id}, this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
                         ${AVAILABLE_MODELS.map(model => `<option value="${model}" ${config.model === model ? 'selected' : ''}>${model}</option>`).join('')}
                     </select>
-                    <input type="text" onchange="updateModelConfig(${config.id}, 'customModel', this.value); updateModelConfig(${config.id}, 'model', '')" 
-                           placeholder="Or enter custom Hugging Face model URL..." 
-                           class="mt-2 block w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
-                           value="${config.customModel}">
+                    <div id="url-input-${config.id}" class="mt-2 ${config.model === 'Link from Hugging Face' ? '' : 'hidden'}">
+                        <input type="text" onchange="updateModelConfig(${config.id}, 'customModel', this.value)" 
+                               placeholder="Enter Hugging Face URL (e.g., https://huggingface.co/openai/gpt-oss-20b)" 
+                               class="block w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                               value="${config.customModel}">
+                        <p class="text-xs text-gray-500 mt-1">The model name will be automatically extracted from the URL.</p>
+                    </div>
                 </div>
                 
                 <div>
@@ -371,12 +420,12 @@ function renderModelConfigs() {
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Prompt Type (Optional)</label>
-                    <select onchange="updateModelConfig(${config.id}, 'prompt_type', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
-                        <option value="" ${!config.prompt_type || config.prompt_type === '' ? 'selected' : ''}>No Standard Prompt</option>
-                        <option value="tool-integrated" ${config.prompt_type === 'tool-integrated' ? 'selected' : ''}>Tool Integrated</option>
+                    <label class="block text-sm font-medium text-gray-700">Prompt Type</label>
+                    <select onchange="updateModelConfig(${config.id}, 'prompt_type', this.value); updatePromptField(${config.id})" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                        <option value="custom" ${config.prompt_type === 'custom' ? 'selected' : ''}>Custom Prompt</option>
                         <option value="cot" ${config.prompt_type === 'cot' ? 'selected' : ''}>Chain of Thought (CoT)</option>
                         <option value="pal" ${config.prompt_type === 'pal' ? 'selected' : ''}>Program-aided Language (PAL)</option>
+                        <option value="tool-integrated" ${config.prompt_type === 'tool-integrated' ? 'selected' : ''}>Tool Integrated</option>
                         <option value="qwen25-math-cot" ${config.prompt_type === 'qwen25-math-cot' ? 'selected' : ''}>Qwen2.5 Math CoT</option>
                         <option value="direct" ${config.prompt_type === 'direct' ? 'selected' : ''}>Direct</option>
                         <option value="self-instruct" ${config.prompt_type === 'self-instruct' ? 'selected' : ''}>Self Instruct</option>
@@ -385,18 +434,23 @@ function renderModelConfigs() {
                     </select>
                 </div>
                 
-                <div class="md:col-span-2 lg:col-span-3">
-                    <label class="block text-sm font-medium text-gray-700">Custom Prompt Template (Required)</label>
+                <div class="md:col-span-2 lg:col-span-3" id="prompt-field-${config.id}">
+                    <label class="block text-sm font-medium text-gray-700">Custom Prompt Template</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'prompt', this.value)" 
                               class="mt-1 block w-full border border-blue-300 rounded-md px-3 py-2 bg-blue-50" 
-                              rows="6" placeholder="Enter your custom prompt template here...">${config.prompt}</textarea>
+                              rows="6" placeholder="Enter your custom prompt template here... Use {question} to insert the math problem. Example: 'Solve this math problem step by step: {question}'">${config.prompt}</textarea>
                     <p class="text-xs text-blue-600 mt-1 font-medium">
                         ⚡ Use {question} to insert the math problem. Example: "Solve this math problem step by step: {question}"
+                    </p>
+                    <p class="text-xs text-gray-500 mt-1">
+                        💡 Standard prompt types (CoT, PAL, etc.) use pre-built templates with few-shot examples. Custom prompts give you full control over the prompt format.
                     </p>
                 </div>
             </div>
         `;
         container.appendChild(configDiv);
+        // Set initial state of prompt field
+        updatePromptField(config.id);
     });
     updateJobCount();
 }
@@ -420,7 +474,8 @@ async function submitEvaluation() {
         const allJobs = [];
 
         modelConfigs.forEach(config => {
-            const models = config.customModel ? [config.customModel] : [config.model];
+            // Use customModel if it's set (for Link from Hugging Face), otherwise use model
+            const models = (config.model === 'Link from Hugging Face' && config.customModel) ? [config.customModel] : [config.model];
             const datasets = config.dataset.split('\n').filter(d => d.trim());
             const temperatures = config.temperature.split('\n').filter(t => t.trim());
             const top_ps = config.top_p.split('\n').filter(t => t.trim());
@@ -440,16 +495,21 @@ async function submitEvaluation() {
                                     n_samplings.forEach(n_sampling => {
                                         ks.forEach(k => {
                                             max_tokens.forEach(max_token => {
-                                                // Validate that prompt is provided
-                                                if (!config.prompt || config.prompt.trim() === '') {
-                                                    throw new Error(`Prompt is required for model configuration ${config.id}`);
+                                                // Validate that prompt is provided for custom prompt type
+                                                if (config.prompt_type === 'custom' && (!config.prompt || config.prompt.trim() === '')) {
+                                                    throw new Error(`Custom prompt is required when 'Custom Prompt' is selected for model configuration ${config.id}`);
+                                                }
+                                                
+                                                // Validate that URL is provided for Link from Hugging Face
+                                                if (config.model === 'Link from Hugging Face' && (!config.customModel || config.customModel.trim() === '')) {
+                                                    throw new Error(`Hugging Face URL is required when 'Link from Hugging Face' is selected for model configuration ${config.id}`);
                                                 }
 
                                                 const requestData = {
                                                     model: model,
                                                     dataset: dataset,
-                                                    prompt: config.prompt.trim(),
-                                                    prompt_type: config.prompt_type || '',
+                                                    prompt: config.prompt_type === 'custom' ? config.prompt.trim() : '',
+                                                    prompt_type: config.prompt_type,
                                                     backend: config.backend,
                                                     temperature: parseFloat(temp),
                                                     top_p: parseFloat(top_p),
@@ -644,23 +704,67 @@ function startMonitoring() {
     currentWebSocket.onmessage = function (event) {
         try {
             const data = JSON.parse(event.data);
-            if (data.out) {
-                logOutput.innerHTML += `<span style='color: #00ff00;'>[OUT]</span> ${escapeHtml(data.out)}\n`;
-                logOutput.scrollTop = logOutput.scrollHeight;
-            } else if (data.err) {
-                logOutput.innerHTML += `<span style='color: #ff3333;'>[ERR]</span> ${escapeHtml(data.err)}\n`;
-                logOutput.scrollTop = logOutput.scrollHeight;
-            } else if (data.log) {
-                logOutput.innerHTML += data.log + '\n';
-                logOutput.scrollTop = logOutput.scrollHeight;
-            } else if (data.gpu) {
-                logOutput.innerHTML += `[GPU] Memory: ${Math.round(data.gpu.mem / 1024 / 1024)}MB, Utilization: ${data.gpu.util}%\n`;
-                logOutput.scrollTop = logOutput.scrollHeight;
-            } else if (data.error) {
-                logOutput.innerHTML += `<span style='color: #ff3333;'>[ERROR]</span> ${escapeHtml(data.error)}\n`;
-                logOutput.scrollTop = logOutput.scrollHeight;
-            } else if (data.status) {
-                logOutput.innerHTML += `[STATUS] Job changed to: ${data.status} (Return Code: ${data.return_code || 'N/A'})\n`;
+            if (structuredViewMode) {
+                // Structured view mode
+                if (data.monitor_prompt) {
+                    // Display prompt information in a structured way
+                    logOutput.innerHTML += `<div style='background: #1a1a1a; border-left: 4px solid #4CAF50; padding: 10px; margin: 10px 0;'>`;
+                    logOutput.innerHTML += `<span style='color: #4CAF50; font-weight: bold;'>📝 PROMPT (Sample #${data.monitor_prompt.idx})</span><br>`;
+                    logOutput.innerHTML += `<span style='color: #FFD700;'>Question:</span> ${escapeHtml(data.monitor_prompt.question)}<br>`;
+                    logOutput.innerHTML += `<span style='color: #FFD700;'>Prompt:</span><br><pre style='color: #87CEEB; white-space: pre-wrap; margin: 5px 0;'>${escapeHtml(data.monitor_prompt.prompt)}</pre>`;
+                    logOutput.innerHTML += `</div>`;
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                } else if (data.monitor_epoch) {
+                    // Display epoch information
+                    logOutput.innerHTML += `<div style='background: #1a1a1a; border-left: 4px solid #FF9800; padding: 10px; margin: 10px 0;'>`;
+                    logOutput.innerHTML += `<span style='color: #FF9800; font-weight: bold;'>🔄 EPOCH ${data.monitor_epoch.epoch + 1}/${data.monitor_epoch.total_epochs}</span><br>`;
+                    logOutput.innerHTML += `<span style='color: #FFD700;'>Remaining prompts:</span> ${data.monitor_epoch.remaining_prompts}`;
+                    logOutput.innerHTML += `</div>`;
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                } else if (data.monitor_response) {
+                    // Display model response
+                    logOutput.innerHTML += `<div style='background: #1a1a1a; border-left: 4px solid #2196F3; padding: 10px; margin: 10px 0;'>`;
+                    logOutput.innerHTML += `<span style='color: #2196F3; font-weight: bold;'>🤖 MODEL RESPONSE (Epoch ${data.monitor_response.epoch + 1}, Prompt #${data.monitor_response.prompt_idx})</span><br>`;
+                    logOutput.innerHTML += `<span style='color: #FFD700;'>Response:</span><br><pre style='color: #98FB98; white-space: pre-wrap; margin: 5px 0;'>${escapeHtml(data.monitor_response.response)}</pre>`;
+                    logOutput.innerHTML += `</div>`;
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                } else if (data.out) {
+                    logOutput.innerHTML += `<span style='color: #00ff00;'>[OUT]</span> ${escapeHtml(data.out)}\n`;
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                } else if (data.err) {
+                    logOutput.innerHTML += `<span style='color: #ff3333;'>[ERR]</span> ${escapeHtml(data.err)}\n`;
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                } else if (data.log) {
+                    logOutput.innerHTML += data.log + '\n';
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                } else if (data.gpu) {
+                    logOutput.innerHTML += `[GPU] Memory: ${Math.round(data.gpu.mem / 1024 / 1024)}MB, Utilization: ${data.gpu.util}%\n`;
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                } else if (data.error) {
+                    logOutput.innerHTML += `<span style='color: #ff3333;'>[ERROR]</span> ${escapeHtml(data.error)}\n`;
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                } else if (data.status) {
+                    logOutput.innerHTML += `[STATUS] Job changed to: ${data.status} (Return Code: ${data.return_code || 'N/A'})\n`;
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                }
+            } else {
+                // Raw view mode - show everything as plain text
+                if (data.out) {
+                    logOutput.innerHTML += `<span style='color: #00ff00;'>[OUT]</span> ${escapeHtml(data.out)}\n`;
+                } else if (data.err) {
+                    logOutput.innerHTML += `<span style='color: #ff3333;'>[ERR]</span> ${escapeHtml(data.err)}\n`;
+                } else if (data.log) {
+                    logOutput.innerHTML += data.log + '\n';
+                } else if (data.gpu) {
+                    logOutput.innerHTML += `[GPU] Memory: ${Math.round(data.gpu.mem / 1024 / 1024)}MB, Utilization: ${data.gpu.util}%\n`;
+                } else if (data.error) {
+                    logOutput.innerHTML += `<span style='color: #ff3333;'>[ERROR]</span> ${escapeHtml(data.error)}\n`;
+                } else if (data.status) {
+                    logOutput.innerHTML += `[STATUS] Job changed to: ${data.status} (Return Code: ${data.return_code || 'N/A'})\n`;
+                } else if (data.monitor_prompt || data.monitor_epoch || data.monitor_response) {
+                    // Show structured data as JSON in raw mode
+                    logOutput.innerHTML += `<span style='color: #FFD700;'>[MONITOR]</span> ${escapeHtml(JSON.stringify(data, null, 2))}\n`;
+                }
                 logOutput.scrollTop = logOutput.scrollHeight;
             }
         } catch (error) {

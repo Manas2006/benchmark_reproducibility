@@ -167,7 +167,7 @@ PROMPT_TEMPLATES = {
 
 def construct_prompt(example, data_name, args):
     # Check if custom prompt is provided
-    if hasattr(args, 'prompt') and args.prompt:
+    if hasattr(args, 'prompt') and args.prompt and args.prompt.strip():
         # Use custom prompt directly - replace {question} with the actual question
         return args.prompt.format(question=example["question"])
     
