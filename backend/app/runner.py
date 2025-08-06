@@ -2,6 +2,7 @@ import asyncio
 import subprocess
 import sys
 import os
+import time
 import uuid
 import shlex
 from typing import Dict, Any, Optional
@@ -223,6 +224,11 @@ cd {self.evaluation_dir}
 export HF_HOME=/work/10757/manasp123/models
 export HF_DATASETS_CACHE=/work/10757/manasp123/models
 
+# Fix MKL threading conflict
+export MKL_THREADING_LAYER=GNU
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
 # Activate conda environment
 source {path_config.conda_env_path}/etc/profile.d/conda.sh
 conda activate qwen-eval
@@ -253,6 +259,11 @@ conda activate qwen-eval
 # Set Hugging Face cache to work directory
 export HF_HOME=/work/10757/manasp123/models
 export HF_DATASETS_CACHE=/work/10757/manasp123/models
+
+# Fix MKL threading conflict
+export MKL_THREADING_LAYER=GNU
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
 
 export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
 
@@ -503,4 +514,87 @@ def cancel_job(jid: str) -> bool:
     return runner.cancel_job(jid)
 
 def delete_job(jid: str) -> bool:
-    return runner.delete_job(jid) 
+    return runner.delete_job(jid)
+
+def get_job_raw_data(job_id: str) -> dict:
+    """Extract raw answer data from job results for CoT analysis"""
+    from fastapi import HTTPException
+    import time
+    
+    if job_id not in job_db:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_info = job_db[job_id]
+    result_file = job_info.get("result_file")
+    
+    if not result_file:
+        raise HTTPException(status_code=404, detail="No result file found for this job")
+    
+    result_path = Path(result_file)
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="Result file not found on disk")
+    
+    # Check cache first
+    cached_data = get_cached_raw_data(job_id)
+    if cached_data:
+        return cached_data
+    
+    # Read and parse JSONL file
+    raw_data = []
+    try:
+        with open(result_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if line:  # Skip empty lines
+                    try:
+                        record = json.loads(line)
+                        raw_data.append({
+                            'idx': record.get('idx'),
+                            'question': record.get('question', ''),
+                            'answer': record.get('answer', ''),
+                            'gt': record.get('gt', ''),
+                            'gt_cot': record.get('gt_cot', ''),
+                            'code': record.get('code', []),
+                            'pred': record.get('pred', []),
+                            'score': record.get('score', [])
+                        })
+                    except json.JSONDecodeError as e:
+                        print(f"Warning: Skipping malformed JSON on line {line_num}: {e}")
+                        continue
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading result file: {str(e)}")
+    
+    # Cache the data
+    result = {
+        "job_id": job_id,
+        "total_samples": len(raw_data),
+        "data": raw_data,
+        "metadata": {
+            "result_file": str(result_path),
+            "file_size_bytes": result_path.stat().st_size,
+            "last_modified": result_path.stat().st_mtime
+        }
+    }
+    
+    cache_raw_data(job_id, result)
+    return result
+
+def get_cached_raw_data(job_id: str) -> Optional[dict]:
+    """Retrieve cached raw data if available and fresh"""
+    if job_id in job_db and 'cached_raw_data' in job_db[job_id]:
+        cached = job_db[job_id]['cached_raw_data']
+        # Cache valid for 1 hour
+        if time.time() - cached['timestamp'] < 3600:
+            return cached['data']
+    return None
+
+def cache_raw_data(job_id: str, raw_data: dict):
+    """Cache raw data in job database to avoid repeated file reads"""
+    import time
+    if job_id in job_db:
+        job_db[job_id]['cached_raw_data'] = {
+            'data': raw_data,
+            'timestamp': time.time()
+        }
+        # Note: We don't call save_job_db() here to avoid frequent disk writes
+        # Cache will be lost on server restart, which is acceptable 

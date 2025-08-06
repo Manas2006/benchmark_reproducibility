@@ -338,23 +338,9 @@ def main(llm, tokenizer, data_name, args):
                 cot_text = "\n".join(lines[:-1])
                 ans_text = lines[-1]
             
-            # Convert to structured data
+            # Convert to structured data (for monitoring only)
             cot_steps = [line.strip() for line in cot_text.split('\n') if line.strip()]
             final_answer = ans_text.strip()
-            
-            # Store CoT data for later serialization
-            if not hasattr(args, '_cot_data'):
-                args._cot_data = []
-            
-            args._cot_data.append({
-                'question': samples[i]['question'] if 'question' in samples[i] else samples[i].get('input', ''),
-                'model': args.model_name_or_path,
-                'cot_steps': cot_steps,
-                'final_answer': final_answer,
-                'correct_answer': samples[i].get('gt', ''),
-                'prompt_idx': i,
-                'epoch': epoch
-            })
             # Check if using custom prompt (disable code execution for custom prompts)
             using_custom_prompt = hasattr(args, 'prompt') and args.prompt
             
@@ -462,7 +448,7 @@ def main(llm, tokenizer, data_name, args):
                         [c for c in preds[j] if c in ["A", "B", "C", "D", "E"]]
                     )
 
-        sample.pop("prompt")
+        # Keep the prompt in the results for Excel export
         sample.update({"code": code, "pred": preds, "report": reports})
         all_samples.append(sample)
 
@@ -517,37 +503,6 @@ def main(llm, tokenizer, data_name, args):
     
     with open(metrics_file, "w") as f:
         json.dump(result_json, f, indent=4)
-    
-    # Save CoT data to JSON if available
-    if hasattr(args, '_cot_data') and args._cot_data:
-        # Create job-specific output directory if job_id is provided
-        if hasattr(args, 'job_id') and args.job_id:
-            job_dir = os.path.join(args.output_dir, args.job_id)
-            os.makedirs(job_dir, exist_ok=True)
-            cot_file = os.path.join(job_dir, 'cot.json')
-        else:
-            # Use the same directory as other outputs
-            cot_file = out_file.replace(".jsonl", "_cot.json")
-        
-        # Write CoT data to JSON file
-        with open(cot_file, 'w') as f:
-            json.dump(args._cot_data, f, indent=2)
-        
-        print(f"CoT data saved to: {cot_file}")
-        print(f"CoT data contains {len(args._cot_data)} samples")
-        
-        # Log first sample structure for validation
-        if args._cot_data:
-            first_sample = args._cot_data[0]
-            print(f"Sample CoT structure: {len(first_sample.get('cot_steps', []))} steps, answer: '{first_sample.get('final_answer', '')}'")
-            
-            # Validate required fields
-            required_fields = ['question', 'model', 'cot_steps', 'final_answer', 'correct_answer']
-            missing_fields = [field for field in required_fields if field not in first_sample]
-            if missing_fields:
-                print(f"Warning: Missing required fields in CoT data: {missing_fields}")
-            else:
-                print("CoT data structure validation: PASSED")
     
     return result_json
 
