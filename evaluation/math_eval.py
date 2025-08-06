@@ -324,39 +324,22 @@ def main(llm, tokenizer, data_name, args):
             # Output structured information for monitoring
             print(f"MONITOR_RESPONSE: {json.dumps({'epoch': epoch, 'prompt_idx': i, 'response': output, 'full_query': query})}")
             
-            # Parse CoT structure from response
+            # Parse CoT structure from response (using only the answer field)
             raw = output.strip()
             
-            # Primary heuristic: Split on the delimiter "####" (four hashes) if present
+            # Primary heuristic: If the delimiter #### is in raw, split on it
             if '####' in raw:
-                parts = raw.split('####', 1)
-                cot_text, ans_text = parts[0].strip(), parts[1].strip()
-            elif "So the answer is" in raw:
-                # Fallback heuristic: Split on "So the answer is"
-                parts = raw.rsplit("So the answer is", 1)
-                cot_text, ans_text = parts[0].strip(), parts[1].strip()
-            elif "Answer:" in raw:
-                # Fallback heuristic: Split on "Answer:"
-                parts = raw.rsplit("Answer:", 1)
-                cot_text, ans_text = parts[0].strip(), parts[1].strip()
-            elif "Therefore" in raw:
-                # Fallback heuristic: Split on "Therefore"
-                parts = raw.rsplit("Therefore", 1)
-                cot_text, ans_text = parts[0].strip(), "Therefore" + parts[1].strip()
-            elif "The answer is" in raw:
-                # Fallback heuristic: Split on "The answer is"
-                parts = raw.rsplit("The answer is", 1)
-                cot_text, ans_text = parts[0].strip(), "The answer is" + parts[1].strip()
+                cot_text, ans_text = raw.split('####', 1)
+                cot_text = cot_text.strip()
+                ans_text = ans_text.strip()
             else:
-                # Final fallback: Split on last newline
-                lines = raw.splitlines()
-                if len(lines) > 1:
-                    cot_text, ans_text = "\n".join(lines[:-1]), lines[-1]
-                else:
-                    cot_text, ans_text = raw, raw
+                # Fallback heuristic: Otherwise, split on the last newline
+                lines = raw.strip().splitlines()
+                cot_text = "\n".join(lines[:-1])
+                ans_text = lines[-1]
             
             # Convert to structured data
-            cot_steps = [step.strip() for step in cot_text.split('\n') if step.strip()]
+            cot_steps = [line.strip() for line in cot_text.split('\n') if line.strip()]
             final_answer = ans_text.strip()
             
             # Store CoT data for later serialization
