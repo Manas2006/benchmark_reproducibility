@@ -4,16 +4,16 @@ const WS_BASE = 'ws://localhost:8000';
 
 // Available options
 const AVAILABLE_MODELS = [
-    'Qwen/Qwen2.5-Math-1.5B',
-    'Qwen/Qwen2.5-Math-7B',
-    'Qwen/Qwen2.5-Math-14B',
-    'Qwen/Qwen2.5-Math-72B',
-    'WizardLM/WizardMath-7B-V1.1',
-    'jondurbin/smolllm-math',
-    'benlipkin/MAmmoTH-1.3B',
-    'kaist-ai/GPT-Synth-CoT',
+    'Qwen/Qwen2-Math-1.5B',
+    'Qwen/Qwen2-Math-7B',
+    'Qwen/Qwen2-Math-14B',
+    'Qwen/Qwen2-Math-72B',
+    'WizardLMTeam/WizardMath-7B-V1.1',
+    'TIGER-Lab/MAmmoTH-7B',
     'deepseek-ai/deepseek-math-7b-instruct',
-    'Yi-1.5-Chat-6B',
+    '01-ai/Yi-1.5-6B-Chat',
+    'HuggingFaceTB/SmolLM-135M-Instruct',
+    'HuggingFaceTB/SmolLM-1.7B-Instruct',
     'Link from Hugging Face'
 ];
 
@@ -108,6 +108,7 @@ async function loadPathConfig() {
 
 async function savePathConfig(event) {
     event.preventDefault();
+    console.log('🔧 savePathConfig called');
 
     try {
         const config = {
@@ -125,6 +126,12 @@ async function savePathConfig(event) {
             slurm_wall_time: document.getElementById('slurm_wall_time').value
         };
 
+        console.log('📤 Sending SLURM config:', {
+            partition: config.slurm_partition,
+            account: config.slurm_account,
+            wall_time: config.slurm_wall_time
+        });
+
         const response = await fetch(`${API_BASE}/config/paths`, {
             method: 'POST',
             headers: {
@@ -135,9 +142,12 @@ async function savePathConfig(event) {
 
         const data = await response.json();
         if (response.ok) {
+            console.log('✅ Path configuration saved successfully:', data);
             alert('Path configuration saved successfully!');
-            console.log('Path configuration saved:', data);
+            // Reload the configuration to show updated values
+            await loadPathConfig();
         } else {
+            console.error('❌ Error saving path configuration:', data);
             alert('Error saving path configuration: ' + (data.detail || 'Unknown error'));
         }
     } catch (error) {
@@ -1171,7 +1181,17 @@ async function loadCoTJobs() {
                 displayName = `${job.slurm_jid} (${job.job_id.substring(0, 8)}...)`;
             }
             
-            option.textContent = `${displayName} - ${job.model_name || 'Unknown Model'}`;
+            // Extract model name from the request field, format it nicely
+            let modelName = 'Unknown Model';
+            if (job.request && job.request.model) {
+                modelName = job.request.model;
+                // If it's a HuggingFace path, show just the model name part
+                if (modelName.includes('/')) {
+                    modelName = modelName.split('/').slice(-1)[0];
+                }
+            }
+            
+            option.textContent = `${displayName} - ${modelName}`;
             select.appendChild(option);
         });
         
@@ -1206,11 +1226,17 @@ async function runCoTAnalysis() {
         }
         
         const analysisData = await response.json();
+        console.log('API response received:', analysisData);
+        console.log('Setting currentCoTData...');
         currentCoTData = analysisData;
+        console.log('currentCoTData set successfully');
         
         // Hide loading and show results
+        console.log('About to hide loading...');
         hideCoTLoading();
+        console.log('Loading hidden, about to show results...');
         showCoTResults(analysisData);
+        console.log('showCoTResults call completed');
         
     } catch (error) {
         console.error('Error running CoT analysis:', error);
@@ -1220,70 +1246,131 @@ async function runCoTAnalysis() {
 }
 
 function showCoTResults(data) {
-    document.getElementById('cot-analysis-results').classList.remove('hidden');
-    
-    // Populate summary statistics
-    populateCoTSummary(data.job_summary);
-    
-    // Populate CQS component scores
-    populateCQSComponents(data.job_summary);
-    
-    // Show random samples by default
-    showRandomSamples();
+    try {
+        console.log('CoT Analysis Data received:', data);
+        console.log('Job summary:', data.job_summary);
+        console.log('Per sample metrics length:', data.per_sample_metrics?.length);
+        
+        console.log('About to show results section...');
+        document.getElementById('cot-analysis-results').classList.remove('hidden');
+        console.log('Results section shown');
+        
+        // Populate summary statistics
+        console.log('About to call populateCoTSummary...');
+        populateCoTSummary(data.job_summary);
+        console.log('populateCoTSummary completed');
+        
+        // Populate CQS component scores
+        console.log('About to call populateCQSComponents...');
+        populateCQSComponents(data.job_summary);
+        console.log('populateCQSComponents completed');
+        
+        // Show random samples by default
+        console.log('About to call showRandomSamples...');
+        showRandomSamples();
+        console.log('showRandomSamples completed');
+    } catch (error) {
+        console.error('ERROR in showCoTResults:', error);
+        console.error('Error stack:', error.stack);
+    }
 }
 
 function populateCoTSummary(summary) {
+    console.log('Populating CoT Summary with:', summary);
     const summaryDiv = document.getElementById('cot-summary');
-    summaryDiv.innerHTML = `
-        <div class="text-center">
-            <div class="text-2xl font-bold text-blue-600">${summary.total_samples}</div>
-            <div class="text-sm text-gray-600">Total Samples</div>
-        </div>
-        <div class="text-center">
-            <div class="text-2xl font-bold text-blue-600">${summary.cqs_score_avg.toFixed(3)}</div>
-            <div class="text-sm text-gray-600">Average CQS Score</div>
-        </div>
-        <div class="text-center">
-            <div class="text-2xl font-bold text-blue-600">${summary.samples_with_reasoning}</div>
-            <div class="text-sm text-gray-600">With Reasoning</div>
-        </div>
-        <div class="text-center">
-            <div class="text-2xl font-bold text-blue-600">${summary.avg_reasoning_steps.toFixed(1)}</div>
-            <div class="text-sm text-gray-600">Avg Steps</div>
-        </div>
-        <div class="text-center">
-            <div class="text-2xl font-bold text-blue-600">${summary.avg_reasoning_length.toFixed(0)}</div>
-            <div class="text-sm text-gray-600">Avg Length (chars)</div>
-        </div>
-        <div class="text-center">
-            <div class="text-2xl font-bold text-blue-600">${getScoreInterpretation(summary.cqs_score_avg)}</div>
-            <div class="text-sm text-gray-600">Overall Quality</div>
-        </div>
-    `;
+    
+    if (!summaryDiv) {
+        console.error('ERROR: cot-summary element not found!');
+        return;
+    }
+    
+    if (!summary) {
+        console.error('Summary is undefined');
+        summaryDiv.innerHTML = '<div class="text-red-500">Error: No summary data</div>';
+        return;
+    }
+    
+    console.log('About to populate summary with total_samples:', summary.total_samples);
+    
+    try {
+        summaryDiv.innerHTML = `
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${summary.total_samples || 0}</div>
+                <div class="text-sm text-gray-600">Total Samples</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${(summary.cqs_score_avg || 0).toFixed(3)}</div>
+                <div class="text-sm text-gray-600">Average CQS Score</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${summary.samples_with_reasoning || 0}</div>
+                <div class="text-sm text-gray-600">With Reasoning</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${(summary.avg_reasoning_steps || 0).toFixed(1)}</div>
+                <div class="text-sm text-gray-600">Avg Steps</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${(summary.avg_reasoning_length || 0).toFixed(0)}</div>
+                <div class="text-sm text-gray-600">Avg Length (chars)</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${getScoreInterpretation(summary.cqs_score_avg || 0)}</div>
+                <div class="text-sm text-gray-600">Overall Quality</div>
+            </div>
+        `;
+        console.log('CoT Summary populated successfully');
+    } catch (error) {
+        console.error('Error populating CoT summary:', error);
+        summaryDiv.innerHTML = '<div class="text-red-500">Error populating summary</div>';
+    }
 }
 
 function populateCQSComponents(summary) {
+    console.log('Populating CQS Components with:', summary);
     const componentsDiv = document.getElementById('cqs-components');
     
-    const components = [
-        { name: 'Final Answer Correctness', score: summary.final_answer_correctness_avg, weight: '30%', color: 'text-red-600' },
-        { name: 'Arithmetic Accuracy', score: summary.arithmetic_accuracy_avg, weight: '25%', color: 'text-orange-600' },
-        { name: 'Logical Structure', score: summary.logical_structure_avg, weight: '20%', color: 'text-yellow-600' },
-        { name: 'Consistency & Completeness', score: summary.consistency_completeness_avg, weight: '15%', color: 'text-green-600' },
-        { name: 'Formatting & Notation', score: summary.formatting_notation_avg, weight: '10%', color: 'text-blue-600' }
-    ];
+    if (!componentsDiv) {
+        console.error('ERROR: cqs-components element not found!');
+        return;
+    }
     
-    componentsDiv.innerHTML = components.map(comp => `
-        <div class="text-center p-3 bg-white rounded-lg border">
-            <div class="text-lg font-bold ${comp.color}">${comp.score.toFixed(3)}</div>
-            <div class="text-sm font-medium text-gray-800">${comp.name}</div>
-            <div class="text-xs text-gray-500">${comp.weight} weight</div>
-            <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
-                <div class="bg-gradient-to-r from-red-400 to-green-400 h-2 rounded-full" 
-                     style="width: ${comp.score * 100}%"></div>
+    if (!summary) {
+        console.error('Summary is undefined for CQS components');
+        componentsDiv.innerHTML = '<div class="text-red-500">Error: No summary data for components</div>';
+        return;
+    }
+    
+    console.log('Populating CQS components with final_answer_correctness_avg:', summary.final_answer_correctness_avg);
+    
+    try {
+        const components = [
+            { name: 'Final Answer Correctness', score: summary.final_answer_correctness_avg || 0, weight: '30%', color: 'text-red-600' },
+            { name: 'Arithmetic Accuracy', score: summary.arithmetic_accuracy_avg || 0, weight: '25%', color: 'text-orange-600' },
+            { name: 'Logical Structure', score: summary.logical_structure_avg || 0, weight: '20%', color: 'text-yellow-600' },
+            { name: 'Consistency & Completeness', score: summary.consistency_completeness_avg || 0, weight: '15%', color: 'text-green-600' },
+            { name: 'Formatting & Notation', score: summary.formatting_notation_avg || 0, weight: '10%', color: 'text-blue-600' }
+        ];
+        
+        console.log('CQS Components:', components);
+        
+        componentsDiv.innerHTML = components.map(comp => `
+            <div class="text-center p-3 bg-white rounded-lg border">
+                <div class="text-lg font-bold ${comp.color}">${comp.score.toFixed(3)}</div>
+                <div class="text-sm font-medium text-gray-800">${comp.name}</div>
+                <div class="text-xs text-gray-500">${comp.weight} weight</div>
+                <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
+                    <div class="bg-gradient-to-r from-red-400 to-green-400 h-2 rounded-full" 
+                         style="width: ${Math.max(0, Math.min(100, comp.score * 100))}%"></div>
+                </div>
             </div>
-        </div>
-    `).join('');
+        `).join('');
+        
+        console.log('CQS Components populated successfully');
+    } catch (error) {
+        console.error('Error populating CQS components:', error);
+        componentsDiv.innerHTML = '<div class="text-red-500">Error populating components</div>';
+    }
 }
 
 function showTopPerformers() {
@@ -1307,12 +1394,25 @@ function showBottomPerformers() {
 }
 
 function showRandomSamples() {
-    if (!currentCoTData) return;
+    console.log('ShowRandomSamples called, currentCoTData:', currentCoTData);
+    
+    if (!currentCoTData) {
+        console.error('No currentCoTData available for samples');
+        return;
+    }
+    
+    if (!currentCoTData.per_sample_metrics) {
+        console.error('No per_sample_metrics in currentCoTData');
+        return;
+    }
+    
+    console.log('Available samples:', currentCoTData.per_sample_metrics.length);
     
     const samples = [...currentCoTData.per_sample_metrics]
         .sort(() => 0.5 - Math.random())
         .slice(0, 10);
     
+    console.log('Selected samples for display:', samples.length);
     renderSampleAnalysis(samples, 'Random Sample Selection');
 }
 
@@ -1440,9 +1540,7 @@ function hideCoTError() {
     document.getElementById('cot-error').classList.add('hidden');
 }
 
-function showCoTResults() {
-    document.getElementById('cot-analysis-results').classList.remove('hidden');
-}
+
 
 function hideCoTResults() {
     document.getElementById('cot-analysis-results').classList.add('hidden');

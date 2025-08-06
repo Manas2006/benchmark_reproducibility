@@ -432,9 +432,17 @@ def export_results_to_excel(job_id: str):
             score_list = rec.get('score', [])
             
             # Calculate CoT metrics for this answer
-            answer = rec.get('answer', '')
+            # Use the model's actual output (code field) + predicted answer, not the formatted answer field
+            model_reasoning = rec.get('code', [''])
+            model_reasoning_text = model_reasoning[0] if model_reasoning else ""
+            predicted_answer = rec.get('pred', [''])
+            predicted_answer_text = predicted_answer[0] if predicted_answer else ""
+            
+            # Construct the full model output for CoT analysis
+            full_model_output = f"{model_reasoning_text}\n#### {predicted_answer_text}"
+            
             gt = rec.get('gt', '')
-            cot_metrics = analyzer.analyze_answer(answer, gt)
+            cot_metrics = analyzer.analyze_answer(full_model_output, gt)
             all_cot_metrics.append(cot_metrics)
             
             # Build row data with original columns + CoT metrics

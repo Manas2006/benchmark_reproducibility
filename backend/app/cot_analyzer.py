@@ -177,12 +177,20 @@ class CoTAnalyzer:
         }
         
         for sample in job_data:
-            answer = sample.get('answer', '')
+            # Use the model's actual output (code field) + predicted answer, not the formatted answer field
+            model_reasoning = sample.get('code', [''])
+            model_reasoning_text = model_reasoning[0] if model_reasoning else ""
+            predicted_answer = sample.get('pred', [''])
+            predicted_answer_text = predicted_answer[0] if predicted_answer else ""
+            
+            # Construct the full model output for CoT analysis
+            full_model_output = f"{model_reasoning_text}\n#### {predicted_answer_text}"
+            
             gt = sample.get('gt', '')
             score = sample.get('score', [])
             
-            # Analyze this sample
-            metrics = self.analyze_answer(answer, gt)
+            # Analyze this sample using the model's actual output
+            metrics = self.analyze_answer(full_model_output, gt)
             
             # Add sample metadata - convert dataclass to dict for Pydantic
             sample_result = {
@@ -216,7 +224,7 @@ class CoTAnalyzer:
                 'confidence_score': metrics.confidence_score
                 },
                 'is_correct': bool(score and score[0]) if score else False,
-                'has_reasoning': len(answer.split('####')[0].strip()) > 0
+                'has_reasoning': len(model_reasoning_text.strip()) > 0
             }
             
             per_sample_metrics.append(sample_result)
@@ -360,24 +368,38 @@ class CoTAnalyzer:
         Returns 1.0 if correct, 0.0 if incorrect
         """
         if not ground_truth:
-            return 0.5  # Default when no ground truth available
+            return 0.0  # Changed from 0.5 to 0.0 for strict evaluation
         
         # Normalize both answers for comparison
         def normalize_answer(ans):
             if not ans:
-                return ""
-            # Remove whitespace, dollar signs, commas
-            ans = str(ans).strip().replace('$', '').replace(',', '')
-            # Try to convert to number for numerical comparison
+                return None
+            # Remove whitespace, dollar signs, commas, parentheses
+            ans = str(ans).strip().replace('$', '').replace(',', '').replace('(', '').replace(')', '')
+            
+            # Try to convert to numeric value for numerical comparison
             try:
-                return str(float(ans))
-            except:
-                return ans.lower()
+                # Handle both integer and float formats
+                num_val = float(ans)
+                # Return as int if it's a whole number, otherwise as float
+                return int(num_val) if num_val.is_integer() else num_val
+            except (ValueError, AttributeError):
+                # If not a number, return the cleaned string in lowercase
+                return ans.lower().strip()
         
         norm_final = normalize_answer(final_answer)
         norm_gt = normalize_answer(ground_truth)
         
-        return 1.0 if norm_final == norm_gt else 0.0
+        # Both must be successfully parsed for comparison
+        if norm_final is None or norm_gt is None:
+            return 0.0
+        
+        # Strict numeric comparison with tolerance for floating point errors
+        if isinstance(norm_final, (int, float)) and isinstance(norm_gt, (int, float)):
+            return 1.0 if abs(norm_final - norm_gt) < 1e-6 else 0.0
+        else:
+            # String comparison for non-numeric answers
+            return 1.0 if str(norm_final) == str(norm_gt) else 0.0
     
     def _score_arithmetic_accuracy(self, reasoning: str, steps: List[str]) -> float:
         """
