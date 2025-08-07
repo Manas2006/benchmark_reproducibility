@@ -1,6 +1,6 @@
 // Configuration
-const API_BASE = 'http://localhost:8000';
-const WS_BASE = 'ws://localhost:8000';
+const API_BASE = 'http://localhost:8001';
+const WS_BASE = 'ws://localhost:8001';
 
 // Available options
 const AVAILABLE_MODELS = [
@@ -246,10 +246,10 @@ function updateModelConfig(configId, field, value) {
 function updatePromptField(configId) {
     const config = modelConfigs.find(c => c.id === configId);
     if (!config) return;
-    
+
     const promptField = document.getElementById(`prompt-field-${configId}`);
     if (!promptField) return;
-    
+
     if (config.prompt_type === 'custom') {
         // Show custom prompt field
         promptField.style.display = 'block';
@@ -499,7 +499,7 @@ async function submitEvaluation() {
                                                 if (config.prompt_type === 'custom' && (!config.prompt || config.prompt.trim() === '')) {
                                                     throw new Error(`Custom prompt is required when 'Custom Prompt' is selected for model configuration ${config.id}`);
                                                 }
-                                                
+
                                                 // Validate that URL is provided for Link from Hugging Face
                                                 if (config.model === 'Link from Hugging Face' && (!config.customModel || config.customModel.trim() === '')) {
                                                     throw new Error(`Hugging Face URL is required when 'Link from Hugging Face' is selected for model configuration ${config.id}`);

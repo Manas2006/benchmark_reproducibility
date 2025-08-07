@@ -4,6 +4,7 @@ import sys
 import os
 import uuid
 import shlex
+import re
 from typing import Dict, Any, Optional
 from pathlib import Path
 from .schemas import EvalRequest, JobStatus, PathConfig
@@ -36,6 +37,108 @@ def load_job_db():
 
 # Load job_db on startup
 load_job_db()
+
+def is_real_error(error_content: str) -> bool:
+    """
+    Intelligently determine if an error file contains actual errors that caused task failure.
+    
+    Args:
+        error_content: Content of the error file
+        
+    Returns:
+        True if the error file contains real errors that caused task failure, False otherwise
+    """
+    # Convert to lowercase for case-insensitive matching
+    content_lower = error_content.lower()
+    
+    # Patterns that indicate real errors (task failure)
+    real_error_patterns = [
+        r'traceback\s*\(most recent call last\)',
+        r'oserror:.*does not appear to have a file named',
+        r'filenotfounderror:',
+        r'modulenotfounderror:',
+        r'importerror:',
+        r'keyboardinterrupt',
+        r'systemexit',
+        r'killed',
+        r'signal.*killed',
+        r'out of memory',
+        r'cuda out of memory',
+        r'oom',
+        r'segmentation fault',
+        r'bus error',
+        r'fatal error',
+        r'critical error',
+        r'failed to load model',
+        r'failed to download',
+        r'network error',
+        r'connection error',
+        r'timeout',
+        r'job failed',
+        r'job cancelled',
+        r'job killed',
+        r'exit code [1-9]',
+        r'return code [1-9]',
+        r'error.*exit',
+        r'failed.*exit'
+    ]
+    
+    # Patterns that are warnings or non-critical errors (should not cause task failure)
+    warning_patterns = [
+        r'condaerror: run \'conda init\'',
+        r'futurewarning:',
+        r'deprecationwarning:',
+        r'userwarning:',
+        r'warning:',
+        r'info:',
+        r'note:',
+        r'debug:',
+        r'verbose:',
+        r'loading.*checkpoint.*completed',
+        r'processed prompts.*completed',
+        r'evaluate.*completed',
+        r'saved to.*jsonl',
+        r'gsm8k.*avg',
+        r'monitor_response:',
+        r'monitor_epoch:',
+        r'unsolved samples: 0',
+        r'num_samples.*num_scores',
+        r'acc:.*%',
+        r'accuracy:.*%'
+    ]
+    
+    # Check for real error patterns
+    for pattern in real_error_patterns:
+        if re.search(pattern, content_lower):
+            return True
+    
+    # Check if there are any real error indicators without corresponding success indicators
+    has_real_errors = any(re.search(pattern, content_lower) for pattern in real_error_patterns)
+    has_success_indicators = any(re.search(pattern, content_lower) for pattern in warning_patterns)
+    
+    # If we have real errors but no success indicators, it's likely a real failure
+    if has_real_errors and not has_success_indicators:
+        return True
+    
+    # If we have success indicators (like completion messages), it's likely not a real failure
+    if has_success_indicators:
+        return False
+    
+    # Check for specific error patterns that indicate task completion despite warnings
+    completion_indicators = [
+        r'processed prompts: 100%',
+        r'evaluate: 100%',
+        r'saved to.*\.jsonl',
+        r'gsm8k.*avg',
+        r'accuracy:',
+        r'acc:'
+    ]
+    
+    if any(re.search(pattern, content_lower) for pattern in completion_indicators):
+        return False
+    
+    # Default: if we can't determine, assume it's not a real error
+    return False
 
 def get_next_local_job_id():
     config = path_manager.get_config()
@@ -87,9 +190,10 @@ class MathEvalRunner:
             "--n_sampling", str(req.n_sampling),
             "--top_p", str(req.top_p),
             # --max_tokens_per_call handled below
-            "--use_vllm",
+            "--use_vllm",  # Disabled to support models not compatible with vLLM
             "--save_outputs",
-            "--overwrite"
+            "--overwrite",
+            "--use_safetensors"
         ]
         
         # Add prompt-related arguments
@@ -130,7 +234,10 @@ class MathEvalRunner:
         dataset = req.dataset.replace(",", "_")
         
         # Determine prompt type for filename
+        # This logic should match math_eval.py's filename generation
         if req.prompt and req.prompt.strip() and req.prompt_type == "custom":
+            prompt_type_for_file = "custom_custom"  # matches math_eval.py logic
+        elif req.prompt and req.prompt.strip():
             prompt_type_for_file = "custom"
         elif req.prompt_type:
             prompt_type_for_file = req.prompt_type
@@ -220,12 +327,10 @@ class MathEvalRunner:
 cd {self.evaluation_dir}
 
 # Set Hugging Face cache to work directory
-export HF_HOME=/work/10757/manasp123/models
-export HF_DATASETS_CACHE=/work/10757/manasp123/models
 
 # Activate conda environment
 source {path_config.conda_env_path}/etc/profile.d/conda.sh
-conda activate qwen-eval
+conda activate mathevalUI
 {' '.join(escaped_cli)}
 """
             try:
@@ -242,7 +347,7 @@ conda activate qwen-eval
                 sbatch_content = f"""#!/bin/bash
 #SBATCH -J qwen-math-{uuid_jid}   # Job name
 #SBATCH -o {out_file_pattern}      # Name of stdout output file (uses %j)
-#SBATCH -e {err_file_pattern}      # Name of stderr error file (uses %j)
+#SBATCH -e {err_file_pattern}      # Name of stderr error fifle (uses %j)
 #SBATCH -p {path_config.slurm_partition}              # Queue (partition) name
 #SBATCH -N 1                    # Total # of nodes
 #SBATCH -n 1                    # Total # of tasks (single process for all GPUs)
@@ -250,9 +355,7 @@ conda activate qwen-eval
 #SBATCH --mail-type=all         # Send email at begin and end of job
 #SBATCH -A {path_config.slurm_account}             # Project/Allocation name
 
-# Set Hugging Face cache to work directory
-export HF_HOME=/work/10757/manasp123/models
-export HF_DATASETS_CACHE=/work/10757/manasp123/models
+
 
 export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
 
@@ -403,7 +506,7 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                         if error_file.exists():
                             with open(error_file, 'r') as f:
                                 error_content = f.read()
-                                if "Traceback" in error_content or "Error" in error_content or "Exception" in error_content:
+                                if is_real_error(error_content):
                                     job_info["status"] = JobStatus.ERROR
                                     job_info["error"] = f"Job failed with errors. Check error log for details."
                                     # Save updated status to file
@@ -433,7 +536,7 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     if error_file.exists():
                         with open(error_file, 'r') as f:
                             error_content = f.read()
-                            if "Traceback" in error_content or "Error" in error_content or "Exception" in error_content:
+                            if is_real_error(error_content):
                                 job_info["status"] = JobStatus.ERROR
                                 job_info["error"] = f"Job failed with errors. Check error log for details."
                                 # Save updated status to file

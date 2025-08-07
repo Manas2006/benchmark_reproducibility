@@ -122,4 +122,30 @@ output/
 frontend/frontend.log
 *.out
 *.err
-job_db.json 
+job_db.json
+
+# 新增的忽略规则
+# 数据库文件
+backend/job_db.json
+
+# 配置文件（包含本地路径）
+backend/path_config.json
+
+# 输出结果
+evaluation/outputs/
+
+# 日志文件
+backend/logs/
+backend/backend/logs/
+
+# 备份文件
+*.backup
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 临时文件
+*.tmp
+*.temp 

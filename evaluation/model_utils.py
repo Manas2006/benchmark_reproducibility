@@ -146,7 +146,7 @@ def load_hf_lm_and_tokenizer(
         gptq_model=False,
         use_fast_tokenizer=False,
         padding_side="left",
-        use_safetensors=False,
+        use_safetensors=True,
     ):
     import torch 
     from transformers import AutoModelForCausalLM, AutoTokenizer
