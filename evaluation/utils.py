@@ -80,6 +80,11 @@ def load_prompt(data_name, prompt_type, num_shots):
 PROMPT_TEMPLATES = {
     "direct": ("Question: {input}\nAnswer: ", "{output}", "\n\n"),
     "cot": ("Question: {input}\nAnswer: ", "{output}", "\n\n\n"),
+    "auto-cot": (
+        "### Question:\n{input}\n\n### Response: Let's think step by step.",
+        "{output}",
+        "\n\n\n",
+    ),
     "pal": ("Question: {input}\n\n", "{output}", "\n---\n"),
     "tool-integrated": ("Question: {input}\n\nSolution:\n", "{output}", "\n---\n"),
     "self-instruct": ("<|user|>\n{input}\n<|assistant|>\n", "{output}", "\n"),

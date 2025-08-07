@@ -4,10 +4,16 @@ const WS_BASE = 'ws://localhost:8001';
 
 // Available options
 const AVAILABLE_MODELS = [
-    'Qwen/Qwen2.5-Math-1.5B',
-    'Qwen/Qwen2.5-Math-7B',
-    'Qwen/Qwen2.5-Math-14B',
-    'Qwen/Qwen2.5-Math-72B',
+    'Qwen/Qwen2-Math-1.5B',
+    'Qwen/Qwen2-Math-7B',
+    'Qwen/Qwen2-Math-14B',
+    'Qwen/Qwen2-Math-72B',
+    'WizardLMTeam/WizardMath-7B-V1.1',
+    'TIGER-Lab/MAmmoTH-7B',
+    'deepseek-ai/deepseek-math-7b-instruct',
+    '01-ai/Yi-1.5-6B-Chat',
+    'HuggingFaceTB/SmolLM-135M-Instruct',
+    'HuggingFaceTB/SmolLM-1.7B-Instruct',
     'Link from Hugging Face'
 ];
 
@@ -102,6 +108,7 @@ async function loadPathConfig() {
 
 async function savePathConfig(event) {
     event.preventDefault();
+    console.log('🔧 savePathConfig called');
 
     try {
         const config = {
@@ -119,6 +126,12 @@ async function savePathConfig(event) {
             slurm_wall_time: document.getElementById('slurm_wall_time').value
         };
 
+        console.log('📤 Sending SLURM config:', {
+            partition: config.slurm_partition,
+            account: config.slurm_account,
+            wall_time: config.slurm_wall_time
+        });
+
         const response = await fetch(`${API_BASE}/config/paths`, {
             method: 'POST',
             headers: {
@@ -129,9 +142,12 @@ async function savePathConfig(event) {
 
         const data = await response.json();
         if (response.ok) {
+            console.log('✅ Path configuration saved successfully:', data);
             alert('Path configuration saved successfully!');
-            console.log('Path configuration saved:', data);
+            // Reload the configuration to show updated values
+            await loadPathConfig();
         } else {
+            console.error('❌ Error saving path configuration:', data);
             alert('Error saving path configuration: ' + (data.detail || 'Unknown error'));
         }
     } catch (error) {
@@ -424,6 +440,7 @@ function renderModelConfigs() {
                     <select onchange="updateModelConfig(${config.id}, 'prompt_type', this.value); updatePromptField(${config.id})" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
                         <option value="custom" ${config.prompt_type === 'custom' ? 'selected' : ''}>Custom Prompt</option>
                         <option value="cot" ${config.prompt_type === 'cot' ? 'selected' : ''}>Chain of Thought (CoT)</option>
+                        <option value="auto-cot" ${config.prompt_type === 'auto-cot' ? 'selected' : ''}>Auto Chain of Thought (Auto-CoT)</option>
                         <option value="pal" ${config.prompt_type === 'pal' ? 'selected' : ''}>Program-aided Language (PAL)</option>
                         <option value="tool-integrated" ${config.prompt_type === 'tool-integrated' ? 'selected' : ''}>Tool Integrated</option>
                         <option value="qwen25-math-cot" ${config.prompt_type === 'qwen25-math-cot' ? 'selected' : ''}>Qwen2.5 Math CoT</option>
@@ -581,9 +598,11 @@ function renderJobList(jobs) {
         let resultButtonHtml = '';
         if (job.status === 'DONE' && job.result_file) {
             resultButtonHtml = `
-                <div class="flex space-x-2 mt-4">
+                <div class="flex flex-wrap gap-2 mt-4">
                     <button onclick="showMetricsModal('${job.job_id}', 'Metrics')" class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">View Metrics Inline</button>
                     <button onclick="showResultModal('${job.result_file}', 'Model Outputs')" class="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700">View Model Outputs Inline</button>
+                    <button onclick="openCoTAnalysisForJob('${job.job_id}')" class="px-3 py-1 bg-orange-600 text-white text-sm rounded hover:bg-orange-700">🧠 CoT Analysis</button>
+                    <button onclick="exportToExcel('${job.job_id}')" class="px-3 py-1 bg-purple-600 text-white text-sm rounded hover:bg-purple-700">Export to Excel</button>
                 </div>
             `;
         } else if (job.status !== 'DONE' && job.result_file) {
@@ -592,6 +611,7 @@ function renderJobList(jobs) {
                 <div class="flex space-x-2 mt-4">
                     <button disabled class="px-3 py-1 bg-gray-400 text-white text-sm rounded cursor-not-allowed" title="Results not available yet - job is ${job.status.toLowerCase()}">View Metrics Inline</button>
                     <button disabled class="px-3 py-1 bg-gray-400 text-white text-sm rounded cursor-not-allowed" title="Results not available yet - job is ${job.status.toLowerCase()}">View Model Outputs Inline</button>
+                    <button disabled class="px-3 py-1 bg-gray-400 text-white text-sm rounded cursor-not-allowed" title="Results not available yet - job is ${job.status.toLowerCase()}">Export to Excel</button>
                 </div>
             `;
         }
@@ -722,10 +742,10 @@ function startMonitoring() {
                     logOutput.innerHTML += `</div>`;
                     logOutput.scrollTop = logOutput.scrollHeight;
                 } else if (data.monitor_response) {
-                    // Display model response
+                    // Display model response (suppressed content)
                     logOutput.innerHTML += `<div style='background: #1a1a1a; border-left: 4px solid #2196F3; padding: 10px; margin: 10px 0;'>`;
                     logOutput.innerHTML += `<span style='color: #2196F3; font-weight: bold;'>🤖 MODEL RESPONSE (Epoch ${data.monitor_response.epoch + 1}, Prompt #${data.monitor_response.prompt_idx})</span><br>`;
-                    logOutput.innerHTML += `<span style='color: #FFD700;'>Response:</span><br><pre style='color: #98FB98; white-space: pre-wrap; margin: 5px 0;'>${escapeHtml(data.monitor_response.response)}</pre>`;
+                    logOutput.innerHTML += `<span style='color: #FFD700;'>Response:</span> <span style='color: #98FB98;'>[Content suppressed for monitoring]</span>`;
                     logOutput.innerHTML += `</div>`;
                     logOutput.scrollTop = logOutput.scrollHeight;
                 } else if (data.out) {
@@ -761,9 +781,16 @@ function startMonitoring() {
                     logOutput.innerHTML += `<span style='color: #ff3333;'>[ERROR]</span> ${escapeHtml(data.error)}\n`;
                 } else if (data.status) {
                     logOutput.innerHTML += `[STATUS] Job changed to: ${data.status} (Return Code: ${data.return_code || 'N/A'})\n`;
-                } else if (data.monitor_prompt || data.monitor_epoch || data.monitor_response) {
+                } else if (data.monitor_prompt || data.monitor_epoch) {
                     // Show structured data as JSON in raw mode
                     logOutput.innerHTML += `<span style='color: #FFD700;'>[MONITOR]</span> ${escapeHtml(JSON.stringify(data, null, 2))}\n`;
+                } else if (data.monitor_response) {
+                    // Show model response info without the actual response content
+                    const responseInfo = {
+                        ...data.monitor_response,
+                        response: "[Content suppressed for monitoring]"
+                    };
+                    logOutput.innerHTML += `<span style='color: #FFD700;'>[MONITOR]</span> ${escapeHtml(JSON.stringify(responseInfo, null, 2))}\n`;
                 }
                 logOutput.scrollTop = logOutput.scrollHeight;
             }
@@ -917,6 +944,40 @@ async function showMetricsModal(jobId, title = 'Metrics') {
     }
 }
 
+// Parse CoT from answer field
+function parseCoTFromAnswer(answer) {
+    if (!answer) return { cot_steps: [], final_answer: '' };
+    
+    const raw = answer.trim();
+    
+    // Primary heuristic: If the delimiter #### is in raw, split on it
+    if (raw.includes('####')) {
+        const parts = raw.split('####', 1);
+        const cot_text = parts[0].trim();
+        const ans_text = parts[1].trim();
+        
+        // Convert to structured data
+        const cot_steps = cot_text.split('\n').map(line => line.trim()).filter(line => line);
+        const final_answer = ans_text;
+        
+        return { cot_steps, final_answer };
+    } else {
+        // Fallback heuristic: Otherwise, split on the last newline
+        const lines = raw.split('\n');
+        if (lines.length > 1) {
+            const cot_text = lines.slice(0, -1).join('\n');
+            const ans_text = lines[lines.length - 1];
+            
+            const cot_steps = cot_text.split('\n').map(line => line.trim()).filter(line => line);
+            const final_answer = ans_text.trim();
+            
+            return { cot_steps, final_answer };
+        } else {
+            return { cot_steps: [], final_answer: raw };
+        }
+    }
+}
+
 async function showResultModal(resultFilePath, title = 'Results') {
     try {
         const url = `http://localhost:8000/file?path=${encodeURIComponent(resultFilePath)}`;
@@ -936,6 +997,44 @@ async function showResultModal(resultFilePath, title = 'Results') {
             throw new Error(errorMessage);
         }
         const content = await response.text();
+        
+        // Try to parse as JSON to extract answer field for CoT display
+        let jsonData = null;
+        let cotDisplay = '';
+        try {
+            jsonData = JSON.parse(content);
+            if (Array.isArray(jsonData) && jsonData.length > 0 && jsonData[0].answer) {
+                // Parse CoT from the first sample's answer field
+                const firstSample = jsonData[0];
+                const cotData = parseCoTFromAnswer(firstSample.answer);
+                
+                if (cotData.cot_steps.length > 0) {
+                    cotDisplay = `
+                        <div class="mb-4 p-4 bg-blue-50 rounded-lg">
+                            <h4 class="font-semibold text-blue-800 mb-2">Chain of Thought Analysis:</h4>
+                            <div class="mb-2">
+                                <strong>Question:</strong> ${escapeHtml(firstSample.question || 'N/A')}
+                            </div>
+                            <div class="mb-2">
+                                <strong>Reasoning Steps:</strong>
+                                <ol class="list-decimal list-inside ml-4">
+                                    ${cotData.cot_steps.map(step => `<li class="mb-1">${escapeHtml(step)}</li>`).join('')}
+                                </ol>
+                            </div>
+                            <div class="mb-2">
+                                <strong>Final Answer:</strong> <span class="font-mono bg-yellow-100 px-2 py-1 rounded">${escapeHtml(cotData.final_answer)}</span>
+                            </div>
+                            <div class="mb-2">
+                                <strong>Expected Answer:</strong> <span class="font-mono bg-green-100 px-2 py-1 rounded">${escapeHtml(firstSample.gt || 'N/A')}</span>
+                            </div>
+                        </div>
+                    `;
+                }
+            }
+        } catch (e) {
+            // Not JSON or parsing failed, continue with raw display
+        }
+        
         // Create modal
         const modal = document.createElement('div');
         modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
@@ -945,7 +1044,11 @@ async function showResultModal(resultFilePath, title = 'Results') {
                     <h3 class="text-lg font-semibold">${title}: ${resultFilePath.split('/').pop()}</h3>
                     <button onclick="this.closest('.fixed').remove()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
                 </div>
-                <pre class="text-sm bg-gray-100 p-4 rounded overflow-auto max-h-64">${escapeHtml(content)}</pre>
+                ${cotDisplay}
+                <div class="mt-4">
+                    <h4 class="font-semibold mb-2">Raw JSON Data:</h4>
+                    <pre class="text-sm bg-gray-100 p-4 rounded overflow-auto max-h-64">${escapeHtml(content)}</pre>
+                </div>
             </div>
         `;
         document.body.appendChild(modal);
@@ -970,6 +1073,46 @@ async function showResultModal(resultFilePath, title = 'Results') {
     }
 }
 
+async function exportToExcel(jobId) {
+    try {
+        const response = await fetch(`${API_BASE}/jobs/${jobId}/export`);
+        if (!response.ok) {
+            let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            if (response.status === 404) {
+                errorMessage = 'Job not found or no results available yet.';
+            } else if (response.status === 500) {
+                errorMessage = 'Error generating Excel file. The job may still be running or may have failed.';
+            }
+            throw new Error(errorMessage);
+        }
+        
+        // Get the filename from the response headers
+        const contentDisposition = response.headers.get('content-disposition');
+        let filename = 'results.xlsx';
+        if (contentDisposition) {
+            const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+            if (filenameMatch) {
+                filename = filenameMatch[1];
+            }
+        }
+        
+        // Create blob and download
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        
+    } catch (error) {
+        console.error('Error exporting to Excel:', error);
+        alert('Error exporting to Excel:\n\n' + error.message);
+    }
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', function () {
     // Add initial model config
@@ -990,4 +1133,415 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Add form submit handler for path configuration
     document.getElementById('path-config-form').addEventListener('submit', savePathConfig);
-}); 
+
+    // Add CoT job select change handler
+    document.getElementById('cot-job-select').addEventListener('change', function() {
+        const analyzeBtn = document.getElementById('analyze-btn');
+        const exportExcelBtn = document.getElementById('export-excel-btn');
+        const exportJsonBtn = document.getElementById('export-json-btn');
+        
+        if (this.value) {
+            analyzeBtn.disabled = false;
+            exportExcelBtn.disabled = false;
+            exportJsonBtn.disabled = false;
+        } else {
+            analyzeBtn.disabled = true;
+            exportExcelBtn.disabled = true;
+            exportJsonBtn.disabled = true;
+        }
+    });
+
+    // Load CoT jobs when page loads
+    loadCoTJobs();
+});
+
+// ===== CoT ANALYSIS FUNCTIONS =====
+
+let currentCoTData = null; // Store current analysis data
+
+async function loadCoTJobs() {
+    try {
+        const response = await fetch(`${API_BASE}/jobs`);
+        const data = await response.json();
+        const jobs = data.jobs || [];
+        
+        // Filter for completed jobs
+        const completedJobs = jobs.filter(job => job.status === 'DONE' && job.result_file);
+        
+        const select = document.getElementById('cot-job-select');
+        select.innerHTML = '<option value="">Select a completed job...</option>';
+        
+        completedJobs.forEach(job => {
+            const option = document.createElement('option');
+            option.value = job.job_id;
+            
+            // Display SLURM ID if available, otherwise UUID
+            let displayName = job.job_id;
+            if (job.backend === 'slurm' && job.slurm_jid) {
+                displayName = `${job.slurm_jid} (${job.job_id.substring(0, 8)}...)`;
+            }
+            
+            // Extract model name from the request field, format it nicely
+            let modelName = 'Unknown Model';
+            if (job.request && job.request.model) {
+                modelName = job.request.model;
+                // If it's a HuggingFace path, show just the model name part
+                if (modelName.includes('/')) {
+                    modelName = modelName.split('/').slice(-1)[0];
+                }
+            }
+            
+            option.textContent = `${displayName} - ${modelName}`;
+            select.appendChild(option);
+        });
+        
+        console.log(`Loaded ${completedJobs.length} completed jobs for CoT analysis`);
+    } catch (error) {
+        console.error('Error loading jobs for CoT analysis:', error);
+        showCoTError('Failed to load jobs for analysis');
+    }
+}
+
+async function runCoTAnalysis() {
+    const jobId = document.getElementById('cot-job-select').value;
+    if (!jobId) {
+        showCoTError('Please select a job to analyze');
+        return;
+    }
+
+    // Show loading state
+    showCoTLoading();
+    hideCoTError();
+    hideCoTResults();
+
+    try {
+        console.log(`Running CoT analysis for job: ${jobId}`);
+        
+        // Call the backend CoT analysis endpoint
+        const response = await fetch(`${API_BASE}/jobs/${jobId}/cot-analysis`);
+        
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const analysisData = await response.json();
+        console.log('API response received:', analysisData);
+        console.log('Setting currentCoTData...');
+        currentCoTData = analysisData;
+        console.log('currentCoTData set successfully');
+        
+        // Hide loading and show results
+        console.log('About to hide loading...');
+        hideCoTLoading();
+        console.log('Loading hidden, about to show results...');
+        showCoTResults(analysisData);
+        console.log('showCoTResults call completed');
+        
+    } catch (error) {
+        console.error('Error running CoT analysis:', error);
+        hideCoTLoading();
+        showCoTError(`Analysis failed: ${error.message}`);
+    }
+}
+
+function showCoTResults(data) {
+    try {
+        console.log('CoT Analysis Data received:', data);
+        console.log('Job summary:', data.job_summary);
+        console.log('Per sample metrics length:', data.per_sample_metrics?.length);
+        
+        console.log('About to show results section...');
+        document.getElementById('cot-analysis-results').classList.remove('hidden');
+        console.log('Results section shown');
+        
+        // Populate summary statistics
+        console.log('About to call populateCoTSummary...');
+        populateCoTSummary(data.job_summary);
+        console.log('populateCoTSummary completed');
+        
+        // Populate CQS component scores
+        console.log('About to call populateCQSComponents...');
+        populateCQSComponents(data.job_summary);
+        console.log('populateCQSComponents completed');
+        
+        // Show random samples by default
+        console.log('About to call showRandomSamples...');
+        showRandomSamples();
+        console.log('showRandomSamples completed');
+    } catch (error) {
+        console.error('ERROR in showCoTResults:', error);
+        console.error('Error stack:', error.stack);
+    }
+}
+
+function populateCoTSummary(summary) {
+    console.log('Populating CoT Summary with:', summary);
+    const summaryDiv = document.getElementById('cot-summary');
+    
+    if (!summaryDiv) {
+        console.error('ERROR: cot-summary element not found!');
+        return;
+    }
+    
+    if (!summary) {
+        console.error('Summary is undefined');
+        summaryDiv.innerHTML = '<div class="text-red-500">Error: No summary data</div>';
+        return;
+    }
+    
+    console.log('About to populate summary with total_samples:', summary.total_samples);
+    
+    try {
+        summaryDiv.innerHTML = `
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${summary.total_samples || 0}</div>
+                <div class="text-sm text-gray-600">Total Samples</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${(summary.cqs_score_avg || 0).toFixed(3)}</div>
+                <div class="text-sm text-gray-600">Average CQS Score</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${summary.samples_with_reasoning || 0}</div>
+                <div class="text-sm text-gray-600">With Reasoning</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${(summary.avg_reasoning_steps || 0).toFixed(1)}</div>
+                <div class="text-sm text-gray-600">Avg Steps</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${(summary.avg_reasoning_length || 0).toFixed(0)}</div>
+                <div class="text-sm text-gray-600">Avg Length (chars)</div>
+            </div>
+            <div class="text-center">
+                <div class="text-2xl font-bold text-blue-600">${getScoreInterpretation(summary.cqs_score_avg || 0)}</div>
+                <div class="text-sm text-gray-600">Overall Quality</div>
+            </div>
+        `;
+        console.log('CoT Summary populated successfully');
+    } catch (error) {
+        console.error('Error populating CoT summary:', error);
+        summaryDiv.innerHTML = '<div class="text-red-500">Error populating summary</div>';
+    }
+}
+
+function populateCQSComponents(summary) {
+    console.log('Populating CQS Components with:', summary);
+    const componentsDiv = document.getElementById('cqs-components');
+    
+    if (!componentsDiv) {
+        console.error('ERROR: cqs-components element not found!');
+        return;
+    }
+    
+    if (!summary) {
+        console.error('Summary is undefined for CQS components');
+        componentsDiv.innerHTML = '<div class="text-red-500">Error: No summary data for components</div>';
+        return;
+    }
+    
+    console.log('Populating CQS components with final_answer_correctness_avg:', summary.final_answer_correctness_avg);
+    
+    try {
+        const components = [
+            { name: 'Final Answer Correctness', score: summary.final_answer_correctness_avg || 0, weight: '30%', color: 'text-red-600' },
+            { name: 'Arithmetic Accuracy', score: summary.arithmetic_accuracy_avg || 0, weight: '25%', color: 'text-orange-600' },
+            { name: 'Logical Structure', score: summary.logical_structure_avg || 0, weight: '20%', color: 'text-yellow-600' },
+            { name: 'Consistency & Completeness', score: summary.consistency_completeness_avg || 0, weight: '15%', color: 'text-green-600' },
+            { name: 'Formatting & Notation', score: summary.formatting_notation_avg || 0, weight: '10%', color: 'text-blue-600' }
+        ];
+        
+        console.log('CQS Components:', components);
+        
+        componentsDiv.innerHTML = components.map(comp => `
+            <div class="text-center p-3 bg-white rounded-lg border">
+                <div class="text-lg font-bold ${comp.color}">${comp.score.toFixed(3)}</div>
+                <div class="text-sm font-medium text-gray-800">${comp.name}</div>
+                <div class="text-xs text-gray-500">${comp.weight} weight</div>
+                <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
+                    <div class="bg-gradient-to-r from-red-400 to-green-400 h-2 rounded-full" 
+                         style="width: ${Math.max(0, Math.min(100, comp.score * 100))}%"></div>
+                </div>
+            </div>
+        `).join('');
+        
+        console.log('CQS Components populated successfully');
+    } catch (error) {
+        console.error('Error populating CQS components:', error);
+        componentsDiv.innerHTML = '<div class="text-red-500">Error populating components</div>';
+    }
+}
+
+function showTopPerformers() {
+    if (!currentCoTData) return;
+    
+    const samples = currentCoTData.per_sample_metrics
+        .sort((a, b) => b.metrics.cqs_score - a.metrics.cqs_score)
+        .slice(0, 10);
+    
+    renderSampleAnalysis(samples, 'Top 10 Performers (Highest CQS Scores)');
+}
+
+function showBottomPerformers() {
+    if (!currentCoTData) return;
+    
+    const samples = currentCoTData.per_sample_metrics
+        .sort((a, b) => a.metrics.cqs_score - b.metrics.cqs_score)
+        .slice(0, 10);
+    
+    renderSampleAnalysis(samples, 'Bottom 10 Performers (Lowest CQS Scores)');
+}
+
+function showRandomSamples() {
+    console.log('ShowRandomSamples called, currentCoTData:', currentCoTData);
+    
+    if (!currentCoTData) {
+        console.error('No currentCoTData available for samples');
+        return;
+    }
+    
+    if (!currentCoTData.per_sample_metrics) {
+        console.error('No per_sample_metrics in currentCoTData');
+        return;
+    }
+    
+    console.log('Available samples:', currentCoTData.per_sample_metrics.length);
+    
+    const samples = [...currentCoTData.per_sample_metrics]
+        .sort(() => 0.5 - Math.random())
+        .slice(0, 10);
+    
+    console.log('Selected samples for display:', samples.length);
+    renderSampleAnalysis(samples, 'Random Sample Selection');
+}
+
+function renderSampleAnalysis(samples, title) {
+    const sampleDiv = document.getElementById('sample-analysis');
+    
+    sampleDiv.innerHTML = `
+        <h4 class="font-semibold text-gray-800 mb-3">${title}</h4>
+        <div class="space-y-3">
+            ${samples.map(sample => `
+                <div class="border border-gray-200 rounded-lg p-3 bg-white">
+                    <div class="flex justify-between items-start mb-2">
+                        <span class="text-sm font-medium text-gray-700">Sample #${sample.idx}</span>
+                        <span class="text-sm font-bold ${getCQSColorClass(sample.metrics.cqs_score)}"">
+                            CQS: ${sample.metrics.cqs_score.toFixed(3)}
+                        </span>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs mb-2">
+                        <div>Final: ${sample.metrics.final_answer_correctness.toFixed(2)}</div>
+                        <div>Arith: ${sample.metrics.arithmetic_accuracy.toFixed(2)}</div>
+                        <div>Logic: ${sample.metrics.logical_structure_score.toFixed(2)}</div>
+                        <div>Consist: ${sample.metrics.consistency_completeness.toFixed(2)}</div>
+                        <div>Format: ${sample.metrics.formatting_notation.toFixed(2)}</div>
+                    </div>
+                    
+                    <div class="text-xs text-gray-600">
+                        Steps: ${sample.metrics.reasoning_steps} | 
+                        Length: ${sample.metrics.total_chars} chars | 
+                        Correct: ${sample.is_correct ? '✅' : '❌'}
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
+function getScoreInterpretation(score) {
+    if (score >= 0.85) return '🌟 Excellent';
+    if (score >= 0.70) return '👍 Good';
+    if (score >= 0.50) return '⚠️ Fair';
+    return '❌ Poor';
+}
+
+function getCQSColorClass(score) {
+    if (score >= 0.85) return 'text-green-600';
+    if (score >= 0.70) return 'text-blue-600';
+    if (score >= 0.50) return 'text-yellow-600';
+    return 'text-red-600';
+}
+
+function openCoTAnalysisForJob(jobId) {
+    // Switch to CoT Analysis tab
+    showTab('cot-analysis');
+    
+    // Select the job
+    document.getElementById('cot-job-select').value = jobId;
+    
+    // Enable the analyze button
+    document.getElementById('analyze-btn').disabled = false;
+    document.getElementById('export-excel-btn').disabled = false;
+    document.getElementById('export-json-btn').disabled = false;
+    
+    // Optionally run analysis immediately
+    setTimeout(() => {
+        if (confirm('Run CoT analysis for this job now?')) {
+            runCoTAnalysis();
+        }
+    }, 100);
+}
+
+async function exportCoTExcel() {
+    const jobId = document.getElementById('cot-job-select').value;
+    if (!jobId) {
+        showCoTError('Please select a job first');
+        return;
+    }
+    
+    try {
+        // Use the existing Excel export functionality
+        exportToExcel(jobId);
+    } catch (error) {
+        console.error('Error exporting to Excel:', error);
+        showCoTError('Failed to export Excel file');
+    }
+}
+
+async function exportCoTJSON() {
+    if (!currentCoTData) {
+        showCoTError('Please run analysis first');
+        return;
+    }
+    
+    try {
+        // Create and download JSON file
+        const dataStr = JSON.stringify(currentCoTData, null, 2);
+        const dataBlob = new Blob([dataStr], {type: 'application/json'});
+        
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(dataBlob);
+        link.download = `cot_analysis_${currentCoTData.job_id}.json`;
+        link.click();
+        
+    } catch (error) {
+        console.error('Error exporting JSON:', error);
+        showCoTError('Failed to export JSON file');
+    }
+}
+
+// Helper functions for showing/hiding UI states
+function showCoTLoading() {
+    document.getElementById('cot-loading').classList.remove('hidden');
+}
+
+function hideCoTLoading() {
+    document.getElementById('cot-loading').classList.add('hidden');
+}
+
+function showCoTError(message) {
+    document.getElementById('cot-error-message').textContent = message;
+    document.getElementById('cot-error').classList.remove('hidden');
+}
+
+function hideCoTError() {
+    document.getElementById('cot-error').classList.add('hidden');
+}
+
+
+
+function hideCoTResults() {
+    document.getElementById('cot-analysis-results').classList.add('hidden');
+} 

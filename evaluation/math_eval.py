@@ -323,6 +323,24 @@ def main(llm, tokenizer, data_name, args):
             query += output
             # Output structured information for monitoring
             print(f"MONITOR_RESPONSE: {json.dumps({'epoch': epoch, 'prompt_idx': i, 'response': output, 'full_query': query})}")
+            
+            # Parse CoT structure from response (using only the answer field)
+            raw = output.strip()
+            
+            # Primary heuristic: If the delimiter #### is in raw, split on it
+            if '####' in raw:
+                cot_text, ans_text = raw.split('####', 1)
+                cot_text = cot_text.strip()
+                ans_text = ans_text.strip()
+            else:
+                # Fallback heuristic: Otherwise, split on the last newline
+                lines = raw.strip().splitlines()
+                cot_text = "\n".join(lines[:-1])
+                ans_text = lines[-1]
+            
+            # Convert to structured data (for monitoring only)
+            cot_steps = [line.strip() for line in cot_text.split('\n') if line.strip()]
+            final_answer = ans_text.strip()
             # Check if using custom prompt (disable code execution for custom prompts)
             using_custom_prompt = hasattr(args, 'prompt') and args.prompt
             
@@ -430,7 +448,7 @@ def main(llm, tokenizer, data_name, args):
                         [c for c in preds[j] if c in ["A", "B", "C", "D", "E"]]
                     )
 
-        sample.pop("prompt")
+        # Keep the prompt in the results for Excel export
         sample.update({"code": code, "pred": preds, "report": reports})
         all_samples.append(sample)
 
@@ -485,6 +503,7 @@ def main(llm, tokenizer, data_name, args):
     
     with open(metrics_file, "w") as f:
         json.dump(result_json, f, indent=4)
+    
     return result_json
 
 
