@@ -17,6 +17,7 @@ from trajectory import *
 from data_loader import load_data
 from python_executor import PythonExecutor
 from model_utils import load_hf_lm_and_tokenizer, generate_completions
+from prob_recorder import ProbabilityRecorder
 
 
 def parse_args():
@@ -55,10 +56,15 @@ def parse_args():
         action="store_true",
         help="Few shot for multiple-choice questions, zero shot for others.",
     )
+    parser.add_argument("--eval_method", type=str, default="pass@k", help="Evaluation method (pass@k, maj@k, rm@k)")
+    parser.add_argument("--enable_prob_tracking", action="store_true", help="Enable probability tracking of target answer tokens (requires vLLM)")
     args = parser.parse_args()
     args.top_p = (
         1 if args.temperature == 0 else args.top_p
     )  # top_p must be 1 when using greedy sampling (vllm)
+    
+    # For pass@k evaluation, n_sampling directly controls the k value
+    
     return args
 
 
@@ -269,6 +275,10 @@ def main(llm, tokenizer, data_name, args):
     elif "pure" in args.prompt_type:
         stop_words.append("\n\n\n")
 
+    # Prepare containers for optional probability tracking
+    all_probability_logs = [{} for _ in range(len(remain_prompts))]
+    all_exact_matches = [{} for _ in range(len(remain_prompts))]
+
     # start inference
     # measure time use
     start_time = time.time()
@@ -282,27 +292,70 @@ def main(llm, tokenizer, data_name, args):
         # get all outputs
         prompts = [item[1] for item in current_prompts]
         if args.use_vllm:
-            outputs = llm.generate(
-                prompts,
-                SamplingParams(
-                    temperature=args.temperature,
-                    top_p=args.top_p,
-                    top_k=args.top_k,
-                    max_tokens=args.max_tokens_per_call,
-                    n=1,
-                    stop=stop_words,
-                    stop_token_ids=(
-                        [151645, 151643]
-                        if "qwen2" in args.model_name_or_path.lower()
-                        else None
-                    ),
-                ),
-            )
+            # If prob tracking is enabled, we need tokenizer for target ids
+            if args.enable_prob_tracking and tokenizer is None:
+                tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
 
-            outputs = sorted(
-                outputs, key=lambda x: int(x.request_id)
-            )  # sort outputs by request_id
-            outputs = [output.outputs[0].text for output in outputs]
+            if args.enable_prob_tracking:
+                outputs = []
+                # Process one prompt at a time to keep recorder state clean
+                for i, prompt_text in enumerate(prompts):
+                    original_idx = current_prompts[i][0]
+                    # Gold answer for this prompt comes from constructed samples below
+                    # It was stored as example['gt'] when building samples; replicate using index mapping
+                    # We attached ground-truths in samples in the same order as input_prompts expansion
+                    # For UI evaluator we have example gt in samples list aligned with input order
+                    # Derive which sample this prompt belongs to
+                    sample_index = original_idx // args.n_sampling
+                    gold_answer = samples[sample_index]["gt"]
+
+                    gold_token_ids = tokenizer.encode(str(gold_answer), add_special_tokens=False)
+                    if not gold_token_ids:
+                        gold_token_ids = []
+
+                    recorder = ProbabilityRecorder(gold_token_ids, tokenizer)
+
+                    vllm_output = llm.generate(
+                        [prompt_text],
+                        SamplingParams(
+                            temperature=args.temperature,
+                            top_p=args.top_p,
+                            top_k=args.top_k,
+                            max_tokens=args.max_tokens_per_call,
+                            n=1,
+                            stop=stop_words,
+                            stop_token_ids=(
+                                [151645, 151643]
+                                if "qwen2" in args.model_name_or_path.lower()
+                                else None
+                            ),
+                            logits_processors=[recorder],
+                        ),
+                    )
+                    outputs.append(vllm_output[0].outputs[0].text)
+                    # Store per-epoch
+                    all_probability_logs[original_idx][f"epoch_{epoch}"] = recorder.probs
+                    all_exact_matches[original_idx][f"epoch_{epoch}"] = recorder.successful_matches
+            else:
+                outputs = llm.generate(
+                    prompts,
+                    SamplingParams(
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                        top_k=args.top_k,
+                        max_tokens=args.max_tokens_per_call,
+                        n=1,
+                        stop=stop_words,
+                        stop_token_ids=(
+                            [151645, 151643]
+                            if "qwen2" in args.model_name_or_path.lower()
+                            else None
+                        ),
+                    ),
+                )
+
+                outputs = sorted(outputs, key=lambda x: int(x.request_id))
+                outputs = [output.outputs[0].text for output in outputs]
         else:
             outputs = generate_completions(
                 model=llm,
@@ -319,30 +372,52 @@ def main(llm, tokenizer, data_name, args):
         remain_prompts = []
         remain_codes = []
         for (i, query), output in zip(current_prompts, outputs):
-            output = output.rstrip()
-            query += output
-            # Output structured information for monitoring
-            print(f"MONITOR_RESPONSE: {json.dumps({'epoch': epoch, 'prompt_idx': i, 'response': output, 'full_query': query})}")
-            
-            # Parse CoT structure from response (using only the answer field)
-            raw = output.strip()
-            
-            # Primary heuristic: If the delimiter #### is in raw, split on it
-            if '####' in raw:
-                cot_text, ans_text = raw.split('####', 1)
-                cot_text = cot_text.strip()
-                ans_text = ans_text.strip()
-            else:
-                # Fallback heuristic: Otherwise, split on the last newline
-                lines = raw.strip().splitlines()
-                cot_text = "\n".join(lines[:-1])
-                ans_text = lines[-1]
-            
-            # Convert to structured data (for monitoring only)
-            cot_steps = [line.strip() for line in cot_text.split('\n') if line.strip()]
-            final_answer = ans_text.strip()
-            # Check if using custom prompt (disable code execution for custom prompts)
-            using_custom_prompt = hasattr(args, 'prompt') and args.prompt
+            try:
+                output = output.rstrip()
+                query += output
+                
+                # Output structured information for monitoring
+                print(f"MONITOR_RESPONSE: {json.dumps({'epoch': epoch, 'prompt_idx': i, 'response': output, 'full_query': query})}")
+                
+                # Parse CoT structure from response (using only the answer field)
+                raw = output.strip()
+                
+                # Debug: Log the raw output for troubleshooting
+                if not raw:
+                    print(f"WARNING: Empty response from model for prompt {i}")
+                
+                # Primary heuristic: If the delimiter #### is in raw, split on it
+                if '####' in raw:
+                    cot_text, ans_text = raw.split('####', 1)
+                    cot_text = cot_text.strip()
+                    ans_text = ans_text.strip()
+                else:
+                    # Fallback heuristic: Otherwise, split on the last newline
+                    lines = raw.strip().splitlines()
+                    if len(lines) == 0:
+                        # Handle empty response
+                        cot_text = ""
+                        ans_text = ""
+                        print(f"WARNING: Empty lines after splitting response for prompt {i}")
+                    else:
+                        cot_text = "\n".join(lines[:-1])
+                        ans_text = lines[-1]
+                
+                # Convert to structured data (for monitoring only)
+                cot_steps = [line.strip() for line in cot_text.split('\n') if line.strip()]
+                final_answer = ans_text.strip() if ans_text else ""
+                # Check if using custom prompt (disable code execution for custom prompts)
+                using_custom_prompt = hasattr(args, 'prompt') and args.prompt
+                
+            except Exception as e:
+                print(f"ERROR processing output for prompt {i}: {e}")
+                print(f"Raw output: {repr(output)}")
+                # Set default values to continue processing
+                cot_text = ""
+                ans_text = ""
+                cot_steps = []
+                final_answer = ""
+                using_custom_prompt = hasattr(args, 'prompt') and args.prompt
             
             if args.prompt_type == "pal":
                 remain_prompts.append((i, query))
@@ -450,6 +525,12 @@ def main(llm, tokenizer, data_name, args):
 
         # Keep the prompt in the results for Excel export
         sample.update({"code": code, "pred": preds, "report": reports})
+
+        # Attach probability logs if available (first sample among n_sampling replicas)
+        sample_idx_for_logs = i * args.n_sampling
+        if any(all_probability_logs[sample_idx_for_logs].values()):
+            sample["probability_log"] = all_probability_logs[sample_idx_for_logs]
+            sample["exact_match_steps"] = all_exact_matches[sample_idx_for_logs]
         all_samples.append(sample)
 
     # add processed samples
@@ -459,11 +540,32 @@ def main(llm, tokenizer, data_name, args):
         data_name=data_name,
         prompt_type=args.prompt_type,
         execute=True,
+        eval_method=args.eval_method,
+        k=args.n_sampling,  # Use n_sampling as k
     )
 
     # save outputs
     if len(processed_samples) < len(all_samples) and args.save_outputs:
         save_jsonl(all_samples, out_file)
+
+        # Additionally save a separate probability-only JSONL when tracking is enabled
+        if getattr(args, 'enable_prob_tracking', False):
+            prob_only_file = out_file.replace(
+                ".jsonl", f"_{args.prompt_type}_prob.jsonl"
+            )
+            prob_records = []
+            for rec in all_samples:
+                entry = {
+                    "idx": rec.get("idx"),
+                    "probability_log": rec.get("probability_log", {}),
+                    "exact_match_steps": rec.get("exact_match_steps", {}),
+                    "score": rec.get("score", []),
+                }
+                prob_records.append(entry)
+            # Write as JSONL
+            with open(prob_only_file, "w") as f:
+                for entry in prob_records:
+                    f.write(json.dumps(entry) + "\n")
 
     result_json["time_use_in_second"] = time_use
     result_json["time_use_in_minite"] = (
@@ -481,8 +583,8 @@ def main(llm, tokenizer, data_name, args):
         "seed": args.seed,
         "n_sampling": args.n_sampling,
         "max_tokens": args.max_tokens_per_call,
-        "eval_method": "pass@k",  # Default value
-        "k": 1,  # Default value
+        "eval_method": args.eval_method,
+        "k": args.n_sampling,  # k equals n_sampling
     }
     
     # Add custom prompt if provided

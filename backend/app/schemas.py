@@ -40,13 +40,17 @@ class EvalRequest(BaseModel):
     temperature: confloat(ge=0, le=5) = 0.0
     top_p: confloat(gt=0, le=1) = 1.0
     top_k: conint(ge=0) = 0  # 0 = disabled
-    n_sampling: conint(ge=1, le=32) = 1
     max_tokens: conint(ge=1, le=8192) = 2048
     seed: conint(ge=0) = 42
     eval_method: str = "pass@k"  # enum later
-    k: conint(ge=1, le=32) = 1
+    k: conint(ge=1, le=32) = 1  # This maps to n_sampling internally
     backend: Backend = Backend.local
     path_config: Optional[PathConfig] = None  # Use default if not provided
+    # Probability tracking
+    enable_prob_tracking: bool = Field(default=False, description="Track probabilities of target answer tokens (requires vLLM)")
+    # Optional plotting directives (frontend convenience; plotting done post-hoc)
+    prob_plot_type: Optional[str] = Field(default=None, description="'aggregate' or 'single' for probability plots")
+    prob_plot_sample_id: Optional[int] = Field(default=None, description="Sample idx for single plot")
 
 class EvalResponse(BaseModel):
     job_id: str

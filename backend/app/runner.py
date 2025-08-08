@@ -188,10 +188,10 @@ class MathEvalRunner:
             "--start", "0",
             "--end", "-1",
             "--temperature", str(req.temperature),
-            "--n_sampling", str(req.n_sampling),
+            "--n_sampling", str(req.k),  # Use k as n_sampling
             "--top_p", str(req.top_p),
             # --max_tokens_per_call handled below
-            "--use_vllm",  # Disabled to support models not compatible with vLLM
+            "--use_vllm",
             "--save_outputs",
             "--overwrite",
             "--use_safetensors"
@@ -223,6 +223,16 @@ class MathEvalRunner:
         if job_id:
             cli.extend(["--job_id", job_id])
         
+        # Add probability tracking flag
+        if getattr(req, 'enable_prob_tracking', False):
+            # Force vLLM if user enabled prob tracking
+            if "--use_vllm" not in cli:
+                cli.append("--use_vllm")
+            cli.append("--enable_prob_tracking")
+        
+        # Add eval_method parameter
+        cli.extend(["--eval_method", req.eval_method])
+        
         # Compute result file path
         # This matches the math_eval.py output naming convention
         split = "test"
@@ -250,8 +260,18 @@ class MathEvalRunner:
             result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}_{job_id}.jsonl"
         else:
             result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
+
+        # Pre-compute probability JSONL path that math_eval will generate when enabled
+        prob_file = None
+        if getattr(req, 'enable_prob_tracking', False):
+            prob_suffix = f"_{prompt_type_for_file}_prob.jsonl"
+            if job_id:
+                base = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}_{job_id}"
+            else:
+                base = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}"
+            prob_file = f"{base}{prob_suffix}"
         
-        return cli, result_file
+        return cli, result_file, prob_file
     
     def launch_job(self, req: EvalRequest) -> str:
         """Launch a math evaluation job using math_eval.py"""
@@ -273,7 +293,7 @@ class MathEvalRunner:
             print(f"Created scripts_dir: {scripts_path}")
         
         # Build CLI args with job_id to avoid overwrites
-        cli, result_file = self._build_cli_args(req, uuid_jid)
+        cli, result_file, prob_file = self._build_cli_args(req, uuid_jid)
         if req.backend == Backend.local:
             local_job_id = get_next_local_job_id()
             out_file = os.path.join(path_config.logs_dir, f"qwen-math-{local_job_id}.out")
@@ -294,6 +314,7 @@ class MathEvalRunner:
                 "out_file": out_file,
                 "err_file": err_file,
                 "result_file": result_file,
+                "prob_file": prob_file,
                 "local_job_id": local_job_id
             }
             save_job_db()
@@ -321,8 +342,9 @@ class MathEvalRunner:
                     escaped_cli.append(shlex.quote(arg))
             
             # Add the prompt argument properly quoted
-            escaped_cli.append('--prompt')
-            escaped_cli.append(shlex.quote(req.prompt))
+            if req.prompt:
+                escaped_cli.append('--prompt')
+                escaped_cli.append(shlex.quote(req.prompt))
             
             script_content = f"""#!/bin/bash
 cd {self.evaluation_dir}
@@ -394,7 +416,8 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                             "backend": "slurm",
                             "out_file": out_file,
                             "err_file": err_file,
-                            "result_file": result_file
+                            "result_file": result_file,
+                            "prob_file": prob_file
                         }
                         save_job_db()
                         return uuid_jid
@@ -407,7 +430,8 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                             "sbatch_path": str(sbatch_path),
                             "error": f"SLURM submission failed: {result.stderr}",
                             "backend": "slurm",
-                            "result_file": result_file
+                            "result_file": result_file,
+                            "prob_file": prob_file
                         }
                         save_job_db()
                         return uuid_jid
@@ -432,7 +456,8 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     "run_path": str(script_path),
                     "sbatch_path": None,
                     "backend": "bash",
-                    "result_file": result_file
+                    "result_file": result_file,
+                    "prob_file": prob_file
                 }
                 save_job_db()
                 return uuid_jid

@@ -15,3 +15,4 @@ Pebble
 timeout-decorator
 latex2sympy2
 multiprocess
+matplotlib

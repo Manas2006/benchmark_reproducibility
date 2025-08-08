@@ -4,10 +4,10 @@ const WS_BASE = 'ws://localhost:8001';
 
 // Available options
 const AVAILABLE_MODELS = [
-    'Qwen/Qwen2-Math-1.5B',
-    'Qwen/Qwen2-Math-7B',
-    'Qwen/Qwen2-Math-14B',
-    'Qwen/Qwen2-Math-72B',
+    'Qwen/Qwen2.5-Math-1.5B',
+    'Qwen/Qwen2.5-Math-7B',
+    'Qwen/Qwen2.5-Math-14B',
+    'Qwen/Qwen2.5-Math-72B',
     'WizardLMTeam/WizardMath-7B-V1.1',
     'TIGER-Lab/MAmmoTH-7B',
     'deepseek-ai/deepseek-math-7b-instruct',
@@ -39,6 +39,8 @@ let structuredViewMode = true; // true for structured view, false for raw view
 
 // Tab management
 function showTab(tabName, event = null) {
+    console.log(`Switching to tab: ${tabName}`);
+
     // Hide all tab contents
     document.querySelectorAll('.tab-content').forEach(tab => {
         tab.classList.remove('active');
@@ -51,7 +53,30 @@ function showTab(tabName, event = null) {
     });
 
     // Show selected tab
-    document.getElementById(tabName).classList.add('active');
+    const selectedTab = document.getElementById(tabName);
+    if (selectedTab) {
+        selectedTab.classList.add('active');
+        console.log(`Tab '${tabName}' activated successfully`);
+    } else {
+        console.error(`Tab element with id '${tabName}' not found`);
+        console.log('Available tab elements:', Array.from(document.querySelectorAll('.tab-content')).map(tab => tab.id));
+
+        // If cot-analysis tab is missing, try to create it dynamically
+        if (tabName === 'cot-analysis') {
+            console.log('Attempting to create cot-analysis tab dynamically...');
+            createCoTAnalysisTab();
+            const newTab = document.getElementById(tabName);
+            if (newTab) {
+                newTab.classList.add('active');
+                console.log(`Tab '${tabName}' created and activated successfully`);
+            } else {
+                console.error('Failed to create cot-analysis tab');
+                return;
+            }
+        } else {
+            return;
+        }
+    }
 
     // Highlight selected tab button
     if (event && event.target) {
@@ -233,13 +258,15 @@ function addModelConfig() {
         temperature: '0.0',
         top_p: '1.0',
         top_k: '0',
-        n_sampling: '1',
         max_tokens: '2048',
         seed: '42',
         eval_method: EVAL_METHODS[0],
         k: '1',
         prompt: '',
-        prompt_type: 'custom'
+        prompt_type: 'custom',
+        enable_prob_tracking: false,
+        prob_plot_type: 'aggregate',
+        prob_plot_sample_id: ''
     };
 
     modelConfigs.push(config);
@@ -312,12 +339,11 @@ function calculateJobCount() {
         const top_ps = config.top_p.split('\n').filter(t => t.trim());
         const top_ks = config.top_k.split('\n').filter(k => k.trim());
         const seeds = config.seed.split('\n').filter(s => s.trim());
-        const n_samplings = config.n_sampling.split('\n').filter(n => n.trim());
         const ks = config.k.split('\n').filter(k => k.trim());
         const max_tokens = config.max_tokens.split('\n').filter(m => m.trim());
 
         const combinations = models.length * datasets.length * temperatures.length *
-            top_ps.length * top_ks.length * seeds.length * n_samplings.length * ks.length * max_tokens.length;
+            top_ps.length * top_ks.length * seeds.length * ks.length * max_tokens.length;
         totalJobs += combinations;
     });
     return totalJobs;
@@ -363,6 +389,14 @@ function renderModelConfigs() {
                 </div>
                 
                 <div>
+                    <label class="inline-flex items-center mt-6">
+                        <input type="checkbox" ${config.enable_prob_tracking ? 'checked' : ''} onchange="updateModelConfig(${config.id}, 'enable_prob_tracking', this.checked)" class="form-checkbox h-5 w-5 text-blue-600">
+                        <span class="ml-2 text-sm text-gray-700">Enable probability tracking (requires vLLM)</span>
+                    </label>
+                    <p class="text-xs text-gray-500 mt-1">If enabled, vLLM will be used and probabilities will be recorded to a separate JSONL.</p>
+                </div>
+                
+                <div>
                     <label class="block text-sm font-medium text-gray-700">Dataset (one per line)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'dataset', this.value)" 
                               class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
@@ -401,13 +435,6 @@ function renderModelConfigs() {
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">N Sampling (one per line)</label>
-                    <textarea onchange="updateModelConfig(${config.id}, 'n_sampling', this.value)" 
-                              class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
-                              rows="3" placeholder="1&#10;5&#10;10">${config.n_sampling}</textarea>
-                </div>
-                
-                <div>
                     <label class="block text-sm font-medium text-gray-700">Seed (one per line)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'seed', this.value)" 
                               class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
@@ -422,10 +449,11 @@ function renderModelConfigs() {
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">K (one per line)</label>
+                    <label class="block text-sm font-medium text-gray-700">K for Pass@K (one per line)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'k', this.value)" 
                               class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
-                              rows="3" placeholder="1&#10;5&#10;10">${config.k}</textarea>
+                              rows="3" placeholder="1&#10;2&#10;5">${config.k}</textarea>
+                    <p class="text-xs text-gray-500 mt-1">Number of attempts per question for pass@k evaluation</p>
                 </div>
                 
                 <div>
@@ -498,7 +526,6 @@ async function submitEvaluation() {
             const top_ps = config.top_p.split('\n').filter(t => t.trim());
             const top_ks = config.top_k.split('\n').filter(k => k.trim());
             const seeds = config.seed.split('\n').filter(s => s.trim());
-            const n_samplings = config.n_sampling.split('\n').filter(n => n.trim());
             const ks = config.k.split('\n').filter(k => k.trim());
             const max_tokens = config.max_tokens.split('\n').filter(m => m.trim());
 
@@ -509,36 +536,34 @@ async function submitEvaluation() {
                         top_ps.forEach(top_p => {
                             top_ks.forEach(top_k => {
                                 seeds.forEach(seed => {
-                                    n_samplings.forEach(n_sampling => {
-                                        ks.forEach(k => {
-                                            max_tokens.forEach(max_token => {
-                                                // Validate that prompt is provided for custom prompt type
-                                                if (config.prompt_type === 'custom' && (!config.prompt || config.prompt.trim() === '')) {
-                                                    throw new Error(`Custom prompt is required when 'Custom Prompt' is selected for model configuration ${config.id}`);
-                                                }
+                                    ks.forEach(k => {
+                                        max_tokens.forEach(max_token => {
+                                            // Validate that prompt is provided for custom prompt type
+                                            if (config.prompt_type === 'custom' && (!config.prompt || config.prompt.trim() === '')) {
+                                                throw new Error(`Custom prompt is required when 'Custom Prompt' is selected for model configuration ${config.id}`);
+                                            }
 
-                                                // Validate that URL is provided for Link from Hugging Face
-                                                if (config.model === 'Link from Hugging Face' && (!config.customModel || config.customModel.trim() === '')) {
-                                                    throw new Error(`Hugging Face URL is required when 'Link from Hugging Face' is selected for model configuration ${config.id}`);
-                                                }
+                                            // Validate that URL is provided for Link from Hugging Face
+                                            if (config.model === 'Link from Hugging Face' && (!config.customModel || config.customModel.trim() === '')) {
+                                                throw new Error(`Hugging Face URL is required when 'Link from Hugging Face' is selected for model configuration ${config.id}`);
+                                            }
 
-                                                const requestData = {
-                                                    model: model,
-                                                    dataset: dataset,
-                                                    prompt: config.prompt_type === 'custom' ? config.prompt.trim() : '',
-                                                    prompt_type: config.prompt_type,
-                                                    backend: config.backend,
-                                                    temperature: parseFloat(temp),
-                                                    top_p: parseFloat(top_p),
-                                                    top_k: parseInt(top_k),
-                                                    n_sampling: parseInt(n_sampling),
-                                                    seed: parseInt(seed),
-                                                    eval_method: config.eval_method,
-                                                    k: parseInt(k),
-                                                    max_tokens: parseInt(max_token)
-                                                };
-                                                allJobs.push(requestData);
-                                            });
+                                            const requestData = {
+                                                model: model,
+                                                dataset: dataset,
+                                                prompt: config.prompt_type === 'custom' ? config.prompt.trim() : '',
+                                                prompt_type: config.prompt_type,
+                                                backend: config.backend,
+                                                temperature: parseFloat(temp),
+                                                top_p: parseFloat(top_p),
+                                                top_k: parseInt(top_k),
+                                                seed: parseInt(seed),
+                                                eval_method: config.eval_method,
+                                                k: parseInt(k),
+                                                max_tokens: parseInt(max_token),
+                                                enable_prob_tracking: !!config.enable_prob_tracking
+                                            };
+                                            allJobs.push(requestData);
                                         });
                                     });
                                 });
@@ -603,6 +628,8 @@ function renderJobList(jobs) {
                     <button onclick="showResultModal('${job.result_file}', 'Model Outputs')" class="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700">View Model Outputs Inline</button>
                     <button onclick="openCoTAnalysisForJob('${job.job_id}')" class="px-3 py-1 bg-orange-600 text-white text-sm rounded hover:bg-orange-700">🧠 CoT Analysis</button>
                     <button onclick="exportToExcel('${job.job_id}')" class="px-3 py-1 bg-purple-600 text-white text-sm rounded hover:bg-purple-700">Export to Excel</button>
+                    ${job.prob_file ? `<button onclick="showResultModal('${job.prob_file}','Probability JSONL')" class="px-3 py-1 bg-teal-600 text-white text-sm rounded hover:bg-teal-700">View Prob JSONL</button>` : ''}
+                    ${job.prob_file ? `<button onclick="openProbPlotModal('${job.job_id}')" class="px-3 py-1 bg-pink-600 text-white text-sm rounded hover:bg-pink-700">Plot Probabilities</button>` : ''}
                 </div>
             `;
         } else if (job.status !== 'DONE' && job.result_file) {
@@ -835,19 +862,25 @@ async function refreshJobs() {
 
 async function showMetricsModal(jobId, title = 'Metrics') {
     try {
+        console.log(`Loading metrics for job: ${jobId}`);
+
         // First, get job configuration information
         let jobConfig = null;
         try {
             const jobResponse = await fetch(`${API_BASE}/jobs/${jobId}`);
             if (jobResponse.ok) {
                 jobConfig = await jobResponse.json();
+                console.log('Job configuration loaded:', jobConfig);
+            } else {
+                console.warn(`Failed to fetch job configuration: ${jobResponse.status}`);
             }
         } catch (e) {
             console.warn('Could not fetch job configuration:', e);
         }
 
         // Then get metrics
-        const url = `http://localhost:8000/metrics/${jobId}`;
+        const url = `${API_BASE}/metrics/${jobId}`;
+        console.log(`Fetching metrics from: ${url}`);
         const response = await fetch(url);
         if (!response.ok) {
             let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
@@ -947,19 +980,19 @@ async function showMetricsModal(jobId, title = 'Metrics') {
 // Parse CoT from answer field
 function parseCoTFromAnswer(answer) {
     if (!answer) return { cot_steps: [], final_answer: '' };
-    
+
     const raw = answer.trim();
-    
+
     // Primary heuristic: If the delimiter #### is in raw, split on it
     if (raw.includes('####')) {
         const parts = raw.split('####', 1);
         const cot_text = parts[0].trim();
         const ans_text = parts[1].trim();
-        
+
         // Convert to structured data
         const cot_steps = cot_text.split('\n').map(line => line.trim()).filter(line => line);
         const final_answer = ans_text;
-        
+
         return { cot_steps, final_answer };
     } else {
         // Fallback heuristic: Otherwise, split on the last newline
@@ -967,10 +1000,10 @@ function parseCoTFromAnswer(answer) {
         if (lines.length > 1) {
             const cot_text = lines.slice(0, -1).join('\n');
             const ans_text = lines[lines.length - 1];
-            
+
             const cot_steps = cot_text.split('\n').map(line => line.trim()).filter(line => line);
             const final_answer = ans_text.trim();
-            
+
             return { cot_steps, final_answer };
         } else {
             return { cot_steps: [], final_answer: raw };
@@ -980,7 +1013,9 @@ function parseCoTFromAnswer(answer) {
 
 async function showResultModal(resultFilePath, title = 'Results') {
     try {
-        const url = `http://localhost:8000/file?path=${encodeURIComponent(resultFilePath)}`;
+        console.log(`Loading result file: ${resultFilePath}`);
+        const url = `${API_BASE}/file?path=${encodeURIComponent(resultFilePath)}`;
+        console.log(`Fetching file from: ${url}`);
         const response = await fetch(url);
         if (!response.ok) {
             let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
@@ -997,7 +1032,7 @@ async function showResultModal(resultFilePath, title = 'Results') {
             throw new Error(errorMessage);
         }
         const content = await response.text();
-        
+
         // Try to parse as JSON to extract answer field for CoT display
         let jsonData = null;
         let cotDisplay = '';
@@ -1007,7 +1042,7 @@ async function showResultModal(resultFilePath, title = 'Results') {
                 // Parse CoT from the first sample's answer field
                 const firstSample = jsonData[0];
                 const cotData = parseCoTFromAnswer(firstSample.answer);
-                
+
                 if (cotData.cot_steps.length > 0) {
                     cotDisplay = `
                         <div class="mb-4 p-4 bg-blue-50 rounded-lg">
@@ -1034,7 +1069,7 @@ async function showResultModal(resultFilePath, title = 'Results') {
         } catch (e) {
             // Not JSON or parsing failed, continue with raw display
         }
-        
+
         // Create modal
         const modal = document.createElement('div');
         modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
@@ -1073,6 +1108,73 @@ async function showResultModal(resultFilePath, title = 'Results') {
     }
 }
 
+function openProbPlotModal(jobId) {
+    const modal = document.createElement('div');
+    modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+    modal.innerHTML = `
+        <div class="bg-white rounded-lg p-6 w-full max-w-xl">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-semibold">Plot Probabilities</h3>
+                <button onclick="this.closest('.fixed').remove()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+            </div>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Plot Type</label>
+                    <select id="prob-plot-type" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                        <option value="aggregate" selected>Aggregate</option>
+                        <option value="single">Single</option>
+                    </select>
+                </div>
+                <div id="prob-sample-id-field" class="hidden">
+                    <label class="block text-sm font-medium text-gray-700">Sample ID (idx)</label>
+                    <input id="prob-sample-id" type="number" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" placeholder="Enter sample idx">
+                </div>
+                <div class="flex justify-end gap-2">
+                    <button id="prob-plot-run" class="px-4 py-2 bg-pink-600 text-white rounded hover:bg-pink-700">Generate Plot</button>
+                </div>
+                <div id="prob-plot-output" class="mt-4"></div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    const plotTypeSel = modal.querySelector('#prob-plot-type');
+    const sampleField = modal.querySelector('#prob-sample-id-field');
+    plotTypeSel.addEventListener('change', () => {
+        if (plotTypeSel.value === 'single') sampleField.classList.remove('hidden');
+        else sampleField.classList.add('hidden');
+    });
+    modal.querySelector('#prob-plot-run').addEventListener('click', async () => {
+        const plotType = plotTypeSel.value;
+        const sampleIdVal = modal.querySelector('#prob-sample-id').value;
+        const params = new URLSearchParams();
+        params.append('plot_type', plotType);
+        if (plotType === 'single') {
+            if (!sampleIdVal) {
+                alert('Please enter a sample idx for single plot');
+                return;
+            }
+            params.append('sample_id', String(parseInt(sampleIdVal)));
+        }
+        const imgContainer = modal.querySelector('#prob-plot-output');
+        imgContainer.innerHTML = 'Generating plot...';
+        try {
+            const url = `${API_BASE}/jobs/${jobId}/prob-plot?${params.toString()}`;
+            const resp = await fetch(url);
+            if (!resp.ok) {
+                const err = await resp.text();
+                throw new Error(err || `HTTP ${resp.status}`);
+            }
+            const blob = await resp.blob();
+            const imgUrl = URL.createObjectURL(blob);
+            imgContainer.innerHTML = `<img src="${imgUrl}" class="max-h-[60vh] rounded border"/>`;
+        } catch (e) {
+            imgContainer.innerHTML = `<div class="text-red-600">Error: ${escapeHtml(e.message || String(e))}</div>`;
+        }
+    });
+    // Close on background click
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+}
+
 async function exportToExcel(jobId) {
     try {
         const response = await fetch(`${API_BASE}/jobs/${jobId}/export`);
@@ -1085,7 +1187,7 @@ async function exportToExcel(jobId) {
             }
             throw new Error(errorMessage);
         }
-        
+
         // Get the filename from the response headers
         const contentDisposition = response.headers.get('content-disposition');
         let filename = 'results.xlsx';
@@ -1095,7 +1197,7 @@ async function exportToExcel(jobId) {
                 filename = filenameMatch[1];
             }
         }
-        
+
         // Create blob and download
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
@@ -1106,7 +1208,7 @@ async function exportToExcel(jobId) {
         a.click();
         window.URL.revokeObjectURL(url);
         document.body.removeChild(a);
-        
+
     } catch (error) {
         console.error('Error exporting to Excel:', error);
         alert('Error exporting to Excel:\n\n' + error.message);
@@ -1135,11 +1237,11 @@ document.addEventListener('DOMContentLoaded', function () {
     document.getElementById('path-config-form').addEventListener('submit', savePathConfig);
 
     // Add CoT job select change handler
-    document.getElementById('cot-job-select').addEventListener('change', function() {
+    document.getElementById('cot-job-select').addEventListener('change', function () {
         const analyzeBtn = document.getElementById('analyze-btn');
         const exportExcelBtn = document.getElementById('export-excel-btn');
         const exportJsonBtn = document.getElementById('export-json-btn');
-        
+
         if (this.value) {
             analyzeBtn.disabled = false;
             exportExcelBtn.disabled = false;
@@ -1164,23 +1266,23 @@ async function loadCoTJobs() {
         const response = await fetch(`${API_BASE}/jobs`);
         const data = await response.json();
         const jobs = data.jobs || [];
-        
+
         // Filter for completed jobs
         const completedJobs = jobs.filter(job => job.status === 'DONE' && job.result_file);
-        
+
         const select = document.getElementById('cot-job-select');
         select.innerHTML = '<option value="">Select a completed job...</option>';
-        
+
         completedJobs.forEach(job => {
             const option = document.createElement('option');
             option.value = job.job_id;
-            
+
             // Display SLURM ID if available, otherwise UUID
             let displayName = job.job_id;
             if (job.backend === 'slurm' && job.slurm_jid) {
                 displayName = `${job.slurm_jid} (${job.job_id.substring(0, 8)}...)`;
             }
-            
+
             // Extract model name from the request field, format it nicely
             let modelName = 'Unknown Model';
             if (job.request && job.request.model) {
@@ -1190,11 +1292,11 @@ async function loadCoTJobs() {
                     modelName = modelName.split('/').slice(-1)[0];
                 }
             }
-            
+
             option.textContent = `${displayName} - ${modelName}`;
             select.appendChild(option);
         });
-        
+
         console.log(`Loaded ${completedJobs.length} completed jobs for CoT analysis`);
     } catch (error) {
         console.error('Error loading jobs for CoT analysis:', error);
@@ -1203,7 +1305,14 @@ async function loadCoTJobs() {
 }
 
 async function runCoTAnalysis() {
-    const jobId = document.getElementById('cot-job-select').value;
+    const jobSelect = document.getElementById('cot-job-select');
+    if (!jobSelect) {
+        console.error('cot-job-select element not found');
+        showCoTError('CoT Analysis tab not properly loaded. Please try refreshing the page.');
+        return;
+    }
+
+    const jobId = jobSelect.value;
     if (!jobId) {
         showCoTError('Please select a job to analyze');
         return;
@@ -1216,28 +1325,28 @@ async function runCoTAnalysis() {
 
     try {
         console.log(`Running CoT analysis for job: ${jobId}`);
-        
+
         // Call the backend CoT analysis endpoint
         const response = await fetch(`${API_BASE}/jobs/${jobId}/cot-analysis`);
-        
+
         if (!response.ok) {
             const errorData = await response.json();
             throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
         }
-        
+
         const analysisData = await response.json();
         console.log('API response received:', analysisData);
         console.log('Setting currentCoTData...');
         currentCoTData = analysisData;
         console.log('currentCoTData set successfully');
-        
+
         // Hide loading and show results
         console.log('About to hide loading...');
         hideCoTLoading();
         console.log('Loading hidden, about to show results...');
         showCoTResults(analysisData);
         console.log('showCoTResults call completed');
-        
+
     } catch (error) {
         console.error('Error running CoT analysis:', error);
         hideCoTLoading();
@@ -1250,21 +1359,21 @@ function showCoTResults(data) {
         console.log('CoT Analysis Data received:', data);
         console.log('Job summary:', data.job_summary);
         console.log('Per sample metrics length:', data.per_sample_metrics?.length);
-        
+
         console.log('About to show results section...');
         document.getElementById('cot-analysis-results').classList.remove('hidden');
         console.log('Results section shown');
-        
+
         // Populate summary statistics
         console.log('About to call populateCoTSummary...');
         populateCoTSummary(data.job_summary);
         console.log('populateCoTSummary completed');
-        
+
         // Populate CQS component scores
         console.log('About to call populateCQSComponents...');
         populateCQSComponents(data.job_summary);
         console.log('populateCQSComponents completed');
-        
+
         // Show random samples by default
         console.log('About to call showRandomSamples...');
         showRandomSamples();
@@ -1278,20 +1387,20 @@ function showCoTResults(data) {
 function populateCoTSummary(summary) {
     console.log('Populating CoT Summary with:', summary);
     const summaryDiv = document.getElementById('cot-summary');
-    
+
     if (!summaryDiv) {
         console.error('ERROR: cot-summary element not found!');
         return;
     }
-    
+
     if (!summary) {
         console.error('Summary is undefined');
         summaryDiv.innerHTML = '<div class="text-red-500">Error: No summary data</div>';
         return;
     }
-    
+
     console.log('About to populate summary with total_samples:', summary.total_samples);
-    
+
     try {
         summaryDiv.innerHTML = `
             <div class="text-center">
@@ -1329,20 +1438,20 @@ function populateCoTSummary(summary) {
 function populateCQSComponents(summary) {
     console.log('Populating CQS Components with:', summary);
     const componentsDiv = document.getElementById('cqs-components');
-    
+
     if (!componentsDiv) {
         console.error('ERROR: cqs-components element not found!');
         return;
     }
-    
+
     if (!summary) {
         console.error('Summary is undefined for CQS components');
         componentsDiv.innerHTML = '<div class="text-red-500">Error: No summary data for components</div>';
         return;
     }
-    
+
     console.log('Populating CQS components with final_answer_correctness_avg:', summary.final_answer_correctness_avg);
-    
+
     try {
         const components = [
             { name: 'Final Answer Correctness', score: summary.final_answer_correctness_avg || 0, weight: '30%', color: 'text-red-600' },
@@ -1351,9 +1460,9 @@ function populateCQSComponents(summary) {
             { name: 'Consistency & Completeness', score: summary.consistency_completeness_avg || 0, weight: '15%', color: 'text-green-600' },
             { name: 'Formatting & Notation', score: summary.formatting_notation_avg || 0, weight: '10%', color: 'text-blue-600' }
         ];
-        
+
         console.log('CQS Components:', components);
-        
+
         componentsDiv.innerHTML = components.map(comp => `
             <div class="text-center p-3 bg-white rounded-lg border">
                 <div class="text-lg font-bold ${comp.color}">${comp.score.toFixed(3)}</div>
@@ -1365,7 +1474,7 @@ function populateCQSComponents(summary) {
                 </div>
             </div>
         `).join('');
-        
+
         console.log('CQS Components populated successfully');
     } catch (error) {
         console.error('Error populating CQS components:', error);
@@ -1375,50 +1484,50 @@ function populateCQSComponents(summary) {
 
 function showTopPerformers() {
     if (!currentCoTData) return;
-    
+
     const samples = currentCoTData.per_sample_metrics
         .sort((a, b) => b.metrics.cqs_score - a.metrics.cqs_score)
         .slice(0, 10);
-    
+
     renderSampleAnalysis(samples, 'Top 10 Performers (Highest CQS Scores)');
 }
 
 function showBottomPerformers() {
     if (!currentCoTData) return;
-    
+
     const samples = currentCoTData.per_sample_metrics
         .sort((a, b) => a.metrics.cqs_score - b.metrics.cqs_score)
         .slice(0, 10);
-    
+
     renderSampleAnalysis(samples, 'Bottom 10 Performers (Lowest CQS Scores)');
 }
 
 function showRandomSamples() {
     console.log('ShowRandomSamples called, currentCoTData:', currentCoTData);
-    
+
     if (!currentCoTData) {
         console.error('No currentCoTData available for samples');
         return;
     }
-    
+
     if (!currentCoTData.per_sample_metrics) {
         console.error('No per_sample_metrics in currentCoTData');
         return;
     }
-    
+
     console.log('Available samples:', currentCoTData.per_sample_metrics.length);
-    
+
     const samples = [...currentCoTData.per_sample_metrics]
         .sort(() => 0.5 - Math.random())
         .slice(0, 10);
-    
+
     console.log('Selected samples for display:', samples.length);
     renderSampleAnalysis(samples, 'Random Sample Selection');
 }
 
 function renderSampleAnalysis(samples, title) {
     const sampleDiv = document.getElementById('sample-analysis');
-    
+
     sampleDiv.innerHTML = `
         <h4 class="font-semibold text-gray-800 mb-3">${title}</h4>
         <div class="space-y-3">
@@ -1465,23 +1574,50 @@ function getCQSColorClass(score) {
 }
 
 function openCoTAnalysisForJob(jobId) {
-    // Switch to CoT Analysis tab
-    showTab('cot-analysis');
-    
-    // Select the job
-    document.getElementById('cot-job-select').value = jobId;
-    
-    // Enable the analyze button
-    document.getElementById('analyze-btn').disabled = false;
-    document.getElementById('export-excel-btn').disabled = false;
-    document.getElementById('export-json-btn').disabled = false;
-    
-    // Optionally run analysis immediately
-    setTimeout(() => {
-        if (confirm('Run CoT analysis for this job now?')) {
-            runCoTAnalysis();
-        }
-    }, 100);
+    try {
+        console.log(`Opening CoT analysis for job: ${jobId}`);
+
+        // Switch to CoT Analysis tab
+        showTab('cot-analysis');
+
+        // Load jobs for the dropdown first, then wait for elements
+        loadCoTJobs().then(() => {
+            // Wait for the cot-job-select element to be available
+            waitForElement('#cot-job-select').then((jobSelect) => {
+                // Select the job
+                jobSelect.value = jobId;
+                console.log(`Selected job ${jobId} in dropdown`);
+
+                // Enable the analyze button
+                const analyzeBtn = document.getElementById('analyze-btn');
+                const exportExcelBtn = document.getElementById('export-excel-btn');
+                const exportJsonBtn = document.getElementById('export-json-btn');
+
+                if (analyzeBtn) {
+                    analyzeBtn.disabled = false;
+                    console.log('Analyze button enabled');
+                }
+                if (exportExcelBtn) exportExcelBtn.disabled = false;
+                if (exportJsonBtn) exportJsonBtn.disabled = false;
+
+                // Optionally run analysis immediately
+                setTimeout(() => {
+                    if (confirm('Run CoT analysis for this job now?')) {
+                        runCoTAnalysis();
+                    }
+                }, 100);
+            }).catch(error => {
+                console.error('Error waiting for cot-job-select element:', error);
+                alert('CoT Analysis tab not properly loaded. Please try refreshing the page.');
+            });
+        }).catch(error => {
+            console.error('Error loading CoT jobs:', error);
+            alert('Error loading jobs for CoT analysis: ' + error.message);
+        });
+    } catch (error) {
+        console.error('Error in openCoTAnalysisForJob:', error);
+        alert('Error opening CoT analysis: ' + error.message);
+    }
 }
 
 async function exportCoTExcel() {
@@ -1490,7 +1626,7 @@ async function exportCoTExcel() {
         showCoTError('Please select a job first');
         return;
     }
-    
+
     try {
         // Use the existing Excel export functionality
         exportToExcel(jobId);
@@ -1505,17 +1641,17 @@ async function exportCoTJSON() {
         showCoTError('Please run analysis first');
         return;
     }
-    
+
     try {
         // Create and download JSON file
         const dataStr = JSON.stringify(currentCoTData, null, 2);
-        const dataBlob = new Blob([dataStr], {type: 'application/json'});
-        
+        const dataBlob = new Blob([dataStr], { type: 'application/json' });
+
         const link = document.createElement('a');
         link.href = URL.createObjectURL(dataBlob);
         link.download = `cot_analysis_${currentCoTData.job_id}.json`;
         link.click();
-        
+
     } catch (error) {
         console.error('Error exporting JSON:', error);
         showCoTError('Failed to export JSON file');
@@ -1544,4 +1680,182 @@ function hideCoTError() {
 
 function hideCoTResults() {
     document.getElementById('cot-analysis-results').classList.add('hidden');
-} 
+}
+
+// Function to create the CoT Analysis tab dynamically
+function createCoTAnalysisTab() {
+    const mainContent = document.querySelector('main');
+    if (!mainContent) {
+        console.error('Main content area not found');
+        return;
+    }
+
+    const cotAnalysisHTML = `
+        <div id="cot-analysis" class="tab-content">
+            <div class="bg-white shadow rounded-lg p-6">
+                <h2 class="text-xl font-semibold mb-4">Chain-of-Thought Analysis</h2>
+                <p class="text-sm text-gray-600 mb-6">
+                    Analyze the reasoning quality of completed evaluation jobs using our rigorous CoT Quality Score (CQS) system.
+                </p>
+
+                <!-- Job Selection -->
+                <div class="mb-6">
+                    <label for="cot-job-select" class="block text-sm font-medium text-gray-700 mb-2">
+                        Select Job for Analysis
+                    </label>
+                    <select id="cot-job-select" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                        <option value="">Select a completed job...</option>
+                    </select>
+                </div>
+
+                <!-- Analysis Controls -->
+                <div class="flex space-x-4 mb-6">
+                    <button onclick="runCoTAnalysis()" id="analyze-btn" disabled
+                        class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed">
+                        🧠 Run CoT Analysis
+                    </button>
+                    <button onclick="loadCoTJobs()"
+                        class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700">
+                        🔄 Refresh Jobs
+                    </button>
+                </div>
+
+                <!-- Analysis Results -->
+                <div id="cot-analysis-results" class="hidden">
+                    <!-- Job Summary -->
+                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+                        <h3 class="text-lg font-semibold text-blue-900 mb-3">📊 Overall CQS Summary</h3>
+                        <div id="cot-summary" class="grid grid-cols-2 md:grid-cols-3 gap-4">
+                            <!-- Summary stats will be populated here -->
+                        </div>
+                    </div>
+
+                    <!-- CQS Component Breakdown -->
+                    <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-3">🏆 CQS Component Scores</h3>
+                        <div id="cqs-components" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            <!-- CQS components will be populated here -->
+                        </div>
+                    </div>
+
+                    <!-- Sample Analysis -->
+                    <div class="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
+                        <h3 class="text-lg font-semibold text-green-900 mb-3">🔍 Sample Analysis</h3>
+                        <div class="flex space-x-4 mb-4">
+                            <button onclick="showTopPerformers()" 
+                                class="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700">
+                                Top Performers
+                            </button>
+                            <button onclick="showBottomPerformers()" 
+                                class="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700">
+                                Bottom Performers
+                            </button>
+                            <button onclick="showRandomSamples()" 
+                                class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                                Random Samples
+                            </button>
+                        </div>
+                        <div id="sample-analysis" class="max-h-96 overflow-y-auto">
+                            <!-- Sample details will be populated here -->
+                        </div>
+                    </div>
+
+                    <!-- Export Options -->
+                    <div class="border-t pt-4">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-3">📥 Export Analysis</h3>
+                        <div class="flex space-x-4">
+                            <button onclick="exportCoTExcel()" id="export-excel-btn" disabled
+                                class="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 disabled:bg-gray-400 disabled:cursor-not-allowed">
+                                📊 Export Enhanced Excel
+                            </button>
+                            <button onclick="exportCoTJSON()" id="export-json-btn" disabled
+                                class="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed">
+                                📋 Export JSON Data
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Loading State -->
+                <div id="cot-loading" class="hidden text-center py-8">
+                    <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                    <p class="mt-2 text-gray-600">Analyzing Chain-of-Thought reasoning...</p>
+                </div>
+
+                <!-- Error State -->
+                <div id="cot-error" class="hidden bg-red-50 border border-red-200 rounded-lg p-4">
+                    <h3 class="text-red-800 font-semibold">Analysis Error</h3>
+                    <p id="cot-error-message" class="text-red-700"></p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    mainContent.insertAdjacentHTML('beforeend', cotAnalysisHTML);
+    console.log('CoT Analysis tab created dynamically');
+}
+
+// Helper function to wait for an element to be available
+function waitForElement(selector, timeout = 5000) {
+    return new Promise((resolve, reject) => {
+        const element = document.querySelector(selector);
+        if (element) {
+            resolve(element);
+            return;
+        }
+
+        const observer = new MutationObserver((mutations, obs) => {
+            const element = document.querySelector(selector);
+            if (element) {
+                obs.disconnect();
+                resolve(element);
+            }
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+
+        setTimeout(() => {
+            observer.disconnect();
+            reject(new Error(`Element ${selector} not found within ${timeout}ms`));
+        }, timeout);
+    });
+}
+
+// Ensure DOM is loaded before running any functions
+document.addEventListener('DOMContentLoaded', function () {
+    console.log('DOM loaded, initializing UI...');
+
+    // Verify that all expected tab elements exist
+    const expectedTabs = ['configure', 'monitor', 'jobs', 'cot-analysis', 'settings'];
+    let missingTabs = [];
+
+    expectedTabs.forEach(tabId => {
+        const tab = document.getElementById(tabId);
+        if (tab) {
+            console.log(`✓ Tab '${tabId}' found`);
+        } else {
+            console.error(`✗ Tab '${tabId}' NOT found`);
+            missingTabs.push(tabId);
+        }
+    });
+
+    // If cot-analysis tab is missing, create it dynamically
+    if (missingTabs.includes('cot-analysis')) {
+        console.log('Creating missing cot-analysis tab...');
+        createCoTAnalysisTab();
+    }
+
+    // Debug: Check if the HTML content is complete
+    const mainContent = document.querySelector('main');
+    if (mainContent) {
+        console.log('Main content found, children count:', mainContent.children.length);
+        console.log('Main content HTML length:', mainContent.innerHTML.length);
+    } else {
+        console.error('Main content not found!');
+    }
+
+    // Initialize any necessary UI elements here
+});

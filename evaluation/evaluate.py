@@ -11,7 +11,8 @@ from utils import load_jsonl
 from python_executor import PythonExecutor
 
 
-def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, max_num_samples=None, execute=False):
+def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, max_num_samples=None, execute=False, eval_method="pass@k", k=1):
+    # Note: k parameter is kept for backwards compatibility but represents n_sampling internally
     assert samples or file_path, "samples or file_path must be provided"
     if not samples:
         samples = list(load_jsonl(file_path))
@@ -60,23 +61,51 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
         score_mat.append(sample['score'])
         idx += len(sample['pred'])
 
-    max_len = max([len(s) for s in score_mat])
+    # Implement different evaluation methods
+    if eval_method == "pass@k":
+        # For pass@k, check if any of the k predictions are correct
+        # k represents the number of samples generated (n_sampling)
+        pass_at_k_scores = []
+        for sample in samples:
+            # Take first k predictions (or all if less than k available)
+            k_predictions = sample['score'][:min(k, len(sample['score']))]
+            # Sample passes if any of the k predictions are correct
+            sample_passes = any(k_predictions)
+            pass_at_k_scores.append(sample_passes)
+        
+        # Calculate pass@k accuracy
+        pass_at_k_accuracy = sum(pass_at_k_scores) / len(pass_at_k_scores) * 100
+        
+        result_json = {
+            "num_samples": len(samples),
+            "num_scores": len(scores),
+            "timeout_samples": timeout_cnt,
+            "empty_samples": len([s for s in samples if not s['pred'][-1]]),
+            "acc": round(pass_at_k_accuracy, 1),
+            "eval_method": eval_method,
+            "k": k
+        }
+    else:
+        # Default behavior for other eval methods (original logic)
+        max_len = max([len(s) for s in score_mat])
 
-    for i, s in enumerate(score_mat):
-        if len(s) < max_len:
-            score_mat[i] = s + [s[-1]] * (max_len - len(s)) # pad
+        for i, s in enumerate(score_mat):
+            if len(s) < max_len:
+                score_mat[i] = s + [s[-1]] * (max_len - len(s)) # pad
 
-    # output mean of each column of scores
-    col_means= np.array(score_mat).mean(axis=0)
-    mean_score = list(np.round(col_means * 100, decimals=1))
+        # output mean of each column of scores
+        col_means= np.array(score_mat).mean(axis=0)
+        mean_score = list(np.round(col_means * 100, decimals=1))
 
-    result_json = {
-        "num_samples": len(samples),
-        "num_scores": len(scores),
-        "timeout_samples": timeout_cnt,
-        "empty_samples": len([s for s in samples if not s['pred'][-1]]),
-        "acc": mean_score[0]
-    }
+        result_json = {
+            "num_samples": len(samples),
+            "num_scores": len(scores),
+            "timeout_samples": timeout_cnt,
+            "empty_samples": len([s for s in samples if not s['pred'][-1]]),
+            "acc": mean_score[0],
+            "eval_method": eval_method,
+            "k": k
+        }
 
     # each type score
     if "type" in samples[0]:
@@ -84,7 +113,17 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
         for sample in samples:
             if sample['type'] not in type_scores:
                 type_scores[sample['type']] = []
-            type_scores[sample['type']].append(sample['score'][-1])
+            
+            if eval_method == "pass@k":
+                # For pass@k, check if any of the first k predictions are correct
+                # k represents the number of samples generated (n_sampling)
+                k_predictions = sample['score'][:min(k, len(sample['score']))]
+                sample_passes = any(k_predictions)
+                type_scores[sample['type']].append(sample_passes)
+            else:
+                # Default behavior
+                type_scores[sample['type']].append(sample['score'][-1])
+        
         type_scores = {k: np.round(np.array(v).mean() * 100, decimals=1) for k, v in type_scores.items()}
         type_scores = {k: v for k, v in sorted(type_scores.items(), key=lambda item: item[0])}
         result_json['type_acc'] = type_scores

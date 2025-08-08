@@ -13,6 +13,8 @@ from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoT
 from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data
 from .path_manager import path_manager
 from .cot_analyzer import CoTAnalyzer
+import subprocess
+import shlex
 
 app = FastAPI(title="Qwen Math Evaluation API", version="1.0.0")
 
@@ -32,6 +34,16 @@ app.mount("/static", StaticFiles(directory="../frontend"), name="static")
 async def root():
     """Serve the main frontend page"""
     return FileResponse("../frontend/index.html")
+
+@app.get("/debug/html")
+async def debug_html():
+    """Debug endpoint to check HTML content"""
+    try:
+        with open("../frontend/index.html", "r") as f:
+            content = f.read()
+        return {"content_length": len(content), "has_cot_analysis": "cot-analysis" in content}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/health")
 async def health_check():
@@ -100,7 +112,101 @@ async def job_status(jid: str):
         status_info.pop("cli", None)
     slurm_jid = status_info.get("slurm_jid")
     result_file = status_info.get("result_file")
-    return {"job_id": jid, "slurm_jid": slurm_jid, **status_info, "result_file": result_file}
+    prob_file = status_info.get("prob_file")
+    return {"job_id": jid, "slurm_jid": slurm_jid, **status_info, "result_file": result_file, "prob_file": prob_file}
+
+@app.get("/jobs/{jid}/prob-file")
+async def get_prob_file(jid: str):
+    if jid not in job_db:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job_info = job_db[jid]
+    prob_file = job_info.get("prob_file")
+    if not prob_file:
+        raise HTTPException(status_code=404, detail="Probability file not available for this job")
+    file_path = Path(prob_file)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Probability file not found on disk")
+    # Security check
+    config = path_manager.get_config()
+    allowed_dirs = [Path(config.output_dir), Path(config.logs_dir), Path(config.evaluation_dir)]
+    is_allowed = False
+    for allowed_dir in allowed_dirs:
+        try:
+            file_path.relative_to(allowed_dir)
+            is_allowed = True
+            break
+        except ValueError:
+            continue
+    if not is_allowed:
+        raise HTTPException(status_code=403, detail="Access denied to this file path")
+    return FileResponse(path=str(file_path), filename=file_path.name, media_type='application/json')
+
+@app.get("/jobs/{jid}/prob-plot")
+async def generate_prob_plot(jid: str, plot_type: str, sample_id: int | None = None):
+    if plot_type not in ("aggregate", "single"):
+        raise HTTPException(status_code=400, detail="plot_type must be 'aggregate' or 'single'")
+    if jid not in job_db:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job_info = job_db[jid]
+    prob_file = job_info.get("prob_file")
+    if not prob_file:
+        raise HTTPException(status_code=404, detail="Probability file not available for this job")
+    prob_path = Path(prob_file)
+    if not prob_path.exists():
+        raise HTTPException(status_code=404, detail="Probability file not found on disk")
+
+    # Build plotting command
+    config = path_manager.get_config()
+    python_bin = config.python_path
+    eval_dir = Path(config.evaluation_dir)
+    plot_script = eval_dir / "prob_plot.py"
+    if not plot_script.exists():
+        raise HTTPException(status_code=500, detail=f"Plot script not found: {plot_script}")
+
+    # Names
+    dataset_name = job_info.get("request", {}).get("dataset", "dataset")
+    model_name = job_info.get("request", {}).get("model", "model")
+    prompt_type = job_info.get("request", {}).get("prompt_type", "") or "custom"
+    method_name = f"{Path(model_name).name}-{prompt_type}"
+
+    output_dir = prob_path.parent / "prob_plots"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Expected output path
+    if plot_type == "aggregate":
+        expected_png = output_dir / f"{dataset_name}_aggregate_{method_name}.png"
+    else:
+        if sample_id is None:
+            raise HTTPException(status_code=400, detail="sample_id is required for single plot")
+        expected_png = output_dir / f"{dataset_name}_single_{method_name}_id_{sample_id}.png"
+
+    cmd = [
+        python_bin,
+        str(plot_script),
+        str(prob_path),
+        "--dataset_name", str(dataset_name),
+        "--method_name", str(method_name),
+        "--output_dir", str(output_dir),
+        "--plot_type", plot_type,
+    ]
+    if plot_type == "single":
+        cmd.extend(["--sample_id", str(sample_id)])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=eval_dir)
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"Plotting failed: {result.stderr}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error running plot script: {str(e)}")
+
+    if not expected_png.exists():
+        # Fallback: try to find any recent PNG in output_dir
+        pngs = sorted(output_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not pngs:
+            raise HTTPException(status_code=500, detail="Plot image not generated")
+        expected_png = pngs[0]
+
+    return FileResponse(path=str(expected_png), filename=expected_png.name, media_type='image/png')
 
 @app.websocket("/stream/{jid}")
 async def stream(jid: str, ws: WebSocket):
@@ -367,7 +473,8 @@ async def list_jobs():
                 job_info.pop("cli", None)
             slurm_jid = job_info.get("slurm_jid")
             result_file = job_info.get("result_file")
-            jobs.append({"job_id": jid, "slurm_jid": slurm_jid, **job_info, "result_file": result_file})
+            prob_file = job_info.get("prob_file")
+            jobs.append({"job_id": jid, "slurm_jid": slurm_jid, **job_info, "result_file": result_file, "prob_file": prob_file})
         return {"jobs": jobs}
     except Exception as e:
         print(f"Error in /jobs: {e}")
