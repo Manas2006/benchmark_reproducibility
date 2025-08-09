@@ -643,18 +643,19 @@ function renderJobList(jobs) {
             `;
         }
         // Delete button always at top right
-        const deleteButtonHtml = `
-            <button onclick="deleteJob('${job.job_id}')" title="Delete job" class="absolute top-2 right-2 px-2 py-1 text-red-600 hover:text-red-800 z-10">
-                <svg xmlns='http://www.w3.org/2000/svg' class='h-5 w-5' fill='none' viewBox='0 0 24 24' stroke='currentColor'><path stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M6 18L18 6M6 6l12 12'/></svg>
-            </button>
-        `;
         // Monitor button only for non-completed jobs
         let monitorButtonHtml = '';
         if (job.status !== 'DONE' && job.status !== 'ERROR') {
             monitorButtonHtml = `<button onclick="monitorJob('${job.job_id}')" class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">Monitor</button>`;
         }
+        
+        const deleteButtonHtml = `
+            <button onclick="deleteJob('${job.job_id}')" title="Delete job" class="px-2 py-1 text-red-600 hover:text-red-800">
+                <svg xmlns='http://www.w3.org/2000/svg' class='h-5 w-5' fill='none' viewBox='0 0 24 24' stroke='currentColor'><path stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M6 18L18 6M6 6l12 12'/></svg>
+            </button>
+        `;
+        
         jobDiv.innerHTML = `
-            ${deleteButtonHtml}
             <div class="flex justify-between items-start">
                 <div>
                     <h3 class="font-medium">Job ID: ${jobIdDisplay}</h3>
@@ -665,6 +666,7 @@ function renderJobList(jobs) {
                 </div>
                 <div class="flex space-x-2 items-start">
                     ${monitorButtonHtml}
+                    ${deleteButtonHtml}
                 </div>
             </div>
             ${resultButtonHtml}
@@ -685,6 +687,72 @@ async function deleteJob(jobId) {
         }
     } catch (error) {
         alert('Error deleting job: ' + error.message);
+    }
+}
+
+async function clearAllJobs() {
+    try {
+        // First get all jobs
+        const response = await fetch(`${API_BASE}/jobs`);
+        const data = await response.json();
+        const jobs = data.jobs || [];
+        
+        if (jobs.length === 0) {
+            alert('No jobs to delete');
+            return;
+        }
+        
+        // Confirm deletion
+        const confirmation = confirm(`Are you sure you want to delete ALL ${jobs.length} jobs? This action cannot be undone.`);
+        if (!confirmation) return;
+        
+        // Delete all jobs in parallel
+        const deletePromises = jobs.map(job => 
+            fetch(`${API_BASE}/jobs/${job.job_id}`, { method: 'DELETE' })
+        );
+        
+        // Show progress
+        const totalJobs = jobs.length;
+        
+        // Update progress as jobs are deleted
+        const results = await Promise.allSettled(deletePromises);
+        
+        // Count successful deletions
+        let successCount = 0;
+        let failCount = 0;
+        
+        for (const result of results) {
+            if (result.status === 'fulfilled') {
+                try {
+                    const response = result.value;
+                    const jobData = await response.json();
+                    if (jobData.deleted) {
+                        successCount++;
+                    } else {
+                        failCount++;
+                    }
+                } catch {
+                    failCount++;
+                }
+            } else {
+                failCount++;
+            }
+        }
+        
+        // Show results
+        if (failCount === 0) {
+            alert(`Successfully deleted all ${successCount} jobs!`);
+        } else if (successCount === 0) {
+            alert(`Failed to delete any jobs. ${failCount} errors occurred.`);
+        } else {
+            alert(`Deleted ${successCount} jobs successfully. ${failCount} failed to delete.`);
+        }
+        
+        // Refresh the job list
+        refreshJobs();
+        
+    } catch (error) {
+        alert('Error clearing jobs: ' + error.message);
     }
 }
 

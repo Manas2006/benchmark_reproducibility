@@ -127,10 +127,16 @@
             <div id="jobs" class="tab-content">
                 <div class="bg-white shadow rounded-lg p-6">
                     <h2 class="text-xl font-semibold mb-4">Job List</h2>
-                    <button onclick="refreshJobs()"
-                        class="mb-4 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
-                        Refresh Jobs
-                    </button>
+                    <div class="mb-4 flex space-x-2">
+                        <button onclick="refreshJobs()"
+                            class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                            Refresh Jobs
+                        </button>
+                        <button onclick="clearAllJobs()"
+                            class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700">
+                            Clear All Jobs
+                        </button>
+                    </div>
                     <div id="jobs-list">
                         <!-- Jobs will be listed here -->
                     </div>
