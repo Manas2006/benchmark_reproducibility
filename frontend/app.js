@@ -30,6 +30,56 @@ const EVAL_METHODS = [
 ];
 
 const BACKEND_OPTIONS = ['local', 'slurm'];
+const INFERENCE_MODES = ['local', 'together_api'];
+
+const TOGETHER_API_MODELS = [
+    'deepseek-ai/DeepSeek-R1-0528-tput',
+    'deepseek-ai/DeepSeek-R1-0528',
+    'deepseek-ai/DeepSeek-R1-0528-Instruct',
+    'deepseek-ai/DeepSeek-R1-0528-Instruct-tput',
+    'deepseek-ai/DeepSeek-R1-0528-Instruct-v2',
+    'deepseek-ai/DeepSeek-R1-0528-Instruct-v2-tput',
+    'deepseek-ai/DeepSeek-R1-0528-Instruct-v2.5',
+    'deepseek-ai/DeepSeek-R1-0528-Instruct-v2.5-tput',
+    'deepseek-ai/DeepSeek-R1-0528-Instruct-v2.5-32k',
+    'deepseek-ai/DeepSeek-R1-0528-Instruct-v2.5-32k-tput',
+    'deepseek-ai/DeepSeek-R1-0528-Instruct-v2.5-128k',
+    'deepseek-ai/DeepSeek-R1-0528-Instruct-v2.5-128k-tput',
+    'meta-llama/Llama-3.1-8B-Instruct',
+    'meta-llama/Llama-3.1-70B-Instruct',
+    'meta-llama/Llama-3.1-405B-Instruct',
+    'meta-llama/Llama-3.1-8B-Instruct-tput',
+    'meta-llama/Llama-3.1-70B-Instruct-tput',
+    'meta-llama/Llama-3.1-405B-Instruct-tput',
+    'meta-llama/Llama-3.1-8B-Instruct-32k',
+    'meta-llama/Llama-3.1-70B-Instruct-32k',
+    'meta-llama/Llama-3.1-405B-Instruct-32k',
+    'meta-llama/Llama-3.1-8B-Instruct-32k-tput',
+    'meta-llama/Llama-3.1-70B-Instruct-32k-tput',
+    'meta-llama/Llama-3.1-405B-Instruct-32k-tput',
+    'meta-llama/Llama-3.1-8B-Instruct-128k',
+    'meta-llama/Llama-3.1-70B-Instruct-128k',
+    'meta-llama/Llama-3.1-405B-Instruct-128k',
+    'meta-llama/Llama-3.1-8B-Instruct-128k-tput',
+    'meta-llama/Llama-3.1-70B-Instruct-128k-tput',
+    'meta-llama/Llama-3.1-405B-Instruct-128k-tput',
+    'Qwen/Qwen2.5-Math-1.5B',
+    'Qwen/Qwen2.5-Math-7B',
+    'Qwen/Qwen2.5-Math-14B',
+    'Qwen/Qwen2.5-Math-72B',
+    'Qwen/Qwen2.5-1.5B-Instruct',
+    'Qwen/Qwen2.5-7B-Instruct',
+    'Qwen/Qwen2.5-14B-Instruct',
+    'Qwen/Qwen2.5-32B-Instruct',
+    'Qwen/Qwen2.5-72B-Instruct',
+    'Qwen/Qwen2.5-110B-Instruct',
+    'Qwen/Qwen2.5-110B-Instruct-tput',
+    'Qwen/Qwen2.5-110B-Instruct-32k',
+    'Qwen/Qwen2.5-110B-Instruct-32k-tput',
+    'Qwen/Qwen2.5-110B-Instruct-128k',
+    'Qwen/Qwen2.5-110B-Instruct-128k-tput',
+    'Custom Together Model'
+];
 
 // Global state
 let modelConfigs = [];
@@ -255,6 +305,11 @@ function addModelConfig() {
         customModel: '',
         dataset: AVAILABLE_DATASETS[0],
         backend: BACKEND_OPTIONS[0],
+        inference_mode: 'local',
+        together_model: TOGETHER_API_MODELS[0],
+        together_custom_model: '',
+        together_api_key: '',
+        together_logprobs: '0',
         temperature: '0.0',
         top_p: '1.0',
         top_k: '0',
@@ -321,6 +376,17 @@ function handleModelSelection(configId, selectedValue) {
     }
 }
 
+function handleTogetherModelSelection(configId, selectedValue) {
+    const customInput = document.getElementById(`together-custom-input-${configId}`);
+    if (selectedValue === 'Custom Together Model') {
+        customInput.classList.remove('hidden');
+    } else {
+        customInput.classList.add('hidden');
+        // Clear the custom model field when switching away from Custom option
+        updateModelConfig(configId, 'together_custom_model', '');
+    }
+}
+
 function toggleViewMode() {
     structuredViewMode = !structuredViewMode;
     const indicator = document.getElementById('view-mode-indicator');
@@ -333,7 +399,19 @@ function calculateJobCount() {
     let totalJobs = 0;
     modelConfigs.forEach(config => {
         // Use customModel if it's set (for Link from Hugging Face), otherwise use model
-        const models = (config.model === 'Link from Hugging Face' && config.customModel) ? [config.customModel] : [config.model];
+        let models = [];
+        if (config.inference_mode === 'together_api') {
+            if (config.together_model === 'Custom Together Model' && config.together_custom_model) {
+                models = [config.together_custom_model];
+            } else if (config.together_model !== 'Custom Together Model') {
+                models = [config.together_model];
+            } else {
+                models = []; // No valid model selected
+            }
+        } else {
+            models = (config.model === 'Link from Hugging Face' && config.customModel) ? [config.customModel] : [config.model];
+        }
+
         const datasets = config.dataset.split('\n').filter(d => d.trim());
         const temperatures = config.temperature.split('\n').filter(t => t.trim());
         const top_ps = config.top_p.split('\n').filter(t => t.trim());
@@ -374,6 +452,7 @@ function renderModelConfigs() {
             </div>
             
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                ${config.inference_mode !== 'together_api' ? `
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Model (or Hugging Face URL)</label>
                     <select onchange="updateModelConfig(${config.id}, 'model', this.value); handleModelSelection(${config.id}, this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
@@ -387,7 +466,42 @@ function renderModelConfigs() {
                         <p class="text-xs text-gray-500 mt-1">The model name will be automatically extracted from the URL.</p>
                     </div>
                 </div>
+                ` : ''}
                 
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Inference</label>
+                    <select onchange="updateModelConfig(${config.id}, 'inference_mode', this.value); renderModelConfigs()" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                        ${INFERENCE_MODES.map(m => `<option value="${m}" ${config.inference_mode === m ? 'selected' : ''}>${m}</option>`).join('')}
+                    </select>
+                </div>
+
+                ${config.inference_mode === 'together_api' ? `
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Together API Model</label>
+                    <select onchange="updateModelConfig(${config.id}, 'together_model', this.value); handleTogetherModelSelection(${config.id}, this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                        ${TOGETHER_API_MODELS.map(model => `<option value="${model}" ${config.together_model === model ? 'selected' : ''}>${model}</option>`).join('')}
+                    </select>
+                    <div id="together-custom-input-${config.id}" class="mt-2 ${config.together_model === 'Custom Together Model' ? '' : 'hidden'}">
+                        <input type="text" onchange="updateModelConfig(${config.id}, 'together_custom_model', this.value)" 
+                               placeholder="Enter custom Together model name" 
+                               class="block w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                               value="${config.together_custom_model}">
+                        <p class="text-xs text-gray-500 mt-1">Enter the exact model name as it appears in Together AI.</p>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Together API Key</label>
+                    <input type="password" onchange="updateModelConfig(${config.id}, 'together_api_key', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" placeholder="TOGETHER_API_KEY" value="${config.together_api_key}">
+                    <p class="text-xs text-gray-500 mt-1">If empty, backend will use TOGETHER_API_KEY from environment.</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Logprobs (0-5)</label>
+                    <input type="number" min="0" max="5" onchange="updateModelConfig(${config.id}, 'together_logprobs', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" value="${config.together_logprobs}">
+                    <p class="text-xs text-gray-500 mt-1">If 0, logprobs will not be requested.</p>
+                </div>
+                ` : ''}
+                
+                ${config.inference_mode !== 'together_api' ? `
                 <div>
                     <label class="inline-flex items-center mt-6">
                         <input type="checkbox" ${config.enable_prob_tracking ? 'checked' : ''} onchange="updateModelConfig(${config.id}, 'enable_prob_tracking', this.checked)" class="form-checkbox h-5 w-5 text-blue-600">
@@ -395,6 +509,7 @@ function renderModelConfigs() {
                     </label>
                     <p class="text-xs text-gray-500 mt-1">If enabled, vLLM will be used and probabilities will be recorded to a separate JSONL.</p>
                 </div>
+                ` : ''}
                 
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Dataset (one per line)</label>
@@ -519,8 +634,20 @@ async function submitEvaluation() {
         const allJobs = [];
 
         modelConfigs.forEach(config => {
-            // Use customModel if it's set (for Link from Hugging Face), otherwise use model
-            const models = (config.model === 'Link from Hugging Face' && config.customModel) ? [config.customModel] : [config.model];
+            // Determine candidate models based on inference mode
+            let models = [];
+            if (config.inference_mode === 'together_api') {
+                if (config.together_model === 'Custom Together Model') {
+                    if (!config.together_custom_model || !config.together_custom_model.trim()) {
+                        throw new Error(`Custom Together model name is required when 'Custom Together Model' is selected for model configuration ${config.id}`);
+                    }
+                    models = [config.together_custom_model.trim()];
+                } else {
+                    models = [config.together_model];
+                }
+            } else {
+                models = (config.model === 'Link from Hugging Face' && config.customModel) ? [config.customModel] : [config.model];
+            }
             const datasets = config.dataset.split('\n').filter(d => d.trim());
             const temperatures = config.temperature.split('\n').filter(t => t.trim());
             const top_ps = config.top_p.split('\n').filter(t => t.trim());
@@ -548,12 +675,18 @@ async function submitEvaluation() {
                                                 throw new Error(`Hugging Face URL is required when 'Link from Hugging Face' is selected for model configuration ${config.id}`);
                                             }
 
+                                            // actual model already selected in models iteration
+                                            const actualModel = model;
+
                                             const requestData = {
-                                                model: model,
+                                                model: actualModel,
                                                 dataset: dataset,
                                                 prompt: config.prompt_type === 'custom' ? config.prompt.trim() : '',
                                                 prompt_type: config.prompt_type,
                                                 backend: config.backend,
+                                                use_together_api: config.inference_mode === 'together_api',
+                                                together_api_key: config.inference_mode === 'together_api' ? (config.together_api_key || '') : '',
+                                                together_logprobs: config.inference_mode === 'together_api' ? parseInt(config.together_logprobs || '0') : 0,
                                                 temperature: parseFloat(temp),
                                                 top_p: parseFloat(top_p),
                                                 top_k: parseInt(top_k),
@@ -648,13 +781,13 @@ function renderJobList(jobs) {
         if (job.status !== 'DONE' && job.status !== 'ERROR') {
             monitorButtonHtml = `<button onclick="monitorJob('${job.job_id}')" class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">Monitor</button>`;
         }
-        
+
         const deleteButtonHtml = `
             <button onclick="deleteJob('${job.job_id}')" title="Delete job" class="px-2 py-1 text-red-600 hover:text-red-800">
                 <svg xmlns='http://www.w3.org/2000/svg' class='h-5 w-5' fill='none' viewBox='0 0 24 24' stroke='currentColor'><path stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M6 18L18 6M6 6l12 12'/></svg>
             </button>
         `;
-        
+
         jobDiv.innerHTML = `
             <div class="flex justify-between items-start">
                 <div>
@@ -696,31 +829,31 @@ async function clearAllJobs() {
         const response = await fetch(`${API_BASE}/jobs`);
         const data = await response.json();
         const jobs = data.jobs || [];
-        
+
         if (jobs.length === 0) {
             alert('No jobs to delete');
             return;
         }
-        
+
         // Confirm deletion
         const confirmation = confirm(`Are you sure you want to delete ALL ${jobs.length} jobs? This action cannot be undone.`);
         if (!confirmation) return;
-        
+
         // Delete all jobs in parallel
-        const deletePromises = jobs.map(job => 
+        const deletePromises = jobs.map(job =>
             fetch(`${API_BASE}/jobs/${job.job_id}`, { method: 'DELETE' })
         );
-        
+
         // Show progress
         const totalJobs = jobs.length;
-        
+
         // Update progress as jobs are deleted
         const results = await Promise.allSettled(deletePromises);
-        
+
         // Count successful deletions
         let successCount = 0;
         let failCount = 0;
-        
+
         for (const result of results) {
             if (result.status === 'fulfilled') {
                 try {
@@ -738,7 +871,7 @@ async function clearAllJobs() {
                 failCount++;
             }
         }
-        
+
         // Show results
         if (failCount === 0) {
             alert(`Successfully deleted all ${successCount} jobs!`);
@@ -747,10 +880,10 @@ async function clearAllJobs() {
         } else {
             alert(`Deleted ${successCount} jobs successfully. ${failCount} failed to delete.`);
         }
-        
+
         // Refresh the job list
         refreshJobs();
-        
+
     } catch (error) {
         alert('Error clearing jobs: ' + error.message);
     }

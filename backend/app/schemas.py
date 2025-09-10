@@ -48,6 +48,10 @@ class EvalRequest(BaseModel):
     path_config: Optional[PathConfig] = None  # Use default if not provided
     # Probability tracking
     enable_prob_tracking: bool = Field(default=False, description="Track probabilities of target answer tokens (requires vLLM)")
+    # Together API options
+    use_together_api: bool = Field(default=False, description="Use Together API instead of local models")
+    together_api_key: Optional[str] = Field(default=None, description="Together API key (if not in env)")
+    together_logprobs: conint(ge=0, le=5) = 0
     # Optional plotting directives (frontend convenience; plotting done post-hoc)
     prob_plot_type: Optional[str] = Field(default=None, description="'aggregate' or 'single' for probability plots")
     prob_plot_sample_id: Optional[int] = Field(default=None, description="Sample idx for single plot")

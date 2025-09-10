@@ -191,11 +191,20 @@ class MathEvalRunner:
             "--n_sampling", str(req.k),  # Use k as n_sampling
             "--top_p", str(req.top_p),
             # --max_tokens_per_call handled below
-            "--use_vllm",
             "--save_outputs",
             "--overwrite",
             "--use_safetensors"
         ]
+        # Add vLLM only when not using Together API
+        if not getattr(req, 'use_together_api', False):
+            cli.append("--use_vllm")
+
+        # Together API options
+        if getattr(req, 'use_together_api', False):
+            cli.append("--use_together_api")
+            if getattr(req, 'together_logprobs', 0) and req.together_logprobs > 0:
+                cli.extend(["--together_logprobs", str(req.together_logprobs)])
+            # Do not pass API key on CLI for security; prefer env var. If provided, will export in script for SLURM/bash, or set env for local.
         
         # Add prompt-related arguments
         if req.prompt and req.prompt.strip():
@@ -223,9 +232,8 @@ class MathEvalRunner:
         if job_id:
             cli.extend(["--job_id", job_id])
         
-        # Add probability tracking flag
-        if getattr(req, 'enable_prob_tracking', False):
-            # Force vLLM if user enabled prob tracking
+        # Add probability tracking flag (only for local/vLLM inference)
+        if getattr(req, 'enable_prob_tracking', False) and not getattr(req, 'use_together_api', False):
             if "--use_vllm" not in cli:
                 cli.append("--use_vllm")
             cli.append("--enable_prob_tracking")
@@ -263,7 +271,7 @@ class MathEvalRunner:
 
         # Pre-compute probability JSONL path that math_eval will generate when enabled
         prob_file = None
-        if getattr(req, 'enable_prob_tracking', False):
+        if getattr(req, 'enable_prob_tracking', False) or (getattr(req, 'use_together_api', False) and getattr(req, 'together_logprobs', 0) and req.together_logprobs > 0):
             prob_suffix = f"_{prompt_type_for_file}_prob.jsonl"
             if job_id:
                 base = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}_{job_id}"
@@ -298,12 +306,18 @@ class MathEvalRunner:
             local_job_id = get_next_local_job_id()
             out_file = os.path.join(path_config.logs_dir, f"qwen-math-{local_job_id}.out")
             err_file = os.path.join(path_config.logs_dir, f"qwen-math-{local_job_id}.err")
+            env = os.environ.copy()
+            if getattr(req, 'use_together_api', False):
+                api_key = getattr(req, 'together_api_key', None)
+                if api_key:
+                    env['TOGETHER_API_KEY'] = api_key
             proc = subprocess.Popen(
-                cli, 
+                cli,
                 stdout=open(out_file, 'w'),
                 stderr=open(err_file, 'w'),
                 text=True,
-                cwd=self.evaluation_dir
+                cwd=self.evaluation_dir,
+                env=env
             )
             job_db[uuid_jid] = {
                 "status": JobStatus.RUNNING,
@@ -359,6 +373,7 @@ export MKL_NUM_THREADS=1
 # Activate conda environment
 source {path_config.conda_env_path}/etc/profile.d/conda.sh
 conda activate mathevalUI
+{('export TOGETHER_API_KEY=' + shlex.quote(req.together_api_key) + '\n') if getattr(req, 'use_together_api', False) and getattr(req, 'together_api_key', None) else ''}
 {' '.join(escaped_cli)}
 """
             try:
