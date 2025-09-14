@@ -183,21 +183,26 @@ def fuse_with_judge(rule: Dict[str, float], judge: Dict[str, Any], evidence: Dic
     Returns:
         Fused scores dictionary with 0.0-1.0 values
     """
+    from .judge import Judge
+    
+    # Validate and normalize judge scores
+    judge_normalized = Judge.validate_and_normalize_judge(judge)
+    
     fused = {}
     
     for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
         rule_score = rule.get(f"{pillar}_rule", 0.0)
-        judge_score = judge.get(pillar)
+        judge_score = judge_normalized.get(pillar)
         
         if judge_score is None:
             # No judge score available, use rule score only
             fused[pillar] = rule_score
         else:
             # Normalize judge score from 1-5 to 0.0-1.0
-            judge_normalized = max(0.0, min(1.0, (judge_score - 1) / 4.0))
+            judge_normalized_score = max(0.0, min(1.0, (judge_score - 1) / 4.0))
             
             # Average rule and judge scores
-            base_score = (rule_score + judge_normalized) / 2.0
+            base_score = (rule_score + judge_normalized_score) / 2.0
             
             # Apply evidence-based caps for coherence and factuality
             if pillar == "coherence":

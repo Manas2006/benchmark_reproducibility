@@ -110,11 +110,39 @@ class CoTMetrics(BaseModel):
     confidence_score: float = Field(ge=0, le=1, description="Confidence in reasoning quality")
 
 class CoTSampleAnalysis(BaseModel):
-    """CoT analysis for a single sample"""
+    """CoT analysis for a single sample - supports both legacy and comprehensive analysis"""
     idx: Optional[int] = Field(description="Sample index")
-    metrics: CoTMetrics = Field(description="Computed CoT metrics")
+    question: Optional[str] = Field(default=None, description="Problem/question text")
+    model_output: Optional[str] = Field(default=None, description="Full model output with reasoning")
+    predicted_answer: Optional[str] = Field(default=None, description="Model's predicted answer")
+    ground_truth: Optional[str] = Field(default=None, description="Ground truth answer")
     is_correct: bool = Field(description="Whether the answer was correct")
-    has_reasoning: bool = Field(description="Whether sample contains reasoning")
+    
+    # Analysis method and results
+    analysis_method: Optional[str] = Field(default="legacy", description="Analysis method used")
+    
+    # Legacy analysis fields (optional)
+    metrics: Optional[CoTMetrics] = Field(default=None, description="Computed CoT metrics (legacy)")
+    has_reasoning: Optional[bool] = Field(default=None, description="Whether sample contains reasoning (legacy)")
+    
+    # Comprehensive analysis fields (optional)
+    flags: Optional[List[Dict[str, Any]]] = Field(default=None, description="Detected flags (comprehensive)")
+    evidence: Optional[Dict[str, Any]] = Field(default=None, description="Evidence metrics (comprehensive)")
+    rule_scores: Optional[Dict[str, float]] = Field(default=None, description="Rule-based scores (comprehensive)")
+    judge_scores: Optional[Dict[str, float]] = Field(default=None, description="LLM judge scores (comprehensive)")
+    fused_scores: Optional[Dict[str, float]] = Field(default=None, description="Fused scores (comprehensive)")
+    overall_score: Optional[float] = Field(default=None, description="Overall quality score")
+    final_correct: Optional[bool] = Field(default=None, description="Whether final answer is correct")
+    utility_score: Optional[float] = Field(default=None, description="Utility score")
+    coherence_score: Optional[float] = Field(default=None, description="Coherence score")
+    factuality_score: Optional[float] = Field(default=None, description="Factuality score")
+    faithfulness_score: Optional[float] = Field(default=None, description="Faithfulness score")
+    flags_count: Optional[int] = Field(default=None, description="Number of flags detected")
+    arith_errors: Optional[int] = Field(default=None, description="Number of arithmetic errors")
+    coh_contra_cnt: Optional[int] = Field(default=None, description="Coherence contradictions count")
+    fact_contra_cnt: Optional[int] = Field(default=None, description="Factuality contradictions count")
+    fact_entail_rate: Optional[float] = Field(default=None, description="Factuality entailment rate")
+    intermediate_ok_rate: Optional[float] = Field(default=None, description="Intermediate reasoning correctness rate")
 
 class CoTJobSummary(BaseModel):
     """Summary statistics for CoT analysis across a job"""
@@ -151,4 +179,73 @@ class OpenAITestResponse(BaseModel):
     """Response from OpenAI API key test"""
     valid: bool = Field(description="Whether the API key is valid")
     error: Optional[str] = Field(default=None, description="Error message if key is invalid")
-    model_info: Optional[Dict[str, Any]] = Field(default=None, description="Information about available models") 
+    model_info: Optional[Dict[str, Any]] = Field(default=None, description="Information about available models")
+
+
+# =============================================================================
+# NEW PILLARS-ONLY SCHEMA (Migration from CQS to Four-Pillar Evaluation)
+# =============================================================================
+
+class PillarsScores(BaseModel):
+    """Four-pillar evaluation scores (0.0 to 1.0)"""
+    faithfulness: float = Field(ge=0.0, le=1.0, description="Faithfulness score")
+    utility: float = Field(ge=0.0, le=1.0, description="Utility score")
+    coherence: float = Field(ge=0.0, le=1.0, description="Coherence score")
+    factuality: float = Field(ge=0.0, le=1.0, description="Factuality score")
+    overall: float = Field(ge=0.0, le=1.0, description="Overall fused score")
+
+
+class PillarsFlag(BaseModel):
+    """Individual flag detected during analysis"""
+    pillar: str = Field(description="Pillar where flag was detected (faithfulness/utility/coherence/factuality)")
+    step: str = Field(description="Step identifier where flag was detected")
+    issue: str = Field(description="Type of issue detected")
+    details: Optional[Dict[str, Any]] = Field(default=None, description="Detailed information about the issue")
+
+
+class PillarsEntry(BaseModel):
+    """Complete analysis result for a single sample"""
+    scores: "PillarsScores"
+    flags: List["PillarsFlag"]
+    evidence: Dict[str, Any]
+    rules_raw: Optional[Dict[str, float]] = None
+    judge_raw: Optional[Dict[str, Any]] = None
+    config_snapshot: Dict[str, Any]
+    # Original input data
+    problem: str = Field(description="Original problem statement")
+    model_output: str = Field(description="Original model output/CoT reasoning")
+    gold: Optional[str] = Field(default=None, description="Ground truth answer")
+
+
+class PillarsSummary(BaseModel):
+    """Aggregate statistics for the entire job"""
+    # Score averages
+    avg_faithfulness: float = Field(description="Average faithfulness score")
+    avg_utility: float = Field(description="Average utility score")
+    avg_coherence: float = Field(description="Average coherence score")
+    avg_factuality: float = Field(description="Average factuality score")
+    avg_overall: float = Field(description="Average overall score")
+    
+    # Flag statistics
+    total_flags: int = Field(description="Total number of flags detected")
+    flags_by_pillar: Dict[str, int] = Field(description="Flag count per pillar")
+    
+    # Judge statistics
+    judge_call_rate: float = Field(description="Percentage of samples that used judge")
+    judge_budget_used: int = Field(description="Number of judge calls made")
+    judge_budget_total: int = Field(description="Total judge budget allocated")
+    
+    # Performance metrics
+    total_samples: int = Field(description="Total number of samples analyzed")
+    analysis_time: float = Field(description="Total analysis time in seconds")
+    avg_time_per_sample: float = Field(description="Average time per sample in seconds")
+
+
+class CoTAnalysisResponseV2(BaseModel):
+    """New pillars-only CoT analysis response (replaces legacy CQS)"""
+    job_id: str
+    per_sample: List["PillarsEntry"]
+    summary: "PillarsSummary"
+    analysis_method: str = "pillars_v2"
+    config: Dict[str, Any]
+    timestamp: str 

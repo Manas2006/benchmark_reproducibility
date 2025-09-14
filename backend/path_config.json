@@ -8,6 +8,7 @@
   "logs_dir": "/work/10757/manasp123/qwen-eval-ui/logs",
   "scripts_dir": "/work/10757/manasp123/qwen-eval-ui/scripts",
   "job_db_path": "/home1/10757/manasp123/qwen-eval-ui/backend/job_db.json",
+  "openai_api_key": "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",
   "slurm_partition": "gpu-a100-small",
   "slurm_account": "CCR24036",
   "slurm_wall_time": "01:00:00"

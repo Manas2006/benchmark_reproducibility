@@ -148,7 +148,7 @@ Required JSON schema:
                 max_tokens=1000
             )
             
-            raw_output = resp.choices[0].message["content"]
+            raw_output = resp.choices[0].message.content
             
             # Extract JSON using guard clause
             return self._extract_json_safely(raw_output)
@@ -204,6 +204,36 @@ Required JSON schema:
         # If all parsing fails, return None scores
         warnings.warn(f"Failed to parse JSON from LLM output: {raw_output[:200]}...")
         return {"faithfulness": None, "utility": None, "coherence": None, "factuality": None}
+    
+    @staticmethod
+    def validate_and_normalize_judge(d: Dict[str, Any]) -> Dict[str, Optional[int]]:
+        """
+        Validate and normalize judge scores to 1-5 range.
+        
+        Args:
+            d: Raw dictionary from judge output
+            
+        Returns:
+            Normalized dictionary with integer scores 1-5 or None
+        """
+        keys = ["faithfulness", "utility", "coherence", "factuality"]
+        out = {}
+        
+        for k in keys:
+            v = d.get(k, None)
+            try:
+                # Try to convert to int
+                v = int(v)
+            except (ValueError, TypeError):
+                v = None
+            
+            # Clamp to valid range
+            if v is not None:
+                v = min(5, max(1, v))
+            
+            out[k] = v
+        
+        return out
     
     def _validate_scores(self, parsed: Dict[str, Any]) -> bool:
         """

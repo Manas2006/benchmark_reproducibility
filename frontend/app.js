@@ -1521,6 +1521,16 @@ async function runCoTAnalysis() {
         return;
     }
 
+    // Check if we have cached data first
+    const cachedData = getCachedCoTData(jobId);
+    
+    if (cachedData) {
+        console.log('Using cached CoT analysis data for job:', jobId);
+        currentCoTData = cachedData;
+        showCoTResults(cachedData, true); // true indicates cached data
+        return;
+    }
+
     // Show loading state
     showCoTLoading();
     hideCoTError();
@@ -1528,6 +1538,7 @@ async function runCoTAnalysis() {
 
     try {
         console.log(`Running CoT analysis for job: ${jobId}`);
+
 
         // Call the backend CoT analysis endpoint
         const response = await fetch(`${API_BASE}/jobs/${jobId}/cot-analysis`);
@@ -1543,11 +1554,15 @@ async function runCoTAnalysis() {
         currentCoTData = analysisData;
         console.log('currentCoTData set successfully');
 
+
+        // Cache the data
+        cacheCoTData(jobId, analysisData);
+
         // Hide loading and show results
         console.log('About to hide loading...');
         hideCoTLoading();
         console.log('Loading hidden, about to show results...');
-        showCoTResults(analysisData);
+        showCoTResults(analysisData, false); // false indicates fresh data
         console.log('showCoTResults call completed');
 
     } catch (error) {
@@ -1557,7 +1572,7 @@ async function runCoTAnalysis() {
     }
 }
 
-function showCoTResults(data) {
+function showCoTResults(data, isCached = false) {
     try {
         console.log('CoT Analysis Data received:', data);
         console.log('Job summary:', data.job_summary);
@@ -1567,15 +1582,30 @@ function showCoTResults(data) {
         document.getElementById('cot-analysis-results').classList.remove('hidden');
         console.log('Results section shown');
 
-        // Populate summary statistics
-        console.log('About to call populateCoTSummary...');
-        populateCoTSummary(data.job_summary);
-        console.log('populateCoTSummary completed');
+        // Populate summary statistics for new pillars schema
+        console.log('About to call populatePillarsSummary...');
+        populatePillarsSummary(data.summary, isCached);
+        
+        // Check if this is the new pillars analysis
+        const isPillarsAnalysis = data.analysis_method === 'pillars_v2';
+        if (isPillarsAnalysis) {
+            console.log('Pillars v2 analysis detected, showing enhanced UI...');
+            showPillarsAnalysisUI(data);
+        } else {
+            console.log('Legacy analysis detected, showing standard UI...');
+            showLegacyAnalysisUI(data);
+        }
+        console.log('populatePillarsSummary completed');
 
-        // Populate CQS component scores
-        console.log('About to call populateCQSComponents...');
-        populateCQSComponents(data.job_summary);
+        // Skip old CQS components - we're using comprehensive analysis now
+        console.log('Skipping old CQS components - using comprehensive analysis');
         console.log('populateCQSComponents completed');
+
+        // Enable export buttons
+        const exportExcelBtn = document.getElementById('export-excel-btn');
+        const exportJsonBtn = document.getElementById('export-json-btn');
+        if (exportExcelBtn) exportExcelBtn.disabled = false;
+        if (exportJsonBtn) exportJsonBtn.disabled = false;
 
         // Show random samples by default
         console.log('About to call showRandomSamples...');
@@ -1587,8 +1617,8 @@ function showCoTResults(data) {
     }
 }
 
-function populateCoTSummary(summary) {
-    console.log('Populating CoT Summary with:', summary);
+function populatePillarsSummary(summary, isCached = false) {
+    console.log('Populating Pillars Summary with:', summary);
     const summaryDiv = document.getElementById('cot-summary');
 
     if (!summaryDiv) {
@@ -1602,107 +1632,199 @@ function populateCoTSummary(summary) {
         return;
     }
 
-    console.log('About to populate summary with total_samples:', summary.total_samples);
+    console.log('About to populate pillars summary with total_samples:', summary.total_samples);
 
     try {
+        // Extract data from new pillars schema
+        const totalSamples = summary.total_samples || 0;
+        const avgOverall = summary.avg_overall || 0;
+        const avgFaithfulness = summary.avg_faithfulness || 0;
+        const avgUtility = summary.avg_utility || 0;
+        const avgCoherence = summary.avg_coherence || 0;
+        const avgFactuality = summary.avg_factuality || 0;
+        const totalFlags = summary.total_flags || 0;
+        const flagsByPillar = summary.flags_by_pillar || {};
+        const judgeCallRate = summary.judge_call_rate || 0;
+        const judgeBudgetUsed = summary.judge_budget_used || 0;
+        const judgeBudgetTotal = summary.judge_budget_total || 0;
+        
+        // Determine quality level based on overall score
+        let qualityLevel, qualityColor, qualityIcon;
+        if (avgOverall >= 0.8) {
+            qualityLevel = 'Excellent';
+            qualityColor = 'text-green-600';
+            qualityIcon = '⭐';
+        } else if (avgOverall >= 0.6) {
+            qualityLevel = 'Good';
+            qualityColor = 'text-blue-600';
+            qualityIcon = '👍';
+        } else if (avgOverall >= 0.4) {
+            qualityLevel = 'Fair';
+            qualityColor = 'text-yellow-600';
+            qualityIcon = '⚠️';
+        } else {
+            qualityLevel = 'Poor';
+            qualityColor = 'text-red-600';
+            qualityIcon = '❌';
+        }
+
+        // Add cache indicator
+        const cacheIndicator = isCached ? 
+            '<div class="mb-2 text-sm text-amber-600 bg-amber-50 px-2 py-1 rounded border border-amber-200">💾 Cached Data (click "Run CoT Analysis" to refresh)</div>' : 
+            '<div class="mb-2 text-sm text-green-600 bg-green-50 px-2 py-1 rounded border border-green-200">🔄 Fresh Analysis</div>';
+
         summaryDiv.innerHTML = `
-            <div class="text-center">
-                <div class="text-2xl font-bold text-blue-600">${summary.total_samples || 0}</div>
-                <div class="text-sm text-gray-600">Total Samples</div>
+            <div class="bg-white p-6 rounded-lg border shadow-sm">
+                ${cacheIndicator}
+                
+                <!-- Header Section -->
+                <div class="text-center mb-6">
+                    <h4 class="text-xl font-bold text-gray-800 mb-2">🏛️ Four-Pillar Analysis</h4>
+                    <p class="text-sm text-gray-600">Faithfulness + Utility + Coherence + Factuality</p>
             </div>
-            <div class="text-center">
-                <div class="text-2xl font-bold text-blue-600">${(summary.cqs_score_avg || 0).toFixed(3)}</div>
-                <div class="text-sm text-gray-600">Average CQS Score</div>
+
+                <!-- Main Layout: Overall Score + Four Pillars -->
+                <div class="grid grid-cols-1 lg:grid-cols-5 gap-6 mb-8 items-stretch">
+                    <!-- Overall Score (Left Side) -->
+                    <div class="lg:col-span-1 flex">
+                        <div class="text-center p-6 bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl border-2 border-blue-200 w-full flex flex-col justify-center">
+                            <div class="text-4xl font-bold text-blue-700 mb-2">${avgOverall.toFixed(3)}</div>
+                            <div class="text-lg font-medium text-blue-600 mb-2">Overall Score</div>
+                            <div class="text-sm text-blue-500">${qualityIcon} ${qualityLevel}</div>
             </div>
-            <div class="text-center">
-                <div class="text-2xl font-bold text-blue-600">${summary.samples_with_reasoning || 0}</div>
-                <div class="text-sm text-gray-600">With Reasoning</div>
             </div>
-            <div class="text-center">
-                <div class="text-2xl font-bold text-blue-600">${(summary.avg_reasoning_steps || 0).toFixed(1)}</div>
-                <div class="text-sm text-gray-600">Avg Steps</div>
+                    
+                    <!-- Four Pillars (Right Side - Takes Full Width) -->
+                    <div class="lg:col-span-4 flex flex-col">
+                        <h5 class="text-lg font-semibold text-gray-700 mb-4 text-center">Four Pillars Breakdown</h5>
+                        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 flex-1">
+                            <!-- Faithfulness -->
+                            <div class="text-center p-4 bg-red-50 rounded-xl border-2 border-red-200 hover:shadow-md transition-shadow flex flex-col justify-center min-h-[120px]">
+                                <div class="text-2xl font-bold text-red-600 mb-2">${avgFaithfulness.toFixed(3)}</div>
+                                <div class="text-sm font-medium text-red-700 mb-2">Faithfulness</div>
+                                <div class="text-xs text-red-500 bg-red-100 px-2 py-1 rounded-full inline-block">${flagsByPillar.faithfulness || 0} flags</div>
             </div>
-            <div class="text-center">
-                <div class="text-2xl font-bold text-blue-600">${(summary.avg_reasoning_length || 0).toFixed(0)}</div>
-                <div class="text-sm text-gray-600">Avg Length (chars)</div>
+                            
+                            <!-- Utility -->
+                            <div class="text-center p-4 bg-green-50 rounded-xl border-2 border-green-200 hover:shadow-md transition-shadow flex flex-col justify-center min-h-[120px]">
+                                <div class="text-2xl font-bold text-green-600 mb-2">${avgUtility.toFixed(3)}</div>
+                                <div class="text-sm font-medium text-green-700 mb-2">Utility</div>
+                                <div class="text-xs text-green-500 bg-green-100 px-2 py-1 rounded-full inline-block">${flagsByPillar.utility || 0} flags</div>
             </div>
-            <div class="text-center">
-                <div class="text-2xl font-bold text-blue-600">${getScoreInterpretation(summary.cqs_score_avg || 0)}</div>
-                <div class="text-sm text-gray-600">Overall Quality</div>
+                            
+                            <!-- Coherence -->
+                            <div class="text-center p-4 bg-purple-50 rounded-xl border-2 border-purple-200 hover:shadow-md transition-shadow flex flex-col justify-center min-h-[120px]">
+                                <div class="text-2xl font-bold text-purple-600 mb-2">${avgCoherence.toFixed(3)}</div>
+                                <div class="text-sm font-medium text-purple-700 mb-2">Coherence</div>
+                                <div class="text-xs text-purple-500 bg-purple-100 px-2 py-1 rounded-full inline-block">${flagsByPillar.coherence || 0} flags</div>
+            </div>
+                            
+                            <!-- Factuality -->
+                            <div class="text-center p-4 bg-orange-50 rounded-xl border-2 border-orange-200 hover:shadow-md transition-shadow flex flex-col justify-center min-h-[120px]">
+                                <div class="text-2xl font-bold text-orange-600 mb-2">${avgFactuality.toFixed(3)}</div>
+                                <div class="text-sm font-medium text-orange-700 mb-2">Factuality</div>
+                                <div class="text-xs text-orange-500 bg-orange-100 px-2 py-1 rounded-full inline-block">${flagsByPillar.factuality || 0} flags</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Statistics Section -->
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                    <div class="text-center p-4 bg-gray-50 rounded-lg border border-gray-200 flex flex-col justify-center min-h-[80px]">
+                        <div class="text-lg font-bold text-gray-700">${totalSamples.toLocaleString()}</div>
+                        <div class="text-sm text-gray-600">Total Samples</div>
+                    </div>
+                    <div class="text-center p-4 bg-red-50 rounded-lg border border-red-200 flex flex-col justify-center min-h-[80px]">
+                        <div class="text-lg font-bold text-red-600">${totalFlags.toLocaleString()}</div>
+                        <div class="text-sm text-red-600">Total Flags</div>
+                    </div>
+                    <div class="text-center p-4 bg-indigo-50 rounded-lg border border-indigo-200 flex flex-col justify-center min-h-[80px]">
+                        <div class="text-lg font-bold text-indigo-600">${(judgeCallRate * 100).toFixed(1)}%</div>
+                        <div class="text-sm text-indigo-600">Judge Call Rate</div>
+                    </div>
+                    <div class="text-center p-4 bg-blue-50 rounded-lg border border-blue-200 flex flex-col justify-center min-h-[80px]">
+                        <div class="text-lg font-bold text-blue-600">${judgeBudgetUsed}/${judgeBudgetTotal.toLocaleString()}</div>
+                        <div class="text-sm text-blue-600">Judge Budget Used</div>
+                    </div>
+                </div>
+
+                <!-- Performance Insights -->
+                <div class="p-6 bg-gradient-to-r from-gray-50 to-blue-50 rounded-lg border border-gray-200">
+                    <h5 class="font-semibold text-gray-700 mb-4 text-center">📊 Performance Insights</h5>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
+                        <div>
+                            <div class="font-medium text-gray-600">Flag Distribution:</div>
+                            <div class="mt-1 space-y-1">
+                                <div class="flex justify-between">
+                                    <span class="text-red-600">Faithfulness:</span>
+                                    <span class="font-medium">${flagsByPillar.faithfulness || 0} (${((flagsByPillar.faithfulness || 0) / Math.max(totalFlags, 1) * 100).toFixed(1)}%)</span>
+                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-green-600">Utility:</span>
+                                    <span class="font-medium">${flagsByPillar.utility || 0} (${((flagsByPillar.utility || 0) / Math.max(totalFlags, 1) * 100).toFixed(1)}%)</span>
+            </div>
+                                <div class="flex justify-between">
+                                    <span class="text-purple-600">Coherence:</span>
+                                    <span class="font-medium">${flagsByPillar.coherence || 0} (${((flagsByPillar.coherence || 0) / Math.max(totalFlags, 1) * 100).toFixed(1)}%)</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-orange-600">Factuality:</span>
+                                    <span class="font-medium">${flagsByPillar.factuality || 0} (${((flagsByPillar.factuality || 0) / Math.max(totalFlags, 1) * 100).toFixed(1)}%)</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div>
+                            <div class="font-medium text-gray-600">Analysis Status:</div>
+                            <div class="mt-1 space-y-1">
+                                <div class="flex justify-between">
+                                    <span>Analysis Method:</span>
+                                    <span class="font-medium text-blue-600">Four-Pillar v2</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>Judge Integration:</span>
+                                    <span class="font-medium ${judgeCallRate > 0 ? 'text-green-600' : 'text-gray-600'}">${judgeCallRate > 0 ? 'Active' : 'Standby'}</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span>Data Status:</span>
+                                    <span class="font-medium ${isCached ? 'text-amber-600' : 'text-green-600'}">${isCached ? 'Cached' : 'Fresh'}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         `;
-        console.log('CoT Summary populated successfully');
+        
+        console.log('Pillars Summary populated successfully');
     } catch (error) {
-        console.error('Error populating CoT summary:', error);
+        console.error('Error populating pillars summary:', error);
         summaryDiv.innerHTML = '<div class="text-red-500">Error populating summary</div>';
     }
 }
 
-function populateCQSComponents(summary) {
-    console.log('Populating CQS Components with:', summary);
-    const componentsDiv = document.getElementById('cqs-components');
-
-    if (!componentsDiv) {
-        console.error('ERROR: cqs-components element not found!');
-        return;
-    }
-
-    if (!summary) {
-        console.error('Summary is undefined for CQS components');
-        componentsDiv.innerHTML = '<div class="text-red-500">Error: No summary data for components</div>';
-        return;
-    }
-
-    console.log('Populating CQS components with final_answer_correctness_avg:', summary.final_answer_correctness_avg);
-
-    try {
-        const components = [
-            { name: 'Final Answer Correctness', score: summary.final_answer_correctness_avg || 0, weight: '30%', color: 'text-red-600' },
-            { name: 'Arithmetic Accuracy', score: summary.arithmetic_accuracy_avg || 0, weight: '25%', color: 'text-orange-600' },
-            { name: 'Logical Structure', score: summary.logical_structure_avg || 0, weight: '20%', color: 'text-yellow-600' },
-            { name: 'Consistency & Completeness', score: summary.consistency_completeness_avg || 0, weight: '15%', color: 'text-green-600' },
-            { name: 'Formatting & Notation', score: summary.formatting_notation_avg || 0, weight: '10%', color: 'text-blue-600' }
-        ];
-
-        console.log('CQS Components:', components);
-
-        componentsDiv.innerHTML = components.map(comp => `
-            <div class="text-center p-3 bg-white rounded-lg border">
-                <div class="text-lg font-bold ${comp.color}">${comp.score.toFixed(3)}</div>
-                <div class="text-sm font-medium text-gray-800">${comp.name}</div>
-                <div class="text-xs text-gray-500">${comp.weight} weight</div>
-                <div class="w-full bg-gray-200 rounded-full h-2 mt-2">
-                    <div class="bg-gradient-to-r from-red-400 to-green-400 h-2 rounded-full" 
-                         style="width: ${Math.max(0, Math.min(100, comp.score * 100))}%"></div>
-                </div>
-            </div>
-        `).join('');
-
-        console.log('CQS Components populated successfully');
-    } catch (error) {
-        console.error('Error populating CQS components:', error);
-        componentsDiv.innerHTML = '<div class="text-red-500">Error populating components</div>';
-    }
-}
+// CQS Components function removed - using comprehensive analysis instead
 
 function showTopPerformers() {
     if (!currentCoTData) return;
 
-    const samples = currentCoTData.per_sample_metrics
-        .sort((a, b) => b.metrics.cqs_score - a.metrics.cqs_score)
+    const samples = currentCoTData.per_sample
+        .filter(s => s.scores && s.scores.overall !== undefined)
+        .sort((a, b) => (b.scores.overall || 0) - (a.scores.overall || 0))
         .slice(0, 10);
 
-    renderSampleAnalysis(samples, 'Top 10 Performers (Highest CQS Scores)');
+    renderSampleAnalysis(samples, 'Top 10 Performers (Highest Overall Scores)');
 }
 
 function showBottomPerformers() {
     if (!currentCoTData) return;
 
-    const samples = currentCoTData.per_sample_metrics
-        .sort((a, b) => a.metrics.cqs_score - b.metrics.cqs_score)
+    const samples = currentCoTData.per_sample
+        .filter(s => s.scores && s.scores.overall !== undefined)
+        .sort((a, b) => (a.scores.overall || 0) - (b.scores.overall || 0))
         .slice(0, 10);
 
-    renderSampleAnalysis(samples, 'Bottom 10 Performers (Lowest CQS Scores)');
+    renderSampleAnalysis(samples, 'Bottom 10 Performers (Lowest Overall Scores)');
 }
 
 function showRandomSamples() {
@@ -1713,14 +1835,15 @@ function showRandomSamples() {
         return;
     }
 
-    if (!currentCoTData.per_sample_metrics) {
-        console.error('No per_sample_metrics in currentCoTData');
+    if (!currentCoTData.per_sample) {
+        console.error('No per_sample in currentCoTData');
         return;
     }
 
-    console.log('Available samples:', currentCoTData.per_sample_metrics.length);
+    console.log('Available samples:', currentCoTData.per_sample.length);
 
-    const samples = [...currentCoTData.per_sample_metrics]
+    const samples = [...currentCoTData.per_sample]
+        .filter(s => s.scores && s.scores.overall !== undefined)
         .sort(() => 0.5 - Math.random())
         .slice(0, 10);
 
@@ -1734,45 +1857,63 @@ function renderSampleAnalysis(samples, title) {
     sampleDiv.innerHTML = `
         <h4 class="font-semibold text-gray-800 mb-3">${title}</h4>
         <div class="space-y-3">
-            ${samples.map(sample => `
+            ${samples.map((sample, index) => {
+                const score = sample.scores?.overall || 0;
+                const scoreColor = getScoreColor(score);
+                const correctIcon = sample.evidence?.final_correct ? '✅' : '❌';
+                const flagsCount = sample.flags?.length || 0;
+                
+                return `
                 <div class="border border-gray-200 rounded-lg p-3 bg-white">
                     <div class="flex justify-between items-start mb-2">
-                        <span class="text-sm font-medium text-gray-700">Sample #${sample.idx}</span>
-                        <span class="text-sm font-bold ${getCQSColorClass(sample.metrics.cqs_score)}"">
-                            CQS: ${sample.metrics.cqs_score.toFixed(3)}
+                            <span class="text-sm font-medium text-gray-700">Sample #${index + 1}</span>
+                            <span class="text-sm font-bold ${scoreColor}">
+                                Overall: ${score.toFixed(3)}
                         </span>
                     </div>
                     
-                    <div class="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs mb-2">
-                        <div>Final: ${sample.metrics.final_answer_correctness.toFixed(2)}</div>
-                        <div>Arith: ${sample.metrics.arithmetic_accuracy.toFixed(2)}</div>
-                        <div>Logic: ${sample.metrics.logical_structure_score.toFixed(2)}</div>
-                        <div>Consist: ${sample.metrics.consistency_completeness.toFixed(2)}</div>
-                        <div>Format: ${sample.metrics.formatting_notation.toFixed(2)}</div>
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs mb-2">
+                            <div class="text-center p-1 bg-red-50 rounded">
+                                <div class="font-bold text-red-600">${(sample.scores?.faithfulness || 0).toFixed(2)}</div>
+                                <div class="text-red-700">Faith</div>
+                            </div>
+                            <div class="text-center p-1 bg-green-50 rounded">
+                                <div class="font-bold text-green-600">${(sample.scores?.utility || 0).toFixed(2)}</div>
+                                <div class="text-green-700">Utility</div>
+                            </div>
+                            <div class="text-center p-1 bg-purple-50 rounded">
+                                <div class="font-bold text-purple-600">${(sample.scores?.coherence || 0).toFixed(2)}</div>
+                                <div class="text-purple-700">Coherence</div>
+                            </div>
+                            <div class="text-center p-1 bg-orange-50 rounded">
+                                <div class="font-bold text-orange-600">${(sample.scores?.factuality || 0).toFixed(2)}</div>
+                                <div class="text-orange-700">Factuality</div>
+                            </div>
                     </div>
                     
                     <div class="text-xs text-gray-600">
-                        Steps: ${sample.metrics.reasoning_steps} | 
-                        Length: ${sample.metrics.total_chars} chars | 
-                        Correct: ${sample.is_correct ? '✅' : '❌'}
+                            Flags: ${flagsCount} | 
+                            Arith Errors: ${sample.evidence?.arith_bad_examples?.length || 0} | 
+                            Correct: ${correctIcon}
                     </div>
+                        
+                        ${sample.flags && sample.flags.length > 0 ? `
+                            <div class="mt-2">
+                                <div class="text-xs text-red-600">⚠️ ${sample.flags.slice(0, 2).map(f => `${f.pillar}: ${f.issue}`).join(', ')}${sample.flags.length > 2 ? '...' : ''}</div>
                 </div>
-            `).join('')}
+                        ` : ''}
+                    </div>
+                `;
+            }).join('')}
         </div>
     `;
 }
 
-function getScoreInterpretation(score) {
-    if (score >= 0.85) return '🌟 Excellent';
-    if (score >= 0.70) return '👍 Good';
-    if (score >= 0.50) return '⚠️ Fair';
-    return '❌ Poor';
-}
-
-function getCQSColorClass(score) {
-    if (score >= 0.85) return 'text-green-600';
-    if (score >= 0.70) return 'text-blue-600';
-    if (score >= 0.50) return 'text-yellow-600';
+// Helper function for score color coding
+function getScoreColor(score) {
+    if (score >= 0.8) return 'text-green-600';
+    if (score >= 0.6) return 'text-blue-600';
+    if (score >= 0.4) return 'text-yellow-600';
     return 'text-red-600';
 }
 
@@ -1824,18 +1965,242 @@ function openCoTAnalysisForJob(jobId) {
 }
 
 async function exportCoTExcel() {
-    const jobId = document.getElementById('cot-job-select').value;
-    if (!jobId) {
-        showCoTError('Please select a job first');
+    if (!currentCoTData) {
+        showCoTError('Please run CoT analysis first');
         return;
     }
 
     try {
-        // Use the existing Excel export functionality
-        exportToExcel(jobId);
+        // Create a comprehensive Excel export with CoT analysis data
+        await exportCoTAnalysisToExcel(currentCoTData);
     } catch (error) {
-        console.error('Error exporting to Excel:', error);
-        showCoTError('Failed to export Excel file');
+        console.error('Error exporting CoT analysis to Excel:', error);
+        
+        // Try fallback CSV export
+        try {
+            console.log('Attempting fallback CSV export...');
+            await exportCoTAnalysisToCSV(currentCoTData);
+        } catch (csvError) {
+            console.error('CSV export also failed:', csvError);
+            showCoTError(`Excel export failed: ${error.message}. CSV export also failed.`);
+        }
+    }
+}
+
+// Fallback CSV export function
+async function exportCoTAnalysisToCSV(cotData) {
+    try {
+        console.log('Creating CSV export...');
+        
+        // Create CSV content
+        let csvContent = 'CoT Analysis Export\n\n';
+        
+        // Summary section
+        csvContent += 'SUMMARY\n';
+        csvContent += `Job ID,${cotData.job_id || 'N/A'}\n`;
+        csvContent += `Analysis Method,${cotData.analysis_method || 'N/A'}\n`;
+        csvContent += `Total Samples,${cotData.summary?.total_samples || 0}\n`;
+        csvContent += `Overall Score,${cotData.summary?.avg_overall || 0}\n`;
+        csvContent += `Faithfulness,${cotData.summary?.avg_faithfulness || 0}\n`;
+        csvContent += `Utility,${cotData.summary?.avg_utility || 0}\n`;
+        csvContent += `Coherence,${cotData.summary?.avg_coherence || 0}\n`;
+        csvContent += `Factuality,${cotData.summary?.avg_factuality || 0}\n\n`;
+        
+        // Detailed data
+        csvContent += 'DETAILED ANALYSIS\n';
+        csvContent += 'Sample #,Problem,Model Output,Final Answer Correct,Overall Score,Faithfulness,Utility,Coherence,Factuality,Flag Count,Flags\n';
+        
+        if (cotData.per_sample && Array.isArray(cotData.per_sample)) {
+            cotData.per_sample.forEach((sample, index) => {
+                const flags = sample.flags || [];
+                const flagDescriptions = flags.map(f => `${f.pillar || 'Unknown'}: ${f.issue || 'Unknown'}`).join('; ');
+                
+                csvContent += `${index + 1},"${(sample.problem || 'N/A').replace(/"/g, '""')}","${(sample.model_output || 'N/A').replace(/"/g, '""')}",${sample.evidence?.final_correct ? 'Yes' : 'No'},${sample.scores?.overall || 0},${sample.scores?.faithfulness || 0},${sample.scores?.utility || 0},${sample.scores?.coherence || 0},${sample.scores?.factuality || 0},${flags.length},"${flagDescriptions.replace(/"/g, '""')}"\n`;
+            });
+        }
+        
+        // Create and download CSV file
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `cot_analysis_${cotData.job_id || 'unknown'}_${new Date().toISOString().split('T')[0]}.csv`;
+        link.click();
+        
+        console.log('CSV export completed successfully');
+        
+    } catch (error) {
+        console.error('Error creating CSV export:', error);
+        throw error;
+    }
+}
+
+async function exportCoTAnalysisToExcel(cotData) {
+    try {
+        console.log('Starting Excel export...', cotData);
+        
+        // Import the required libraries for Excel generation
+        let XLSX;
+        try {
+            XLSX = await import('https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.mjs');
+            console.log('XLSX library loaded successfully');
+        } catch (importError) {
+            console.error('Failed to import XLSX library:', importError);
+            throw new Error('Failed to load Excel export library. Please check your internet connection.');
+        }
+        
+        // Validate data structure
+        if (!cotData || !cotData.summary) {
+            throw new Error('Invalid data structure: missing summary data');
+        }
+        
+        if (!cotData.per_sample || !Array.isArray(cotData.per_sample)) {
+            throw new Error('Invalid data structure: missing per_sample data');
+        }
+        
+        console.log('Data validation passed, creating workbook...');
+        
+        // Prepare the data for Excel export
+        const workbook = XLSX.utils.book_new();
+        
+        // 1. Summary Sheet
+        const summaryData = [
+            ['CoT Analysis Summary'],
+            [''],
+            ['Job ID', cotData.job_id || 'N/A'],
+            ['Analysis Method', cotData.analysis_method || 'N/A'],
+            ['Timestamp', cotData.timestamp || new Date().toISOString()],
+            ['Total Samples', cotData.summary.total_samples || 0],
+            [''],
+            ['Overall Scores'],
+            ['Overall Score', cotData.summary.avg_overall || 0],
+            ['Faithfulness', cotData.summary.avg_faithfulness || 0],
+            ['Utility', cotData.summary.avg_utility || 0],
+            ['Coherence', cotData.summary.avg_coherence || 0],
+            ['Factuality', cotData.summary.avg_factuality || 0],
+            [''],
+            ['Flag Statistics'],
+            ['Total Flags', cotData.summary.total_flags || 0],
+            ['Faithfulness Flags', cotData.summary.flags_by_pillar?.faithfulness || 0],
+            ['Utility Flags', cotData.summary.flags_by_pillar?.utility || 0],
+            ['Coherence Flags', cotData.summary.flags_by_pillar?.coherence || 0],
+            ['Factuality Flags', cotData.summary.flags_by_pillar?.factuality || 0],
+            [''],
+            ['Judge Statistics'],
+            ['Judge Call Rate', `${((cotData.summary.judge_call_rate || 0) * 100).toFixed(1)}%`],
+            ['Budget Used', `${cotData.summary.judge_budget_used || 0}/${cotData.summary.judge_budget_total || 0}`]
+        ];
+        
+        const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
+        XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary');
+        
+        // 2. Detailed Analysis Sheet
+        const detailedData = [
+            [
+                'Sample #', 'Problem', 'Model Output', 'Final Answer Correct',
+                'Overall Score', 'Faithfulness Score', 'Utility Score', 'Coherence Score', 'Factuality Score',
+                'Flag Count', 'Flags', 'Evidence Summary', 'Judge Scores', 'Arithmetic Errors'
+            ]
+        ];
+        
+        cotData.per_sample.forEach((sample, index) => {
+            try {
+                const flags = sample.flags || [];
+                const flagDescriptions = flags.map(f => `${f.pillar || 'Unknown'}: ${f.issue || 'Unknown issue'}`).join('; ');
+                const arithErrors = sample.evidence?.arith_bad_examples?.length || 0;
+                const judgeScores = sample.judge_raw ? JSON.stringify(sample.judge_raw) : 'N/A';
+                
+                detailedData.push([
+                    index + 1,
+                    (sample.problem || 'N/A').substring(0, 1000), // Limit length
+                    (sample.model_output || 'N/A').substring(0, 2000), // Limit length
+                    sample.evidence?.final_correct ? 'Yes' : 'No',
+                    sample.scores?.overall || 0,
+                    sample.scores?.faithfulness || 0,
+                    sample.scores?.utility || 0,
+                    sample.scores?.coherence || 0,
+                    sample.scores?.factuality || 0,
+                    flags.length,
+                    flagDescriptions || 'None',
+                    `Final: ${sample.evidence?.final_correct ? 'Correct' : 'Incorrect'}, Intermediate OK: ${(sample.evidence?.intermediate_ok_rate || 0).toFixed(2)}`,
+                    judgeScores,
+                    arithErrors
+                ]);
+            } catch (sampleError) {
+                console.warn(`Error processing sample ${index}:`, sampleError);
+                // Add a row with error info
+                detailedData.push([
+                    index + 1,
+                    'ERROR',
+                    'Failed to process sample',
+                    'N/A', 'N/A', 'N/A', 'N/A', 'N/A', 'N/A',
+                    0, 'Error processing', 'N/A', 'N/A', 0
+                ]);
+            }
+        });
+        
+        const detailedSheet = XLSX.utils.aoa_to_sheet(detailedData);
+        
+        // Set column widths for better readability
+        detailedSheet['!cols'] = [
+            { wch: 8 },  // Sample #
+            { wch: 30 }, // Problem
+            { wch: 50 }, // Model Output
+            { wch: 15 }, // Final Answer Correct
+            { wch: 12 }, // Overall Score
+            { wch: 15 }, // Faithfulness Score
+            { wch: 12 }, // Utility Score
+            { wch: 15 }, // Coherence Score
+            { wch: 15 }, // Factuality Score
+            { wch: 10 }, // Flag Count
+            { wch: 40 }, // Flags
+            { wch: 50 }, // Evidence Summary
+            { wch: 30 }, // Judge Scores
+            { wch: 15 }  // Arithmetic Errors
+        ];
+        
+        XLSX.utils.book_append_sheet(workbook, detailedSheet, 'Detailed Analysis');
+        
+        // 3. Flags Summary Sheet
+        const flagData = [['Pillar', 'Issue Type', 'Count']];
+        const flagCounts = {};
+        
+        cotData.per_sample.forEach(sample => {
+            (sample.flags || []).forEach(flag => {
+                const key = `${flag.pillar}: ${flag.issue}`;
+                flagCounts[key] = (flagCounts[key] || 0) + 1;
+            });
+        });
+        
+        Object.entries(flagCounts).forEach(([flag, count]) => {
+            const [pillar, issue] = flag.split(': ');
+            flagData.push([pillar, issue, count]);
+        });
+        
+        const flagSheet = XLSX.utils.aoa_to_sheet(flagData);
+        XLSX.utils.book_append_sheet(workbook, flagSheet, 'Flag Summary');
+        
+        // 4. Raw Data Sheet (for advanced users)
+        const rawData = [['Raw JSON Data']];
+        rawData.push([JSON.stringify(cotData, null, 2)]);
+        
+        const rawSheet = XLSX.utils.aoa_to_sheet(rawData);
+        XLSX.utils.book_append_sheet(workbook, rawSheet, 'Raw Data');
+        
+        // Generate and download the Excel file
+        console.log('Generating Excel file...');
+        const fileName = `cot_analysis_${cotData.job_id || 'unknown'}_${new Date().toISOString().split('T')[0]}.xlsx`;
+        
+        try {
+            XLSX.writeFile(workbook, fileName);
+            console.log('CoT analysis exported to Excel successfully');
+        } catch (writeError) {
+            console.error('Error writing Excel file:', writeError);
+            throw new Error('Failed to write Excel file. This might be due to browser security restrictions.');
+        }
+        
+    } catch (error) {
+        console.error('Error creating CoT Excel export:', error);
+        throw error;
     }
 }
 
@@ -1869,6 +2234,7 @@ function showCoTLoading() {
 function hideCoTLoading() {
     document.getElementById('cot-loading').classList.add('hidden');
 }
+
 
 function showCoTError(message) {
     document.getElementById('cot-error-message').textContent = message;
@@ -2037,6 +2403,36 @@ function toggleOpenAIKeyVisibility() {
     }
 }
 
+async function saveConfiguration() {
+    try {
+        const apiKey = document.getElementById('openai_api_key').value;
+        
+        // Save the configuration
+        const config = {
+            openai_api_key: apiKey
+        };
+        
+        const response = await fetch(`${API_BASE}/config`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(config)
+        });
+
+        if (response.ok) {
+            alert('✅ Configuration saved successfully!');
+        } else {
+            const errorData = await response.json();
+            alert(`❌ Failed to save configuration: ${errorData.detail || 'Unknown error'}`);
+        }
+
+    } catch (error) {
+        console.error('Error saving configuration:', error);
+        alert('❌ Error saving configuration: ' + error.message);
+    }
+}
+
 async function testOpenAIKey() {
     const apiKey = document.getElementById('openai_api_key').value;
     if (!apiKey) {
@@ -2083,6 +2479,30 @@ async function testOpenAIKey() {
     }
 }
 
+// Comprehensive Analysis UI Functions
+function showPillarsAnalysisUI(data) {
+    console.log('Showing pillars analysis UI...');
+    
+    // The summary is already populated by populatePillarsSummary
+    // This function can be used for additional pillars-specific UI elements
+    
+    // Update any additional UI elements specific to pillars analysis
+    console.log('Pillars analysis UI displayed successfully');
+}
+
+function showLegacyAnalysisUI(data) {
+    console.log('Showing legacy analysis UI...');
+    // Keep existing legacy UI behavior - call the existing function
+    populateDetailedResults(data.per_sample_metrics);
+}
+
+// Legacy analysis UI function (simplified since detailed results section removed)
+function populateDetailedResults(samples) {
+    console.log('Legacy detailed results requested but section removed');
+    return;
+}
+
+
 // Ensure DOM is loaded before running any functions
 document.addEventListener('DOMContentLoaded', function () {
     console.log('DOM loaded, initializing UI...');
@@ -2117,4 +2537,183 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     // Initialize any necessary UI elements here
+    
+    // Load cached data if available
+    loadCachedCoTDataOnStartup();
 });
+
+// CoT Analysis Caching Functions
+function cacheCoTData(jobId, data) {
+    try {
+        const cacheKey = `cot_analysis_${jobId}`;
+        const cacheData = {
+            data: data,
+            timestamp: Date.now(),
+            jobId: jobId
+        };
+        localStorage.setItem(cacheKey, JSON.stringify(cacheData));
+        console.log(`Cached CoT analysis data for job ${jobId}`);
+    } catch (error) {
+        console.error('Error caching CoT analysis data:', error);
+    }
+}
+
+function getCachedCoTData(jobId) {
+    try {
+        const cacheKey = `cot_analysis_${jobId}`;
+        const cached = localStorage.getItem(cacheKey);
+        
+        if (!cached) {
+            return null;
+        }
+        
+        const cacheData = JSON.parse(cached);
+        
+        // Check if cache is still valid (24 hours)
+        const maxAge = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+        const age = Date.now() - cacheData.timestamp;
+        
+        if (age > maxAge) {
+            console.log(`Cache expired for job ${jobId}, removing...`);
+            localStorage.removeItem(cacheKey);
+            return null;
+        }
+        
+        console.log(`Found cached data for job ${jobId} (age: ${Math.round(age / 60000)} minutes)`);
+        return cacheData.data;
+    } catch (error) {
+        console.error('Error retrieving cached CoT analysis data:', error);
+        return null;
+    }
+}
+
+function clearCoTCache(jobId = null) {
+    try {
+        let clearedCount = 0;
+        
+        if (jobId) {
+            const cacheKey = `cot_analysis_${jobId}`;
+            localStorage.removeItem(cacheKey);
+            clearedCount = 1;
+            console.log(`Cleared cache for job ${jobId}`);
+        } else {
+            // Clear all CoT analysis cache
+            const keys = Object.keys(localStorage);
+            keys.forEach(key => {
+                if (key.startsWith('cot_analysis_')) {
+                    localStorage.removeItem(key);
+                    clearedCount++;
+                }
+            });
+            console.log(`Cleared ${clearedCount} cached CoT analyses`);
+        }
+        
+        // Show feedback to user
+        if (clearedCount > 0) {
+            showCoTCacheFeedback(`Cleared ${clearedCount} cached analysis${clearedCount > 1 ? 'es' : ''}`);
+        } else {
+            showCoTCacheFeedback('No cached analyses found');
+        }
+        
+        // Clear current data if it was cached
+        if (currentCoTData && jobId && currentCoTData.job_id === jobId) {
+            currentCoTData = null;
+            hideCoTResults();
+        }
+        
+    } catch (error) {
+        console.error('Error clearing CoT cache:', error);
+        showCoTCacheFeedback('Error clearing cache');
+    }
+}
+
+function showCoTCacheFeedback(message) {
+    // Create or update feedback element
+    let feedbackEl = document.getElementById('cache-feedback');
+    if (!feedbackEl) {
+        feedbackEl = document.createElement('div');
+        feedbackEl.id = 'cache-feedback';
+        feedbackEl.className = 'fixed top-4 right-4 z-50 px-4 py-2 rounded-md shadow-lg';
+        document.body.appendChild(feedbackEl);
+    }
+    
+    feedbackEl.innerHTML = `
+        <div class="bg-blue-100 border border-blue-300 text-blue-800 px-3 py-2 rounded-md">
+            ${message}
+        </div>
+    `;
+    
+    // Auto-hide after 3 seconds
+    setTimeout(() => {
+        if (feedbackEl) {
+            feedbackEl.remove();
+        }
+    }, 3000);
+}
+
+function getCacheInfo() {
+    try {
+        const keys = Object.keys(localStorage);
+        const cotKeys = keys.filter(key => key.startsWith('cot_analysis_'));
+        const cacheInfo = cotKeys.map(key => {
+            const cached = localStorage.getItem(key);
+            if (cached) {
+                const data = JSON.parse(cached);
+                return {
+                    jobId: data.jobId,
+                    age: Math.round((Date.now() - data.timestamp) / 60000), // age in minutes
+                    key: key
+                };
+            }
+            return null;
+        }).filter(Boolean);
+        
+        return cacheInfo;
+    } catch (error) {
+        console.error('Error getting cache info:', error);
+        return [];
+    }
+}
+
+function loadCachedCoTDataOnStartup() {
+    try {
+        const cacheInfo = getCacheInfo();
+        if (cacheInfo.length > 0) {
+            console.log(`Found ${cacheInfo.length} cached CoT analyses on startup`);
+            
+            // If there's only one cached analysis, auto-load it
+            if (cacheInfo.length === 1) {
+                const cachedJobId = cacheInfo[0].jobId;
+                console.log(`Auto-loading cached analysis for job: ${cachedJobId}`);
+                
+                // Set the job select value if possible
+                const jobSelect = document.getElementById('cot-job-select');
+                if (jobSelect) {
+                    // Find the option that matches this job ID
+                    for (let option of jobSelect.options) {
+                        if (option.value === cachedJobId) {
+                            jobSelect.value = cachedJobId;
+                            break;
+                        }
+                    }
+                    
+                    // Enable the analyze button
+                    const analyzeBtn = document.getElementById('analyze-btn');
+                    if (analyzeBtn && cachedJobId) {
+                        analyzeBtn.disabled = false;
+                    }
+                    
+                    // Load the cached data
+                    const cachedData = getCachedCoTData(cachedJobId);
+                    if (cachedData) {
+                        currentCoTData = cachedData;
+                        showCoTResults(cachedData, true); // true indicates cached data
+                        console.log('Auto-loaded cached CoT analysis');
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Error loading cached CoT data on startup:', error);
+    }
+}

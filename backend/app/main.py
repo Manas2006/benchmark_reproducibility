@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 import pandas as pd
 
-from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse, OpenAITestRequest, OpenAITestResponse
+from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse, CoTAnalysisResponseV2, OpenAITestRequest, OpenAITestResponse
 from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data
 from .path_manager import path_manager
 from .cot_analyzer import CoTAnalyzer
@@ -796,9 +796,9 @@ async def check_job_data_health(job_id: str):
             "error": str(e)
         }
 
-@app.get("/jobs/{job_id}/cot-analysis", response_model=CoTAnalysisResponse)
+@app.get("/jobs/{job_id}/cot-analysis", response_model=CoTAnalysisResponseV2)
 async def get_cot_analysis(job_id: str):
-    """Get Chain-of-Thought analysis for a job"""
+    """Get Chain-of-Thought analysis for a job using new four-pillar evaluation"""
     start_time = time.time()
     
     try:
@@ -809,26 +809,49 @@ async def get_cot_analysis(job_id: str):
         if not data_list:
             raise HTTPException(status_code=404, detail="No data found for analysis")
         
-        # Initialize analyzer
+        # Initialize new pillars runner
+        from .cot_eval_v2.pillars_runner import PillarsRunner, llm_fn_from_settings_or_env
+        
+        # Get configuration
         config = path_manager.get_config()
-        analyzer = CoTAnalyzer(openai_api_key=config.openai_api_key)
         
-        # Perform analysis
-        analysis_result = analyzer.analyze_job_data(data_list)
+        # Create LLM function if OpenAI key available
+        llm_fn = llm_fn_from_settings_or_env()
         
-        if "error" in analysis_result:
-            raise HTTPException(status_code=500, detail=analysis_result["error"])
+        # Initialize pillars runner with configuration
+        from .cot_eval_v2.config import config as pillars_config
         
-        # Add computation time
-        computation_time = time.time() - start_time
-        
-        return CoTAnalysisResponse(
-            job_id=job_id,
-            job_summary=analysis_result["job_summary"],
-            per_sample_metrics=analysis_result["per_sample_metrics"],
-            analysis_metadata=analysis_result["analysis_metadata"],
-            computation_time=computation_time
+        pillars_runner = PillarsRunner(
+            evaluator=None,  # Auto-create with NLI enabled
+            rubric_path=None,  # TODO: Add rubric path if needed
+            llm_fn=llm_fn,
+            gating=pillars_config.JUDGE_GATING,
+            budget=pillars_config.JUDGE_BUDGET,
+            diagnostic=pillars_config.JUDGE_DIAGNOSTIC
         )
+        
+        # Convert data format for pillars runner
+        samples = []
+        for sample in data_list:
+            # Extract model reasoning and answer
+            model_reasoning = sample.get('code', [''])
+            model_reasoning_text = model_reasoning[0] if model_reasoning else ""
+            predicted_answer = sample.get('pred', [''])
+            predicted_answer_text = predicted_answer[0] if predicted_answer else ""
+            
+            # Construct full CoT text
+            full_cot_text = f"{model_reasoning_text}\n#### {predicted_answer_text}"
+            
+            samples.append({
+                "problem": sample.get('question', ''),
+                "cot_text": full_cot_text,
+                "gold": sample.get('gt', '')
+            })
+        
+        # Run analysis with new pipeline
+        result = pillars_runner.run_batch(samples, job_id)
+        
+        return result
         
     except HTTPException:
         raise
@@ -844,6 +867,22 @@ async def compute_cot_analysis(job_id: str):
         return await get_cot_analysis(job_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error computing CoT analysis: {str(e)}")
+
+@app.post("/config")
+async def save_configuration(request: dict):
+    """Save configuration settings"""
+    try:
+        # Update the path manager configuration
+        if 'openai_api_key' in request:
+            path_manager._config.openai_api_key = request['openai_api_key']
+            path_manager._save_config()
+            print(f"✅ OpenAI API key updated in configuration")
+        
+        return {"message": "Configuration saved successfully"}
+        
+    except Exception as e:
+        print(f"❌ Error saving configuration: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save configuration: {str(e)}")
 
 @app.post("/config/test-openai-key", response_model=OpenAITestResponse)
 async def test_openai_key(request: OpenAITestRequest):
