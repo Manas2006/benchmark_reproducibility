@@ -6,6 +6,13 @@ import json
 from vllm import LLM, SamplingParams
 from datetime import datetime
 from tqdm import tqdm
+from math import exp
+
+try:
+    # Optional Together API import; only required when using --use_together_api
+    from together import Together
+except Exception:
+    Together = None
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -58,6 +65,10 @@ def parse_args():
     )
     parser.add_argument("--eval_method", type=str, default="pass@k", help="Evaluation method (pass@k, maj@k, rm@k)")
     parser.add_argument("--enable_prob_tracking", action="store_true", help="Enable probability tracking of target answer tokens (requires vLLM)")
+    # Together API integration
+    parser.add_argument("--use_together_api", action="store_true", help="Use Together API for generation instead of local models")
+    parser.add_argument("--together_api_key", type=str, default=None, help="Together API key (or via TOGETHER_API_KEY env var)")
+    parser.add_argument("--together_logprobs", type=int, default=0, help="Return top logprobs per token (0-5); if 0, do not request logprobs")
     args = parser.parse_args()
     args.top_p = (
         1 if args.temperature == 0 else args.top_p
@@ -135,7 +146,11 @@ def setup(args):
     # load model
     available_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")
     ##available_gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
-    if args.use_vllm:
+    if args.use_together_api:
+        # Defer model loading; Together API uses HTTP
+        llm = "together_api"
+        tokenizer = None
+    elif args.use_vllm:
         llm = LLM(
             model=args.model_name_or_path,
             tensor_parallel_size=len(available_gpus) // args.pipeline_parallel_size,
@@ -245,7 +260,7 @@ def main(llm, tokenizer, data_name, args):
     input_prompts = [
         sample["prompt"] for sample in samples for _ in range(args.n_sampling)
     ]
-    if args.apply_chat_template:
+    if args.apply_chat_template and tokenizer is not None:
         input_prompts = [
             tokenizer.apply_chat_template(
                 [{"role": "user", "content": prompt.strip()}],
@@ -254,6 +269,8 @@ def main(llm, tokenizer, data_name, args):
             )
             for prompt in input_prompts
         ]
+    elif args.apply_chat_template and tokenizer is None:
+        print("WARNING: apply_chat_template requested but tokenizer unavailable; skipping chat template application.")
     remain_prompts = input_prompts
     remain_prompts = [(i, prompt) for i, prompt in enumerate(remain_prompts)]
     end_prompts = []
@@ -278,6 +295,8 @@ def main(llm, tokenizer, data_name, args):
     # Prepare containers for optional probability tracking
     all_probability_logs = [{} for _ in range(len(remain_prompts))]
     all_exact_matches = [{} for _ in range(len(remain_prompts))]
+    all_chosen_token_probs = [{} for _ in range(len(remain_prompts))]
+    all_entropies = [{} for _ in range(len(remain_prompts))]
 
     # start inference
     # measure time use
@@ -291,7 +310,59 @@ def main(llm, tokenizer, data_name, args):
 
         # get all outputs
         prompts = [item[1] for item in current_prompts]
-        if args.use_vllm:
+        if args.use_together_api:
+            if Together is None:
+                raise RuntimeError("Together API SDK not installed. Please install 'together' package.")
+            api_key = args.together_api_key or os.environ.get("TOGETHER_API_KEY")
+            if not api_key:
+                raise RuntimeError("Together API key not provided. Use --together_api_key or set TOGETHER_API_KEY env var.")
+            client = Together(api_key=api_key)
+            outputs = []
+            # Together API: per-prompt generation to preserve ordering and allow logprobs capture
+            for i, prompt_text in enumerate(prompts):
+                completion = client.chat.completions.create(
+                    model=args.model_name_or_path,
+                    messages=[{"role": "user", "content": prompt_text}],
+                    max_tokens=args.max_tokens_per_call,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    logprobs=(args.together_logprobs if args.together_logprobs and args.together_logprobs > 0 else None),
+                )
+                choice = completion.choices[0]
+                outputs.append(choice.message.content or "")
+                # If logprobs requested, convert and attach probability log similar to local models
+                if args.together_logprobs and args.together_logprobs > 0:
+                    # Prefer generated token probabilities if available; otherwise, use max of top_logprobs
+                    try:
+                        probs_seq = []
+                        if hasattr(choice, "logprobs") and choice.logprobs:
+                            lp = choice.logprobs
+                            # tokens/logprobs may be attributes or dict keys depending on SDK version
+                            token_logprobs = getattr(lp, "token_logprobs", None)
+                            if token_logprobs is None and isinstance(lp, dict):
+                                token_logprobs = lp.get("token_logprobs")
+                            if token_logprobs:
+                                probs_seq = [exp(v) if isinstance(v, (int, float)) else None for v in token_logprobs]
+                            else:
+                                top_logprobs = getattr(lp, "top_logprobs", None)
+                                if top_logprobs is None and isinstance(lp, dict):
+                                    top_logprobs = lp.get("top_logprobs")
+                                if top_logprobs:
+                                    for step_probs in top_logprobs:
+                                        if isinstance(step_probs, dict) and step_probs:
+                                            max_logprob = max(step_probs.values())
+                                            probs_seq.append(exp(max_logprob))
+                                        else:
+                                            probs_seq.append(None)
+                            original_idx = current_prompts[i][0]
+                            all_probability_logs[original_idx][f"epoch_{epoch}"] = [p for p in probs_seq if isinstance(p, (int, float))]
+                            all_exact_matches[original_idx][f"epoch_{epoch}"] = []
+                            # Together API doesn't support chosen token probs and entropy tracking
+                            all_chosen_token_probs[original_idx][f"epoch_{epoch}"] = []
+                            all_entropies[original_idx][f"epoch_{epoch}"] = []
+                    except Exception:
+                        pass
+        elif args.use_vllm:
             # If prob tracking is enabled, we need tokenizer for target ids
             if args.enable_prob_tracking and tokenizer is None:
                 tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
@@ -336,6 +407,8 @@ def main(llm, tokenizer, data_name, args):
                     # Store per-epoch
                     all_probability_logs[original_idx][f"epoch_{epoch}"] = recorder.probs
                     all_exact_matches[original_idx][f"epoch_{epoch}"] = recorder.successful_matches
+                    all_chosen_token_probs[original_idx][f"epoch_{epoch}"] = recorder.chosen_token_probs
+                    all_entropies[original_idx][f"epoch_{epoch}"] = recorder.entropies
             else:
                 outputs = llm.generate(
                     prompts,
@@ -531,6 +604,8 @@ def main(llm, tokenizer, data_name, args):
         if any(all_probability_logs[sample_idx_for_logs].values()):
             sample["probability_log"] = all_probability_logs[sample_idx_for_logs]
             sample["exact_match_steps"] = all_exact_matches[sample_idx_for_logs]
+            sample["chosen_token_probs"] = all_chosen_token_probs[sample_idx_for_logs]
+            sample["entropies"] = all_entropies[sample_idx_for_logs]
         all_samples.append(sample)
 
     # add processed samples
@@ -549,7 +624,7 @@ def main(llm, tokenizer, data_name, args):
         save_jsonl(all_samples, out_file)
 
         # Additionally save a separate probability-only JSONL when tracking is enabled
-        if getattr(args, 'enable_prob_tracking', False):
+        if getattr(args, 'enable_prob_tracking', False) or (getattr(args, 'use_together_api', False) and getattr(args, 'together_logprobs', 0) and args.together_logprobs > 0):
             prob_only_file = out_file.replace(
                 ".jsonl", f"_{args.prompt_type}_prob.jsonl"
             )
@@ -559,6 +634,8 @@ def main(llm, tokenizer, data_name, args):
                     "idx": rec.get("idx"),
                     "probability_log": rec.get("probability_log", {}),
                     "exact_match_steps": rec.get("exact_match_steps", {}),
+                    "chosen_token_probs": rec.get("chosen_token_probs", {}),
+                    "entropies": rec.get("entropies", {}),
                     "score": rec.get("score", []),
                 }
                 prob_records.append(entry)
@@ -586,6 +663,10 @@ def main(llm, tokenizer, data_name, args):
         "eval_method": args.eval_method,
         "k": args.n_sampling,  # k equals n_sampling
     }
+    # Add Together API config if used
+    if getattr(args, 'use_together_api', False):
+        job_config["use_together_api"] = True
+        job_config["together_logprobs"] = int(getattr(args, 'together_logprobs', 0) or 0)
     
     # Add custom prompt if provided
     if hasattr(args, 'prompt') and args.prompt:
