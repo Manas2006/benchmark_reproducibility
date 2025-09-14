@@ -173,6 +173,7 @@ async function loadPathConfig() {
         document.getElementById('slurm_partition').value = config.slurm_partition || '';
         document.getElementById('slurm_account').value = config.slurm_account || '';
         document.getElementById('slurm_wall_time').value = config.slurm_wall_time || '';
+        document.getElementById('openai_api_key').value = config.openai_api_key || '';
 
         console.log('Path configuration loaded:', config);
     } catch (error) {
@@ -198,7 +199,8 @@ async function savePathConfig(event) {
             job_db_path: document.getElementById('job_db_path').value,
             slurm_partition: document.getElementById('slurm_partition').value,
             slurm_account: document.getElementById('slurm_account').value,
-            slurm_wall_time: document.getElementById('slurm_wall_time').value
+            slurm_wall_time: document.getElementById('slurm_wall_time').value,
+            openai_api_key: document.getElementById('openai_api_key').value
         };
 
         console.log('📤 Sending SLURM config:', {
@@ -2023,6 +2025,62 @@ function waitForElement(selector, timeout = 5000) {
             reject(new Error(`Element ${selector} not found within ${timeout}ms`));
         }, timeout);
     });
+}
+
+// OpenAI API Key functions
+function toggleOpenAIKeyVisibility() {
+    const keyInput = document.getElementById('openai_api_key');
+    if (keyInput.type === 'password') {
+        keyInput.type = 'text';
+    } else {
+        keyInput.type = 'password';
+    }
+}
+
+async function testOpenAIKey() {
+    const apiKey = document.getElementById('openai_api_key').value;
+    if (!apiKey) {
+        alert('Please enter an OpenAI API key first');
+        return;
+    }
+
+    try {
+        // Show loading state
+        const testButton = event.target;
+        const originalText = testButton.textContent;
+        testButton.textContent = 'Testing...';
+        testButton.disabled = true;
+
+        // Test the API key by calling the backend
+        const response = await fetch(`${API_BASE}/config/test-openai-key`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ api_key: apiKey })
+        });
+
+        const data = await response.json();
+        
+        if (response.ok && data.valid) {
+            alert('✅ OpenAI API key is valid and working!');
+        } else {
+            alert(`❌ OpenAI API key test failed: ${data.error || 'Unknown error'}`);
+        }
+
+        // Restore button state
+        testButton.textContent = originalText;
+        testButton.disabled = false;
+
+    } catch (error) {
+        console.error('Error testing OpenAI API key:', error);
+        alert('❌ Error testing API key: ' + error.message);
+        
+        // Restore button state
+        const testButton = event.target;
+        testButton.textContent = 'Test API Key';
+        testButton.disabled = false;
+    }
 }
 
 // Ensure DOM is loaded before running any functions

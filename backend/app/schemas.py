@@ -27,6 +27,9 @@ class PathConfig(BaseModel):
     scripts_dir: str = Field(description="Directory for SLURM scripts")
     job_db_path: str = Field(description="Path to job database file")
     
+    # API configuration
+    openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key for CoT Analysis LLM Judge")
+    
     # SLURM configuration
     slurm_partition: str = Field(default="gpu-a100-dev", description="SLURM partition name")
     slurm_account: str = Field(default="CCR24036", description="SLURM account name")
@@ -138,4 +141,14 @@ class CoTAnalysisResponse(BaseModel):
     job_summary: CoTJobSummary = Field(description="Aggregate statistics")
     per_sample_metrics: List[CoTSampleAnalysis] = Field(description="Per-sample analysis results")
     analysis_metadata: Dict[str, Any] = Field(description="Analysis metadata and version info")
-    computation_time: float = Field(description="Time taken for analysis in seconds") 
+    computation_time: float = Field(description="Time taken for analysis in seconds")
+
+class OpenAITestRequest(BaseModel):
+    """Request to test OpenAI API key"""
+    api_key: str = Field(description="OpenAI API key to test")
+
+class OpenAITestResponse(BaseModel):
+    """Response from OpenAI API key test"""
+    valid: bool = Field(description="Whether the API key is valid")
+    error: Optional[str] = Field(default=None, description="Error message if key is invalid")
+    model_info: Optional[Dict[str, Any]] = Field(default=None, description="Information about available models") 

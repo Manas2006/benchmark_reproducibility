@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 import pandas as pd
 
-from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse
+from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse, OpenAITestRequest, OpenAITestResponse
 from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data
 from .path_manager import path_manager
 from .cot_analyzer import CoTAnalyzer
@@ -526,7 +526,8 @@ def export_results_to_excel(job_id: str):
             raise HTTPException(status_code=400, detail="Invalid result file format or empty file")
         
         # Initialize CoT analyzer for metrics calculation
-        analyzer = CoTAnalyzer()
+        config = path_manager.get_config()
+        analyzer = CoTAnalyzer(openai_api_key=config.openai_api_key)
         
         # Build DataFrame with all available columns + CoT metrics
         df_data = []
@@ -809,7 +810,8 @@ async def get_cot_analysis(job_id: str):
             raise HTTPException(status_code=404, detail="No data found for analysis")
         
         # Initialize analyzer
-        analyzer = CoTAnalyzer()
+        config = path_manager.get_config()
+        analyzer = CoTAnalyzer(openai_api_key=config.openai_api_key)
         
         # Perform analysis
         analysis_result = analyzer.analyze_job_data(data_list)
@@ -841,4 +843,48 @@ async def compute_cot_analysis(job_id: str):
         # For now, just redirect to the GET endpoint
         return await get_cot_analysis(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error computing CoT analysis: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Error computing CoT analysis: {str(e)}")
+
+@app.post("/config/test-openai-key", response_model=OpenAITestResponse)
+async def test_openai_key(request: OpenAITestRequest):
+    """Test OpenAI API key validity"""
+    try:
+        # Import OpenAI here to avoid import errors if not available
+        try:
+            from openai import OpenAI
+        except ImportError:
+            return OpenAITestResponse(
+                valid=False,
+                error="OpenAI library not installed. Please install with: pip install openai"
+            )
+        
+        # Test the API key by making a simple request
+        client = OpenAI(api_key=request.api_key)
+        
+        try:
+            # Make a simple test request to list models
+            response = client.models.list()
+            
+            # Get basic info about available models
+            model_info = {
+                "total_models": len(response.data),
+                "gpt_models": [m.id for m in response.data if "gpt" in m.id.lower()],
+                "available_for_chat": [m.id for m in response.data if "gpt-4" in m.id or "gpt-3.5" in m.id]
+            }
+            
+            return OpenAITestResponse(
+                valid=True,
+                model_info=model_info
+            )
+            
+        except Exception as api_error:
+            return OpenAITestResponse(
+                valid=False,
+                error=f"API key test failed: {str(api_error)}"
+            )
+            
+    except Exception as e:
+        return OpenAITestResponse(
+            valid=False,
+            error=f"Error testing API key: {str(e)}"
+        ) 

@@ -11,6 +11,7 @@ import math
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
+import os
 
 
 @dataclass
@@ -47,11 +48,26 @@ class CoTMetrics:
 class CoTAnalyzer:
     """Chain-of-Thought reasoning analyzer"""
     
-    def __init__(self):
+    def __init__(self, openai_api_key: Optional[str] = None):
         # Patterns for identifying mathematical expressions
         self.arithmetic_pattern = re.compile(r'[\d\.\,]+\s*[+\-*/÷×]\s*[\d\.\,]+')
         self.calculation_pattern = re.compile(r'<<([^>]+)>>')
         self.final_answer_pattern = re.compile(r'####\s*(.+)$', re.MULTILINE)
+        
+        # Initialize judge if API key is provided
+        self.judge = None
+        if openai_api_key:
+            try:
+                # Import here to avoid import errors if not available
+                from .cot_eval_v2.judge import Judge
+                # Set the API key in environment for the judge
+                os.environ['OPENAI_API_KEY'] = openai_api_key
+                self.judge = Judge(mode="SMART", diagnostic=False)
+                print("✅ OpenAI Judge initialized for enhanced CoT analysis")
+            except ImportError:
+                print("⚠️ OpenAI library not available. Using rule-based analysis only.")
+            except Exception as e:
+                print(f"⚠️ Failed to initialize OpenAI Judge: {e}. Using rule-based analysis only.")
         
         # Common error patterns
         self.error_patterns = {

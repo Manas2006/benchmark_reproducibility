@@ -52,7 +52,8 @@ class PathManager:
             output_dir=output_dir,
             logs_dir=logs_dir,
             scripts_dir=scripts_dir,
-            job_db_path=job_db_path
+            job_db_path=job_db_path,
+            openai_api_key=None  # Will be set by user through settings
         )
     
     def _load_config(self):

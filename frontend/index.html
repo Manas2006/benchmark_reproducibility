@@ -348,6 +348,29 @@
                         </div>
 
                         <div class="border-t pt-6">
+                            <h3 class="text-lg font-medium mb-4">API Configuration</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700">OpenAI API Key</label>
+                                    <input type="password" id="openai_api_key"
+                                        class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                        placeholder="sk-...">
+                                    <p class="text-xs text-gray-500 mt-1">Required for CoT Analysis LLM Judge functionality</p>
+                                    <div class="mt-2">
+                                        <button type="button" onclick="testOpenAIKey()"
+                                            class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                                            Test API Key
+                                        </button>
+                                        <button type="button" onclick="toggleOpenAIKeyVisibility()"
+                                            class="ml-2 px-3 py-1 bg-gray-600 text-white text-sm rounded hover:bg-gray-700">
+                                            Show/Hide
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="border-t pt-6">
                             <h3 class="text-lg font-medium mb-4">SLURM Configuration</h3>
                             <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                                 <div>
