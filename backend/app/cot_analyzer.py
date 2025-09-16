@@ -62,7 +62,7 @@ class CoTAnalyzer:
                 from .cot_eval_v2.judge import Judge
                 # Set the API key in environment for the judge
                 os.environ['OPENAI_API_KEY'] = openai_api_key
-                self.judge = Judge(mode="SMART", diagnostic=False)
+                self.judge = Judge(mode="ALWAYS", diagnostic=False)
                 print("✅ OpenAI Judge initialized for enhanced CoT analysis")
             except ImportError:
                 print("⚠️ OpenAI library not available. Using rule-based analysis only.")
@@ -77,6 +77,100 @@ class CoTAnalyzer:
             'wrong_approach': re.compile(r'(?:wrong approach|incorrect method)')
         }
     
+    def analyze_answer_comprehensive(self, question: str, answer: str, ground_truth: str = None) -> Dict[str, Any]:
+        """
+        Analyze a single Chain-of-Thought answer using comprehensive evaluation framework
+        (Rule-based + DeBERTa NLI + GPT Judge)
+        
+        Args:
+            question: The problem/question text
+            answer: The model's full answer with reasoning
+            ground_truth: The correct answer (optional)
+            
+        Returns:
+            Comprehensive analysis results with flags, evidence, and scores
+        """
+        try:
+            import sys
+            import os
+            # Add the current directory to Python path for cot_eval_v2 imports
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            if current_dir not in sys.path:
+                sys.path.insert(0, current_dir)
+            
+            from cot_eval_v2.evaluator import PillarsEvaluator
+            from cot_eval_v2.judge import Judge
+            
+            # Initialize evaluator with NLI (DeBERTa) disabled for CPU compatibility
+            # Note: NLI works on GPU via SLURM, but has threading issues on CPU
+            evaluator = PillarsEvaluator(use_nli=False)
+            
+            # Initialize judge if OpenAI key is available
+            if hasattr(self, 'openai_api_key') and self.openai_api_key:
+                os.environ['OPENAI_API_KEY'] = self.openai_api_key
+                # Use real GPT judge with SMART gating
+                judge = Judge(model="gpt-4o-mini", mode="ALWAYS", diagnostic=True)
+                evaluator.judge = judge
+                print(f"✅ Initialized real GPT judge for comprehensive analysis")
+            else:
+                print(f"⚠️ No OpenAI API key available, using rules+DeBERTa only (no judge)")
+                # No judge - will use rules+DeBERTa only
+            
+            # Run comprehensive analysis
+            print(f"🔍 Running comprehensive CoT analysis...")
+            print(f"   Question: {question[:100]}{'...' if len(question) > 100 else ''}")
+            print(f"   Ground Truth: {ground_truth}")
+            print(f"   Answer: {answer[:100]}{'...' if len(answer) > 100 else ''}")
+            
+            flags, evidence, rule_scores, judge_scores, fused_scores = evaluator.analyze(
+                problem=question,
+                cot_text=answer,
+                gold=ground_truth
+            )
+            
+            print(f"✅ Analysis complete!")
+            print(f"📊 Rule scores: {rule_scores}")
+            print(f"🤖 Judge scores: {judge_scores}")
+            print(f"🔗 Fused scores: {fused_scores}")
+            
+            # Convert flags to list format for JSON serialization
+            flags_list = []
+            if flags.has_flags():
+                for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
+                    pillar_flags = flags.get_flags_by_pillar(pillar)
+                    for flag in pillar_flags:
+                        flags_list.append({
+                            "pillar": pillar,
+                            "step": flag.step,
+                            "issue": flag.issue,
+                            "details": flag.details
+                        })
+            
+            # Log flags found
+            print(f"🚩 Flags found: {len(flags_list)}")
+            if flags_list:
+                for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
+                    pillar_flags = [f for f in flags_list if f['pillar'] == pillar]
+                    if pillar_flags:
+                        print(f"   - {pillar}: {len(pillar_flags)} flags")
+                        for flag in pillar_flags[:2]:  # Show first 2 flags per pillar
+                            print(f"     * {flag['issue']} (step: {flag['step']})")
+            print()
+            
+            return {
+                "flags": flags_list,
+                "evidence": evidence,
+                "rule_scores": rule_scores,
+                "judge_scores": judge_scores,
+                "fused_scores": fused_scores,
+                "analysis_method": "comprehensive"  # Flag to indicate this is the new comprehensive analysis
+            }
+            
+        except Exception as e:
+            # Fallback to original analysis if comprehensive fails
+            print(f"Comprehensive analysis failed, falling back to original: {e}")
+            return self.analyze_answer(answer, ground_truth)
+
     def analyze_answer(self, answer: str, ground_truth: str = None) -> CoTMetrics:
         """
         Analyze a single Chain-of-Thought answer using rigorous CQS scoring
@@ -204,49 +298,109 @@ class CoTAnalyzer:
             
             gt = sample.get('gt', '')
             score = sample.get('score', [])
+            question = sample.get('question', '')
             
-            # Analyze this sample using the model's actual output
-            metrics = self.analyze_answer(full_model_output, gt)
+            # Use comprehensive analysis if available
+            try:
+                metrics = self.analyze_answer_comprehensive(question, full_model_output, gt)
+            except Exception as e:
+                print(f"Comprehensive analysis failed for sample {sample.get('idx', 'unknown')}: {e}")
+                # Fallback to original analysis
+                metrics = self.analyze_answer(full_model_output, gt)
             
-            # Add sample metadata - convert dataclass to dict for Pydantic
+            # Add sample metadata - handle both comprehensive and legacy analysis
             sample_result = {
                 'idx': sample.get('idx'),
-                'metrics': {
-                                    # Basic metrics
-                'reasoning_steps': metrics.reasoning_steps,
-                'total_chars': metrics.total_chars,
-                'avg_words_per_step': metrics.avg_words_per_step,
-                
-                # CQS Component Scores
-                'final_answer_correctness': metrics.final_answer_correctness,
-                'arithmetic_accuracy': metrics.arithmetic_accuracy,
-                'logical_structure_score': metrics.logical_structure_score,
-                'consistency_completeness': metrics.consistency_completeness,
-                'formatting_notation': metrics.formatting_notation,
-                
-                # Overall CQS Score
-                'cqs_score': metrics.cqs_score,
-                
-                # Legacy metrics for backward compatibility
-                'arithmetic_expressions': metrics.arithmetic_expressions,
-                'has_clear_structure': metrics.has_clear_structure,
-                'has_final_answer': metrics.has_final_answer,
-                'uses_intermediate_calculations': metrics.uses_intermediate_calculations,
-                'shows_work_explicitly': metrics.shows_work_explicitly,
-                'follows_logical_sequence': metrics.follows_logical_sequence,
-                
-                # Error analysis
-                'error_patterns': metrics.error_patterns,
-                'confidence_score': metrics.confidence_score
-                },
-                'is_correct': bool(score and score[0]) if score else False,
-                'has_reasoning': len(model_reasoning_text.strip()) > 0
+                'question': question,
+                'model_output': full_model_output,
+                'predicted_answer': predicted_answer_text,
+                'ground_truth': gt,
+                'is_correct': predicted_answer_text == gt,
             }
+            
+            # Handle comprehensive analysis results
+            if isinstance(metrics, dict) and metrics.get('analysis_method') == 'comprehensive':
+                sample_result.update({
+                    'analysis_method': 'comprehensive',
+                    'flags': metrics['flags'],
+                    'evidence': metrics['evidence'],
+                    'rule_scores': {k: v for k, v in metrics['rule_scores'].items() if v is not None},
+                    'judge_scores': {k: v for k, v in metrics['judge_scores'].items() if v is not None},
+                    'fused_scores': {k: v for k, v in metrics['fused_scores'].items() if v is not None},
+                    'overall_score': metrics['fused_scores'].get('overall', 0.0),
+                    'final_correct': metrics['evidence'].get('final_correct', False),
+                    'utility_score': metrics['fused_scores'].get('utility', 0.0),
+                    'coherence_score': metrics['fused_scores'].get('coherence', 0.0),
+                    'factuality_score': metrics['fused_scores'].get('factuality', 0.0),
+                    'faithfulness_score': metrics['fused_scores'].get('faithfulness', 0.0),
+                    'flags_count': len(metrics['flags']),
+                    'arith_errors': len(metrics['evidence'].get('arith_bad_examples', [])),
+                    'coh_contra_cnt': metrics['evidence'].get('coh_contra_cnt', 0),
+                    'fact_contra_cnt': metrics['evidence'].get('fact_contra_cnt', 0),
+                    'fact_entail_rate': metrics['evidence'].get('fact_entail_rate', 0.0),
+                    'intermediate_ok_rate': metrics['evidence'].get('intermediate_ok_rate', 0.0)
+                })
+            else:
+                # Handle legacy analysis results (CoTMetrics object)
+                sample_result.update({
+                    'analysis_method': 'legacy',
+                    'metrics': {
+                        # Basic metrics
+                        'reasoning_steps': metrics.reasoning_steps,
+                        'total_chars': metrics.total_chars,
+                        'avg_words_per_step': metrics.avg_words_per_step,
+                        
+                        # CQS Component Scores
+                        'final_answer_correctness': metrics.final_answer_correctness,
+                        'arithmetic_accuracy': metrics.arithmetic_accuracy,
+                        'logical_structure_score': metrics.logical_structure_score,
+                        'consistency_completeness': metrics.consistency_completeness,
+                        'formatting_notation': metrics.formatting_notation,
+                        
+                        # Overall CQS Score
+                        'cqs_score': metrics.cqs_score,
+                        
+                        # Legacy metrics for backward compatibility
+                        'arithmetic_expressions': metrics.arithmetic_expressions,
+                        'has_clear_structure': metrics.has_clear_structure,
+                        'has_final_answer': metrics.has_final_answer,
+                        'uses_intermediate_calculations': metrics.uses_intermediate_calculations,
+                        'shows_work_explicitly': metrics.shows_work_explicitly,
+                        'follows_logical_sequence': metrics.follows_logical_sequence,
+                        
+                        # Error analysis
+                        'error_patterns': metrics.error_patterns,
+                        'confidence_score': metrics.confidence_score
+                    },
+                    'is_correct': bool(score and score[0]) if score else False,
+                    'has_reasoning': len(model_reasoning_text.strip()) > 0,
+                    'overall_score': getattr(metrics, 'cqs_score', 0.0),
+                    'flags_count': 0
+                })
             
             per_sample_metrics.append(sample_result)
         
         # Compute aggregate statistics
         aggregate_stats = self._compute_aggregate_stats(per_sample_metrics)
+        
+        # Add comprehensive analysis statistics if available
+        comprehensive_samples = [s for s in per_sample_metrics if s.get('analysis_method') == 'comprehensive']
+        if comprehensive_samples:
+            aggregate_stats.update({
+                'comprehensive_analysis_count': len(comprehensive_samples),
+                'avg_overall_score': sum(s.get('overall_score', 0.0) for s in comprehensive_samples) / len(comprehensive_samples),
+                'avg_utility_score': sum(s.get('utility_score', 0.0) for s in comprehensive_samples) / len(comprehensive_samples),
+                'avg_coherence_score': sum(s.get('coherence_score', 0.0) for s in comprehensive_samples) / len(comprehensive_samples),
+                'avg_factuality_score': sum(s.get('factuality_score', 0.0) for s in comprehensive_samples) / len(comprehensive_samples),
+                'avg_faithfulness_score': sum(s.get('faithfulness_score', 0.0) for s in comprehensive_samples) / len(comprehensive_samples),
+                'total_flags': sum(s.get('flags_count', 0) for s in comprehensive_samples),
+                'samples_with_flags': len([s for s in comprehensive_samples if s.get('flags_count', 0) > 0]),
+                'avg_arith_errors': sum(s.get('arith_errors', 0) for s in comprehensive_samples) / len(comprehensive_samples),
+                'avg_coh_contra': sum(s.get('coh_contra_cnt', 0) for s in comprehensive_samples) / len(comprehensive_samples),
+                'avg_fact_contra': sum(s.get('fact_contra_cnt', 0) for s in comprehensive_samples) / len(comprehensive_samples),
+                'avg_fact_entail_rate': sum(s.get('fact_entail_rate', 0.0) for s in comprehensive_samples) / len(comprehensive_samples),
+                'avg_intermediate_ok_rate': sum(s.get('intermediate_ok_rate', 0.0) for s in comprehensive_samples) / len(comprehensive_samples)
+            })
         
         return {
             'job_summary': aggregate_stats,
@@ -555,44 +709,58 @@ class CoTAnalyzer:
             return {}
         
         total_samples = len(per_sample_metrics)
-        samples_with_reasoning = sum(1 for s in per_sample_metrics if s['has_reasoning'])
+        samples_with_reasoning = sum(1 for s in per_sample_metrics if s.get('has_reasoning', False))
         
-        # Compute averages
-        metrics_list = [s['metrics'] for s in per_sample_metrics]
+        # Compute averages - only for legacy analysis samples
+        metrics_list = [s['metrics'] for s in per_sample_metrics if 'metrics' in s]
         
-        avg_steps = sum(m['reasoning_steps'] for m in metrics_list) / total_samples
-        avg_length = sum(m['total_chars'] for m in metrics_list) / total_samples
-        avg_arithmetic_acc = sum(m['arithmetic_accuracy'] for m in metrics_list) / total_samples
-        avg_cqs = sum(m['cqs_score'] for m in metrics_list) / total_samples
+        if metrics_list:
+            avg_steps = sum(m['reasoning_steps'] for m in metrics_list) / len(metrics_list)
+            avg_length = sum(m['total_chars'] for m in metrics_list) / len(metrics_list)
+            avg_arithmetic_acc = sum(m['arithmetic_accuracy'] for m in metrics_list) / len(metrics_list)
+            avg_cqs = sum(m['cqs_score'] for m in metrics_list) / len(metrics_list)
+        else:
+            avg_steps = avg_length = avg_arithmetic_acc = avg_cqs = 0.0
         
         # CQS component averages
-        avg_final_answer_correct = sum(m['final_answer_correctness'] for m in metrics_list) / total_samples
-        avg_logical_structure = sum(m['logical_structure_score'] for m in metrics_list) / total_samples
-        avg_consistency_complete = sum(m['consistency_completeness'] for m in metrics_list) / total_samples
-        avg_formatting_notation = sum(m['formatting_notation'] for m in metrics_list) / total_samples
+        if metrics_list:
+            avg_final_answer_correct = sum(m['final_answer_correctness'] for m in metrics_list) / len(metrics_list)
+            avg_logical_structure = sum(m['logical_structure_score'] for m in metrics_list) / len(metrics_list)
+            avg_consistency_complete = sum(m['consistency_completeness'] for m in metrics_list) / len(metrics_list)
+            avg_formatting_notation = sum(m['formatting_notation'] for m in metrics_list) / len(metrics_list)
+        else:
+            avg_final_answer_correct = avg_logical_structure = avg_consistency_complete = avg_formatting_notation = 0.0
         
         # Pattern distribution
-        pattern_counts = {
-            'uses_calculations': sum(1 for m in metrics_list if m['uses_intermediate_calculations']),
-            'shows_work': sum(1 for m in metrics_list if m['shows_work_explicitly']),
-            'logical_sequence': sum(1 for m in metrics_list if m['follows_logical_sequence'])
-        }
+        if metrics_list:
+            pattern_counts = {
+                'uses_calculations': sum(1 for m in metrics_list if m['uses_intermediate_calculations']),
+                'shows_work': sum(1 for m in metrics_list if m['shows_work_explicitly']),
+                'logical_sequence': sum(1 for m in metrics_list if m['follows_logical_sequence'])
+            }
+        else:
+            pattern_counts = {}
         
         # Error pattern frequency
         error_freq = {}
-        for metrics in metrics_list:
-            for error in metrics['error_patterns']:
-                error_freq[error] = error_freq.get(error, 0) + 1
+        if metrics_list:
+            for metrics in metrics_list:
+                for error in metrics['error_patterns']:
+                    error_freq[error] = error_freq.get(error, 0) + 1
         
         # Correlation with correctness
-        correct_samples = [s for s in per_sample_metrics if s['is_correct']]
-        incorrect_samples = [s for s in per_sample_metrics if not s['is_correct']]
+        correct_samples = [s for s in per_sample_metrics if s.get('is_correct', False)]
+        incorrect_samples = [s for s in per_sample_metrics if not s.get('is_correct', False)]
+        
+        # Only compute correlation for legacy samples that have metrics
+        legacy_correct = [s for s in correct_samples if 'metrics' in s]
+        legacy_incorrect = [s for s in incorrect_samples if 'metrics' in s]
         
         correlation = {
-            'correct_avg_steps': sum(s['metrics']['reasoning_steps'] for s in correct_samples) / len(correct_samples) if correct_samples else 0,
-            'incorrect_avg_steps': sum(s['metrics']['reasoning_steps'] for s in incorrect_samples) / len(incorrect_samples) if incorrect_samples else 0,
-            'correct_avg_cqs': sum(s['metrics']['cqs_score'] for s in correct_samples) / len(correct_samples) if correct_samples else 0,
-            'incorrect_avg_cqs': sum(s['metrics']['cqs_score'] for s in incorrect_samples) / len(incorrect_samples) if incorrect_samples else 0
+            'correct_avg_steps': sum(s['metrics']['reasoning_steps'] for s in legacy_correct) / len(legacy_correct) if legacy_correct else 0,
+            'incorrect_avg_steps': sum(s['metrics']['reasoning_steps'] for s in legacy_incorrect) / len(legacy_incorrect) if legacy_incorrect else 0,
+            'correct_avg_cqs': sum(s['metrics']['cqs_score'] for s in legacy_correct) / len(legacy_correct) if legacy_correct else 0,
+            'incorrect_avg_cqs': sum(s['metrics']['cqs_score'] for s in legacy_incorrect) / len(legacy_incorrect) if legacy_incorrect else 0
         }
         
         return {

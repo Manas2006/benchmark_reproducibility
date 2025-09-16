@@ -7,6 +7,46 @@ Provides environment variable defaults and configuration validation.
 import os
 from typing import Optional
 
+# Mathematical tolerances
+FLOAT_TOL = 1e-6
+UNIT_CONV_TOL = 0.01  # 1%
+
+# Similarity thresholds
+REDUNDANCY_SIM = 0.92
+OFFTOPIC_JACCARD = 0.05  # Much more lenient - only flag truly off-topic content
+
+# Value of Information (VOI) thresholds
+VOI_DELTA_ABS = 1e-6
+VOI_DELTA_REL = 0.005
+
+# Processing limits
+MAX_STEPS_FOR_SIMPLE = 40
+
+# Model configuration
+EMBED_MODEL = "all-MiniLM-L6-v2"  # or None if unavailable
+GPT_PROVIDER = os.getenv("GPT_PROVIDER", "openai")  # adapter key; can be "none"
+GPT_TIMEOUT_S = 20
+
+# LLM configuration
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = "gpt-4o-mini"
+
+# Deterministic mode
+DETERMINISTIC_MODE = os.getenv("DETERMINISTIC_MODE", "false").lower() == "true"
+
+# Flag severity thresholds
+SEVERITY_HIGH = 0.8
+SEVERITY_MEDIUM = 0.5
+SEVERITY_LOW = 0.2
+
+# Shortcut detection thresholds
+SHORTCUT_THRESHOLD = 0.6  # 60% of steps non-contributing
+SHUFFLE_TOLERANCE = 0.1   # 10% change in final answer
+
+# NLI confidence thresholds
+NLI_CONFIDENCE_HIGH = 0.8
+NLI_CONFIDENCE_MEDIUM = 0.6
+
 
 class PillarsConfig:
     """Configuration for the four-pillar evaluation system."""
@@ -119,3 +159,4 @@ if __name__ == "__main__":
     config.print_config()
     config.validate()
     setup_slurm_environment()
+

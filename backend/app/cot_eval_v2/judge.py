@@ -23,7 +23,7 @@ class Judge:
     Supports diagnostic mode for debugging with explanations.
     """
     
-    def __init__(self, model: str = "gpt-4o-mini", mode: str = "SMART", diagnostic: bool = False):
+    def __init__(self, model: str = "gpt-4o-mini", mode: str = "ALWAYS", diagnostic: bool = False):
         """
         Initialize the judge.
         
@@ -50,7 +50,7 @@ class Judge:
     
     def build_prompt(self, problem: str, cot: str, gold: str, flags_summary: str, evidence: Dict[str, Any]) -> str:
         """
-        Build the prompt for the LLM judge.
+        Build the enhanced prompt for the LLM judge using Pillars v2 flags.
         
         Args:
             problem: The original problem text
@@ -69,13 +69,90 @@ class Judge:
         )
         
         return f"""You are an expert evaluator of mathematical and logical reasoning. 
-Score the chain-of-thought (CoT) on 4 dimensions:
-- Faithfulness: reasoning is consistent with itself, no hidden shortcuts or leaps
-- Utility: steps are useful toward solving the problem and lead to the final answer
-- Coherence: steps follow logically from each other, no contradictions
-- Factuality: steps are factually correct and grounded in the problem context
+Score the chain-of-thought (CoT) on 4 dimensions using the scoring criteria below.
 
-Each score must be an integer from 1–5 (1 = very poor, 5 = excellent).
+Each score must be an integer from 1-5 (1 = very poor, 5 = excellent).
+
+## SCORING CRITERIA
+
+### 1. FAITHFULNESS (1-5)
+**Definition:** Reasoning is internally consistent, follows logical rules, and stays focused on the problem without hidden shortcuts or leaps.
+
+**Scoring Guidelines:**
+- 5: Perfect logical consistency, no contradictions, stays completely on-topic
+- 4: Minor inconsistencies or slight tangents, but overall coherent
+- 3: Some logical gaps or moderate off-topic content
+- 2: Significant logical flaws or frequent tangents
+- 1: Major contradictions, illogical leaps, or completely off-topic
+
+**Dock Points For:**
+- Contradictory statements within the reasoning
+- Logical leaps without justification
+- Going off-topic or discussing irrelevant matters
+- Hidden assumptions not stated explicitly
+- Unjustified final answers (not derivable from steps)
+- Shortcut reasoning (non-contributing steps)
+
+### 2. UTILITY (1-5)
+**Definition:** Each step meaningfully contributes to solving the problem, calculations are correct, and reasoning efficiently leads to the final answer.
+
+**Scoring Guidelines:**
+- 5: Every step is necessary and correct, efficient path to solution
+- 4: Most steps useful, minor inefficiencies or small errors
+- 3: Some useful steps mixed with unnecessary ones or calculation errors
+- 2: Many unnecessary steps or significant calculation errors
+- 1: Mostly useless steps, major calculation errors, or repetitive content
+
+**Dock Points For:**
+- Incorrect calculations or mathematical errors
+- Repetitive statements that don't add value
+- Unnecessary verbose explanations
+- Steps that don't advance toward the solution
+- Redundant reasoning or circular logic
+- Off-topic steps that don't contribute
+
+### 3. COHERENCE (1-5)
+**Definition:** Steps flow smoothly from one to the next with clear logical progression and smooth transitions.
+
+**Scoring Guidelines:**
+- 5: Perfect flow, each step naturally follows from the previous
+- 4: Good flow with minor awkward transitions
+- 3: Some disjointed steps but overall progression
+- 2: Choppy flow with unclear connections between steps
+- 1: Disjointed, random steps with no clear progression
+
+**Dock Points For:**
+- Abrupt transitions between ideas
+- Missing connecting logic between steps
+- Disjointed or random sequence of reasoning
+- Poor organization of thoughts
+- Dangling references (use-before-define)
+- Disordered reasoning chain
+
+### 4. FACTUALITY (1-5)
+**Definition:** Every step must be factually correct and grounded in the problem context, not hallucinated from surface-level understanding.
+
+**Scoring Guidelines:**
+- 5: All facts and statements are accurate and grounded in the problem
+- 4: Mostly accurate with minor factual errors
+- 3: Some factual errors or unsupported claims
+- 2: Multiple factual errors or significant hallucinations
+- 1: Major factual errors, hallucinations, or completely unsupported claims
+
+**Dock Points For:**
+- Hallucinated facts not present in the problem
+- Incorrect interpretations of given information
+- Making assumptions not supported by the problem context
+- Surface-level understanding leading to wrong facts
+- Stating things as facts that are actually assumptions
+- Claims that contradict the problem evidence
+
+## EVALUATION PROCESS
+1. Read the problem carefully to understand the context and given information
+2. Analyze each step of the CoT reasoning
+3. Check each step against the four criteria above
+4. Assign scores based on the specific guidelines for each dimension
+5. Ensure every step is evaluated for factual accuracy and logical soundness
 
 ## Problem
 {problem}
@@ -86,11 +163,21 @@ Each score must be an integer from 1–5 (1 = very poor, 5 = excellent).
 ## Gold Answer
 {gold}
 
-## Code-Based Evidence & Flags
+## Automated Flag Analysis
 {flags_summary}
 
-Evidence JSON:
+## Evidence Summary
 {json.dumps(evidence, indent=2)}
+
+## Instructions
+Based on the automated flag analysis above, carefully evaluate the reasoning. The flags highlight specific issues that should influence your scoring:
+
+- **Faithfulness flags** indicate logical inconsistencies, unjustified conclusions, or shortcut reasoning
+- **Utility flags** point to redundant, off-topic, or non-contributing steps
+- **Coherence flags** reveal structural problems like dangling references or disordered chains
+- **Factuality flags** identify unsupported claims or contradictions with the problem
+
+Use these flags as guidance, but apply your own judgment to determine the final scores. Consider the severity and impact of each flagged issue.
 
 {rationale_instructions}
 
@@ -295,7 +382,18 @@ class MockJudge(Judge):
             mock_scores: Fixed scores to return (for testing)
             **kwargs: Other arguments passed to parent
         """
-        super().__init__(**kwargs)
+        # Initialize parent without calling OpenAI
+        self.model = kwargs.get('model', 'gpt-4o-mini')
+        self.mode = kwargs.get('mode', 'ALWAYS').upper()
+        self.diagnostic = kwargs.get('diagnostic', False)
+        
+        # Validate mode
+        if self.mode not in ["SMART", "ALWAYS", "NEVER"]:
+            raise ValueError(f"Invalid mode '{self.mode}'. Must be SMART, ALWAYS, or NEVER")
+        
+        # Don't initialize OpenAI client for mock
+        self.client = None
+        
         self.mock_scores = mock_scores or {
             "faithfulness": 4,
             "utility": 4, 

@@ -2717,3 +2717,182 @@ function loadCachedCoTDataOnStartup() {
         console.error('Error loading cached CoT data on startup:', error);
     }
 }
+
+// ===== CACHED RESULTS BROWSER FUNCTIONS =====
+
+function showCachedResults() {
+    console.log('Opening cached results browser...');
+    
+    const modal = document.getElementById('cached-results-modal');
+    if (!modal) {
+        console.error('Cached results modal not found');
+        return;
+    }
+    
+    // Show the modal
+    modal.classList.remove('hidden');
+    
+    // Populate the cache summary and list
+    populateCachedResultsList();
+}
+
+function hideCachedResults() {
+    const modal = document.getElementById('cached-results-modal');
+    if (modal) {
+        modal.classList.add('hidden');
+    }
+}
+
+function populateCachedResultsList() {
+    const cacheInfo = getCacheInfo();
+    const summaryDiv = document.getElementById('cache-summary');
+    const listDiv = document.getElementById('cached-results-list');
+    
+    if (!summaryDiv || !listDiv) {
+        console.error('Cache summary or list elements not found');
+        return;
+    }
+    
+    // Update summary
+    const totalCached = cacheInfo.length;
+    const totalSize = cacheInfo.reduce((total, info) => {
+        const cached = localStorage.getItem(info.key);
+        return total + (cached ? cached.length : 0);
+    }, 0);
+    
+    summaryDiv.innerHTML = `
+        <div class="grid grid-cols-2 gap-4 text-sm">
+            <div>
+                <span class="font-medium">Total Cached:</span> ${totalCached} analyses
+            </div>
+            <div>
+                <span class="font-medium">Total Size:</span> ${(totalSize / 1024).toFixed(1)} KB
+            </div>
+        </div>
+    `;
+    
+    // Update list
+    if (cacheInfo.length === 0) {
+        listDiv.innerHTML = `
+            <div class="text-center py-8 text-gray-500">
+                <div class="text-4xl mb-2">📭</div>
+                <p>No cached analyses found</p>
+                <p class="text-sm">Run some CoT analyses to see them cached here</p>
+            </div>
+        `;
+        return;
+    }
+    
+    // Sort by timestamp (newest first) - need to get full data for sorting
+    const fullCacheInfo = cacheInfo.map(info => {
+        const cached = localStorage.getItem(info.key);
+        if (cached) {
+            const data = JSON.parse(cached);
+            return {
+                ...info,
+                timestamp: data.timestamp,
+                age: Date.now() - data.timestamp
+            };
+        }
+        return null;
+    }).filter(Boolean);
+    
+    fullCacheInfo.sort((a, b) => b.timestamp - a.timestamp);
+    
+    listDiv.innerHTML = fullCacheInfo.map(info => {
+        const ageMinutes = Math.floor(info.age / 60000);
+        const ageHours = Math.floor(ageMinutes / 60);
+        const ageDays = Math.floor(ageHours / 24);
+        
+        let ageText;
+        if (ageDays > 0) {
+            ageText = `${ageDays}d ${ageHours % 24}h ago`;
+        } else if (ageHours > 0) {
+            ageText = `${ageHours}h ${ageMinutes % 60}m ago`;
+        } else {
+            ageText = `${ageMinutes}m ago`;
+        }
+        
+        return `
+            <div class="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition-colors">
+                <div class="flex items-center justify-between">
+                    <div class="flex-1">
+                        <div class="flex items-center space-x-3">
+                            <div class="w-3 h-3 bg-green-400 rounded-full"></div>
+                            <div>
+                                <h4 class="font-medium text-gray-900">Job ${info.jobId}</h4>
+                                <p class="text-sm text-gray-500">Cached ${ageText}</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button onclick="loadCachedAnalysis('${info.jobId}')" 
+                            class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                            📖 View
+                        </button>
+                        <button onclick="deleteCachedAnalysis('${info.jobId}')" 
+                            class="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700">
+                            🗑️ Delete
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function loadCachedAnalysis(jobId) {
+    console.log(`Loading cached analysis for job: ${jobId}`);
+    
+    const cachedData = getCachedCoTData(jobId);
+    if (!cachedData) {
+        showCoTCacheFeedback('Cached data not found or expired');
+        return;
+    }
+    
+    // Close the modal
+    hideCachedResults();
+    
+    // Set the job in the dropdown
+    const jobSelect = document.getElementById('cot-job-select');
+    if (jobSelect) {
+        jobSelect.value = jobId;
+    }
+    
+    // Load and display the cached data
+    currentCoTData = cachedData;
+    showCoTResults(cachedData, true); // true indicates cached data
+    
+    showCoTCacheFeedback(`Loaded cached analysis for job ${jobId}`);
+}
+
+function deleteCachedAnalysis(jobId) {
+    if (confirm(`Are you sure you want to delete the cached analysis for job ${jobId}?`)) {
+        clearCoTCache(jobId);
+        populateCachedResultsList(); // Refresh the list
+    }
+}
+
+function clearAllCachedResults() {
+    const cacheInfo = getCacheInfo();
+    if (cacheInfo.length === 0) {
+        showCoTCacheFeedback('No cached analyses to clear');
+        return;
+    }
+    
+    if (confirm(`Are you sure you want to delete all ${cacheInfo.length} cached analyses?`)) {
+        clearCoTCache(); // Clear all
+        populateCachedResultsList(); // Refresh the list
+        hideCachedResults(); // Close modal
+    }
+}
+
+// Close modal when clicking outside
+document.addEventListener('click', function(event) {
+    const modal = document.getElementById('cached-results-modal');
+    if (modal && !modal.classList.contains('hidden')) {
+        if (event.target === modal) {
+            hideCachedResults();
+        }
+    }
+});

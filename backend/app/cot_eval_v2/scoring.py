@@ -169,11 +169,10 @@ def analyze_score_distribution(scores: list) -> Dict[str, Any]:
 
 def fuse_with_judge(rule: Dict[str, float], judge: Dict[str, Any], evidence: Dict[str, Any]) -> Dict[str, float]:
     """
-    Merge rule/DeBERTa scores with LLM judge scores.
+    Merge rule-based scores with LLM judge scores.
     
-    Maps judge scores (1–5) to [0.0–1.0], then averages with rule scores.
-    Applies evidence-based caps for coherence and factuality to ensure
-    scores don't exceed what the deterministic evidence allows.
+    When GPT judge is available, use its scores directly (converted from 1-5 to 0.0-1.0).
+    Only fall back to rule-based scores when judge is unavailable.
     
     Args:
         rule: Rule-based scores from rule_scores() (0.0-1.0)
@@ -198,29 +197,9 @@ def fuse_with_judge(rule: Dict[str, float], judge: Dict[str, Any], evidence: Dic
             # No judge score available, use rule score only
             fused[pillar] = rule_score
         else:
-            # Normalize judge score from 1-5 to 0.0-1.0
-            judge_normalized_score = max(0.0, min(1.0, (judge_score - 1) / 4.0))
-            
-            # Average rule and judge scores
-            base_score = (rule_score + judge_normalized_score) / 2.0
-            
-            # Apply evidence-based caps for coherence and factuality
-            if pillar == "coherence":
-                # Cap based on contradiction count
-                contra_count = evidence.get("coh_contra_cnt", 0)
-                cap = max(0.0, 1.0 - 0.5 * contra_count)
-                fused[pillar] = min(base_score, cap)
-                
-            elif pillar == "factuality":
-                # Cap based on entailment rate and contradiction count
-                entail_rate = evidence.get("fact_entail_rate", 1.0)
-                contra_count = evidence.get("fact_contra_cnt", 0)
-                cap = max(0.0, entail_rate - 0.4 * contra_count)
-                fused[pillar] = min(base_score, cap)
-                
-            else:
-                # No cap for faithfulness and utility
-                fused[pillar] = base_score
+            # GPT judge is available - use its score directly
+            # Convert from 1-5 scale to 0.0-1.0 scale
+            fused[pillar] = max(0.0, min(1.0, (judge_score - 1) / 4.0))
     
     # Compute overall score as average of pillar scores
     fused["overall"] = sum(fused[pillar] for pillar in ["faithfulness", "utility", "coherence", "factuality"]) / 4.0

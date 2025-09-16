@@ -173,6 +173,10 @@
                             class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700">
                             🔄 Refresh Jobs
                         </button>
+                        <button onclick="showCachedResults()" id="browse-cache-btn"
+                            class="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700">
+                            💾 Browse Cached Results
+                        </button>
                         <button onclick="clearCoTCache()" id="clear-cache-btn"
                             class="px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700">
                             🗑️ Clear Cache
@@ -238,6 +242,53 @@
                     <div id="cot-error" class="hidden bg-red-50 border border-red-200 rounded-lg p-4">
                         <h3 class="text-red-800 font-semibold">Analysis Error</h3>
                         <p id="cot-error-message" class="text-red-600 mt-1"></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cached Results Modal -->
+            <div id="cached-results-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+                <div class="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
+                    <div class="mt-3">
+                        <!-- Modal Header -->
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-medium text-gray-900">💾 Cached CoT Analysis Results</h3>
+                            <button onclick="hideCachedResults()" class="text-gray-400 hover:text-gray-600">
+                                <span class="sr-only">Close</span>
+                                <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+
+                        <!-- Modal Content -->
+                        <div class="mb-4">
+                            <p class="text-sm text-gray-600 mb-4">
+                                Select a cached analysis to view without re-running the evaluation.
+                            </p>
+                            
+                            <!-- Cache Info Summary -->
+                            <div id="cache-summary" class="bg-gray-50 rounded-lg p-3 mb-4">
+                                <!-- Will be populated by JavaScript -->
+                            </div>
+
+                            <!-- Cached Results List -->
+                            <div id="cached-results-list" class="space-y-2 max-h-96 overflow-y-auto">
+                                <!-- Will be populated by JavaScript -->
+                            </div>
+                        </div>
+
+                        <!-- Modal Footer -->
+                        <div class="flex justify-between items-center">
+                            <button onclick="clearAllCachedResults()" 
+                                class="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm">
+                                🗑️ Clear All Cached
+                            </button>
+                            <button onclick="hideCachedResults()" 
+                                class="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400">
+                                Close
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>

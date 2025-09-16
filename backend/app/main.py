@@ -15,6 +15,7 @@ from .path_manager import path_manager
 from .cot_analyzer import CoTAnalyzer
 import subprocess
 import shlex
+import requests
 
 app = FastAPI(title="Qwen Math Evaluation API", version="1.0.0")
 
@@ -529,6 +530,37 @@ def export_results_to_excel(job_id: str):
         config = path_manager.get_config()
         analyzer = CoTAnalyzer(openai_api_key=config.openai_api_key)
         
+        # Extract model name and configuration from result file path
+        model_name = "Unknown"
+        model_config = "Unknown"
+        if result_file:
+            # Extract model name from path like: .../Qwen2.5-Math-1.5B/gsm8k/test_auto-cot_-1_seed0_t0.0_s0_e-1_...
+            path_parts = Path(result_file).parts
+            for part in path_parts:
+                if any(model in part.lower() for model in ['qwen', 'gpt', 'claude', 'llama', 'mistral', 'gemini']):
+                    model_name = part
+                    break
+            
+            # Extract configuration from filename
+            filename = Path(result_file).stem
+            if 't0.0' in filename:
+                model_config = "Temperature: 0.0"
+            elif 't0.1' in filename:
+                model_config = "Temperature: 0.1"
+            elif 't0.7' in filename:
+                model_config = "Temperature: 0.7"
+            elif 't1.0' in filename:
+                model_config = "Temperature: 1.0"
+            
+            # Extract other config details
+            config_parts = []
+            if 'seed0' in filename:
+                config_parts.append("Seed: 0")
+            if 'auto-cot' in filename:
+                config_parts.append("Auto-CoT: Enabled")
+            if config_parts:
+                model_config += f", {', '.join(config_parts)}"
+
         # Build DataFrame with all available columns + CoT metrics
         df_data = []
         all_cot_metrics = []  # Store metrics for summary calculation
@@ -560,8 +592,43 @@ def export_results_to_excel(job_id: str):
                 # Reconstruct the basic CoT prompt format
                 prompt_text = f"Question: {rec.get('question', '')}\nAnswer:"
             
+            # Generate GPT prompt for this sample (if we have the CoT analysis)
+            gpt_prompt = ""
+            try:
+                # Try to get CoT analysis for this sample to extract the GPT prompt
+                cot_response = requests.get(f'http://localhost:8001/jobs/{job_id}/cot-analysis')
+                if cot_response.status_code == 200:
+                    cot_data = cot_response.json()
+                    sample_idx = rec.get('idx', 0)
+                    if sample_idx < len(cot_data.get('per_sample', [])):
+                        sample_data = cot_data['per_sample'][sample_idx]
+                        # Extract the GPT prompt from the judge_raw or build it
+                        if 'judge_raw' in sample_data:
+                            # If we have judge data, we can reconstruct the prompt
+                            problem = sample_data.get('problem', '')
+                            model_output = sample_data.get('model_output', '')
+                            gold = sample_data.get('gold', '')
+                            flags = sample_data.get('flags', [])
+                            evidence = sample_data.get('evidence', {})
+                            
+                            # Build a simplified version of the GPT prompt
+                            gpt_prompt = f"""Problem: {problem}
+
+Model Reasoning: {model_output}
+
+Gold Answer: {gold}
+
+Flags: {flags}
+
+Evidence: {evidence}"""
+            except:
+                gpt_prompt = "GPT prompt not available"
+
             row_data = {
                 'Index': rec.get('idx', ''),
+                'Model_Name': model_name,
+                'Model_Configuration': model_config,
+                'GPT_Prompt': gpt_prompt,
                 'Prompt': prompt_text,
                 'Model Code Output': '\n'.join(str(item) for item in code_list if item is not None),
                 'Prediction': '\n'.join(str(item) for item in pred_list if item is not None),
@@ -636,7 +703,27 @@ def export_results_to_excel(job_id: str):
             # Sheet 1: Detailed results with per-row CoT metrics
             df.to_excel(writer, index=False, sheet_name='Detailed Results')
             
-            # Sheet 2: CoT Analysis Summary
+            # Sheet 2: Model Information
+            model_info_data = [
+                ['Model Information', ''],
+                ['', ''],
+                ['Model Name', model_name],
+                ['Model Configuration', model_config],
+                ['Total Samples', len(data)],
+                ['Result File', result_file],
+                ['Export Date', pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')],
+                ['', ''],
+                ['Evaluation Settings', ''],
+                ['CoT Analysis', 'Enabled'],
+                ['GPT Judge Mode', 'ALWAYS'],
+                ['Flag Detection', 'Automated'],
+                ['Scoring Method', 'Hybrid (Rule-based + LLM)']
+            ]
+            
+            model_info_df = pd.DataFrame(model_info_data, columns=['Setting', 'Value'])
+            model_info_df.to_excel(writer, index=False, sheet_name='Model Info')
+            
+            # Sheet 3: CoT Analysis Summary
             if all_cot_metrics:
                 summary_data = [
                     ['CoT Quality Score (CQS) Analysis', ''],
@@ -809,49 +896,224 @@ async def get_cot_analysis(job_id: str):
         if not data_list:
             raise HTTPException(status_code=404, detail="No data found for analysis")
         
-        # Initialize new pillars runner
-        from .cot_eval_v2.pillars_runner import PillarsRunner, llm_fn_from_settings_or_env
+        # Initialize new Pillars v2 evaluator
+        from .cot_eval_v2.evaluator import PillarsEvaluator
+        from .cot_eval_v2.judge import Judge
         
         # Get configuration
         config = path_manager.get_config()
         
-        # Create LLM function if OpenAI key available
-        llm_fn = llm_fn_from_settings_or_env()
+        # Create judge if OpenAI key available
+        judge = None
+        if config.openai_api_key:
+            # Set the API key as environment variable for OpenAI client
+            import os
+            os.environ['OPENAI_API_KEY'] = config.openai_api_key
+            judge = Judge(mode="ALWAYS")
         
-        # Initialize pillars runner with configuration
-        from .cot_eval_v2.config import config as pillars_config
+        # Initialize evaluator
+        evaluator = PillarsEvaluator(judge=judge, use_nli=False)
         
-        pillars_runner = PillarsRunner(
-            evaluator=None,  # Auto-create with NLI enabled
-            rubric_path=None,  # TODO: Add rubric path if needed
-            llm_fn=llm_fn,
-            gating=pillars_config.JUDGE_GATING,
-            budget=pillars_config.JUDGE_BUDGET,
-            diagnostic=pillars_config.JUDGE_DIAGNOSTIC
-        )
+        # Process each sample
+        results = []
+        total_samples = len(data_list)
         
-        # Convert data format for pillars runner
-        samples = []
-        for sample in data_list:
-            # Extract model reasoning and answer
-            model_reasoning = sample.get('code', [''])
-            model_reasoning_text = model_reasoning[0] if model_reasoning else ""
-            predicted_answer = sample.get('pred', [''])
-            predicted_answer_text = predicted_answer[0] if predicted_answer else ""
+        print(f"🔍 Starting CoT analysis for {total_samples} samples...")
+        
+        for i, sample in enumerate(data_list):
+            try:
+                print(f"📊 Analyzing sample {i+1}/{total_samples}...")
+                
+                # Extract model reasoning and answer
+                model_reasoning = sample.get('code', [''])
+                model_reasoning_text = model_reasoning[0] if model_reasoning else ""
+                predicted_answer = sample.get('pred', [''])
+                predicted_answer_text = predicted_answer[0] if predicted_answer else ""
+                
+                # Construct full CoT text
+                full_cot_text = f"{model_reasoning_text}\n#### {predicted_answer_text}"
+                
+                # Get existing correctness from job data
+                existing_scores = sample.get('score', [])
+                is_correct = existing_scores[0] if existing_scores else False
+                
+                print(f"   Question: {sample.get('question', '')[:100]}{'...' if len(sample.get('question', '')) > 100 else ''}")
+                print(f"   Ground Truth: {sample.get('gt', '')}")
+                print(f"   Predicted: {predicted_answer_text}")
+                print(f"   Correct: {is_correct}")
+                
+                # Run analysis
+                print(f"   🔍 Running Pillars v2 evaluation...")
+                flags, evidence, rule_scores, judge_scores, fused_scores = evaluator.analyze(
+                    problem=sample.get('question', ''),
+                    cot_text=full_cot_text,
+                    gold=sample.get('gt', '')
+                )
+                
+                # Override the final_correct with the existing job data
+                evidence['final_correct'] = is_correct
+                
+                # Recalculate rule scores with the correct final_correct value
+                from .cot_eval_v2.scoring import rule_scores
+                rule_scores = rule_scores(evidence)
+                
+                # Recalculate fused scores
+                from .cot_eval_v2.scoring import fuse_with_judge
+                fused_scores = fuse_with_judge(rule_scores, judge_scores, evidence)
+                
+                # Convert flags to summary format
+                flags_summary = flags.summarize_for_prompt()
+                
+                # Convert flags to dictionary format for API response
+                flags_dict = {}
+                for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
+                    pillar_flags = flags.get_flags_by_pillar(pillar)
+                    flags_dict[pillar] = [flag.to_dict() for flag in pillar_flags]
+                
+                # Log analysis results
+                print(f"   ✅ Analysis complete!")
+                print(f"   📊 Rule scores: {rule_scores}")
+                print(f"   🤖 Judge scores: {judge_scores}")
+                print(f"   🔗 Fused scores: {fused_scores}")
+                total_flags = sum(len(flags_dict[pillar]) for pillar in flags_dict)
+                print(f"   🚩 Flags found: {total_flags}")
+                if total_flags > 0:
+                    for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
+                        pillar_flags = flags_dict[pillar]
+                        if pillar_flags:
+                            print(f"      - {pillar}: {len(pillar_flags)} flags")
+                            for flag in pillar_flags[:2]:  # Show first 2 flags per pillar
+                                print(f"        * {flag['issue']} (step: {flag['step']})")
+                print()
+                
+                # Build result for this sample
+                sample_result = {
+                    "sample_id": i,
+                    "problem": sample.get('question', ''),
+                    "cot_text": full_cot_text,
+                    "gold_answer": sample.get('gt', ''),
+                    "flags": flags_dict,
+                    "evidence": evidence,
+                    "rule_scores": rule_scores,
+                    "judge_scores": judge_scores,
+                    "fused_scores": fused_scores,
+                    "final_answer": predicted_answer_text
+                }
+                
+                results.append(sample_result)
+                
+            except Exception as e:
+                print(f"Error processing sample {i}: {e}")
+                # Add error result
+                results.append({
+                    "sample_id": i,
+                    "problem": sample.get('question', ''),
+                    "cot_text": "",
+                    "gold_answer": sample.get('gt', ''),
+                    "error": str(e),
+                    "flags": {},
+                    "evidence": {},
+                    "rule_scores": {},
+                    "judge_scores": {},
+                    "fused_scores": {},
+                    "final_answer": ""
+                })
+        
+        # Calculate summary statistics
+        valid_results = [r for r in results if "error" not in r]
+        if valid_results:
+            # Calculate average scores
+            avg_scores = {}
+            for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
+                scores = [r["fused_scores"].get(pillar, 0) for r in valid_results]
+                avg_scores[pillar] = sum(scores) / len(scores) if scores else 0
             
-            # Construct full CoT text
-            full_cot_text = f"{model_reasoning_text}\n#### {predicted_answer_text}"
+            avg_scores["overall"] = sum(avg_scores.values()) / len(avg_scores)
             
-            samples.append({
-                "problem": sample.get('question', ''),
-                "cot_text": full_cot_text,
-                "gold": sample.get('gt', '')
-            })
+            # Count flags
+            flag_counts = {}
+            for result in valid_results:
+                for flag_type, flags in result["flags"].items():
+                    if flag_type not in flag_counts:
+                        flag_counts[flag_type] = 0
+                    flag_counts[flag_type] += len(flags)
+        else:
+            avg_scores = {"faithfulness": 0, "utility": 0, "coherence": 0, "factuality": 0, "overall": 0}
+            flag_counts = {}
         
-        # Run analysis with new pipeline
-        result = pillars_runner.run_batch(samples, job_id)
+        # Convert results to proper schema format
+        per_sample = []
+        for result in results:
+            if "error" not in result:
+                # Convert flags to PillarsFlag format
+                flags_list = []
+                for pillar, flags in result["flags"].items():
+                    for flag in flags:
+                        flags_list.append({
+                            "pillar": pillar,
+                            "step": flag.get("step", "unknown"),
+                            "issue": flag.get("issue", "unknown"),
+                            "details": flag.get("details", {})
+                        })
+                
+                # Create PillarsScores
+                scores = {
+                    "faithfulness": result["fused_scores"].get("faithfulness", 0.0),
+                    "utility": result["fused_scores"].get("utility", 0.0),
+                    "coherence": result["fused_scores"].get("coherence", 0.0),
+                    "factuality": result["fused_scores"].get("factuality", 0.0),
+                    "overall": result["fused_scores"].get("overall", 0.0)
+                }
+                
+                per_sample.append({
+                    "scores": scores,
+                    "flags": flags_list,
+                    "evidence": result["evidence"],
+                    "rules_raw": result["rule_scores"],
+                    "judge_raw": result["judge_scores"],
+                    "config_snapshot": {"judge_available": judge is not None},
+                    "problem": result["problem"],
+                    "model_output": result["cot_text"],
+                    "gold": result["gold_answer"]
+                })
         
-        return result
+        # Create summary
+        summary = {
+            "avg_faithfulness": avg_scores.get("faithfulness", 0.0),
+            "avg_utility": avg_scores.get("utility", 0.0),
+            "avg_coherence": avg_scores.get("coherence", 0.0),
+            "avg_factuality": avg_scores.get("factuality", 0.0),
+            "avg_overall": avg_scores.get("overall", 0.0),
+            "total_flags": sum(flag_counts.values()),
+            "flags_by_pillar": flag_counts,
+            "judge_call_rate": 1.0 if judge is not None else 0.0,
+            "judge_budget_used": 0,
+            "judge_budget_total": 0,
+            "total_samples": total_samples,
+            "analysis_time": time.time() - start_time,
+            "avg_time_per_sample": (time.time() - start_time) / total_samples if total_samples > 0 else 0.0
+        }
+        
+        # Build final response
+        analysis_result = {
+            "job_id": job_id,
+            "per_sample": per_sample,
+            "summary": summary,
+            "analysis_method": "pillars_v2",
+            "config": {"judge_available": judge is not None},
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # Print final summary
+        print(f"🎉 CoT analysis complete! Processed {len(results)} samples")
+        successful_samples = len([r for r in results if 'error' not in r])
+        print(f"✅ Successfully analyzed: {successful_samples}/{len(results)} samples")
+        if valid_results:
+            print(f"📊 Average scores: {avg_scores}")
+            print(f"🚩 Total flags found: {sum(flag_counts.values())}")
+        print()
+        
+        return analysis_result
         
     except HTTPException:
         raise

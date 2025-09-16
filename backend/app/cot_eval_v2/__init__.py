@@ -6,7 +6,8 @@ without requiring LLM calls. It focuses on arithmetic, coherence, coverage,
 redundancy, and faithfulness heuristics.
 """
 
-from .flags import Flag, FlagCollector
+from .flags import FlagCollector
+from .flag import Flag
 from .evaluator import PillarsEvaluator
 from .scoring import rule_scores, fuse_with_judge, compare_score_methods
 from .judge import Judge, MockJudge
