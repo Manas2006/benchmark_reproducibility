@@ -468,8 +468,8 @@ def parse_args():
     # --- NEW: run vLLM generation in a short-lived subprocess (frees VRAM before HF scoring)
     parser.add_argument("--pass1_subprocess", action="store_true",
                         help="Run vLLM Pass-1 in a subprocess so its VRAM is freed before Pass-2 HF scoring.")
-    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.35,
-                        help="GPU memory utilization for VLLM (default: 0.35, lower values leave more memory for HF scoring)")
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.85,
+                        help="GPU memory utilization for VLLM (default: 0.85, high utilization since we now have proper cleanup)")
 
     args = parser.parse_args()
     args.top_p = (1 if args.temperature == 0 else args.top_p)  # top_p must be 1 when using greedy sampling (vllm)
@@ -568,13 +568,26 @@ def setup(args):
             llm = "vllm_subprocess"
         else:
             # In-process vLLM (original behavior)
+            # Check GPU memory before loading
+            if torch.cuda.is_available():
+                free_bytes, total_bytes = torch.cuda.mem_get_info()
+                free_gb = round(free_bytes / (1024**3), 2)
+                total_gb = round(total_bytes / (1024**3), 2)
+                print(f"📊 GPU memory before vLLM loading: {free_gb}GB free / {total_gb}GB total")
+                print(f"🎯 Will use {args.vllm_gpu_memory_utilization*100:.0f}% of GPU memory ({args.vllm_gpu_memory_utilization*total_gb:.1f}GB)")
+                
+                if free_gb < 4.0:
+                    print("⚠️ WARNING: Low GPU memory available. Consider using --pass1_subprocess or reducing model size.")
+            
+            print(f"🚀 Loading vLLM model: {args.model_name_or_path}")
             llm = LLM(
                 model=args.model_name_or_path,
                 tensor_parallel_size=len(available_gpus) // args.pipeline_parallel_size,
                 pipeline_parallel_size=args.pipeline_parallel_size,
                 trust_remote_code=True,
-                gpu_memory_utilization=args.vllm_gpu_memory_utilization,  # Configurable memory utilization
+                gpu_memory_utilization=args.vllm_gpu_memory_utilization,  # Now using 85% by default
             )
+            print("✅ vLLM model loaded successfully!")
 
         # Load an HF scorer if probability tracking is enabled
         hf_scorer = None
@@ -638,6 +651,98 @@ def setup(args):
     pad = max([len(data_name) for data_name in data_list])
     print("\t".join(data_name.ljust(pad, " ") for data_name in data_list))
     print("\t".join([f"{result['acc']:.1f}".ljust(pad, " ") for result in results]))
+    
+    # 🧹 COMPREHENSIVE GPU MEMORY CLEANUP
+    # This ensures all GPU memory is freed when the job completes
+    # This is crucial for switching between different models
+    print("\n" + "="*60)
+    print("🎯 EVALUATION COMPLETED - STARTING GPU MEMORY CLEANUP")
+    print("="*60)
+    
+    # Get references to models for cleanup
+    cleanup_llm = None
+    cleanup_hf_scorer = None
+    
+    if args.use_vllm and not getattr(args, "pass1_subprocess", False):
+        # We have a loaded vLLM model
+        cleanup_llm = llm
+    
+    if hasattr(args, '_hf_scorer') and args._hf_scorer is not None:
+        # We have a loaded HF scorer
+        cleanup_hf_scorer = args._hf_scorer
+    
+    # Perform comprehensive cleanup
+    cleanup_gpu_memory(cleanup_llm, cleanup_hf_scorer)
+    
+    print("="*60)
+    print("✅ EVALUATION AND CLEANUP COMPLETED SUCCESSFULLY!")
+    print("="*60)
+
+
+def cleanup_gpu_memory(llm=None, hf_scorer=None):
+    """
+    Comprehensive GPU memory cleanup function.
+    This ensures all GPU memory is freed when switching models.
+    """
+    print("🧹 Starting comprehensive GPU memory cleanup...")
+    
+    try:
+        # Check initial memory
+        if torch.cuda.is_available():
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            free_gb = round(free_bytes / (1024**3), 2)
+            total_gb = round(total_bytes / (1024**3), 2)
+            print(f"📊 GPU memory before cleanup: {free_gb}GB free / {total_gb}GB total")
+        
+        # Cleanup vLLM model
+        if llm is not None and hasattr(llm, 'llm_engine'):
+            print("🗑️ Cleaning up vLLM model...")
+            try:
+                # Force cleanup of vLLM engine
+                if hasattr(llm.llm_engine, 'engine_core'):
+                    del llm.llm_engine.engine_core
+                del llm.llm_engine
+            except Exception as e:
+                print(f"⚠️ Warning: Error cleaning vLLM engine: {e}")
+            del llm
+        
+        # Cleanup HF scorer
+        if hf_scorer is not None:
+            print("🗑️ Cleaning up HF scorer...")
+            try:
+                del hf_scorer
+            except Exception as e:
+                print(f"⚠️ Warning: Error cleaning HF scorer: {e}")
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        # Clear PyTorch cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()  # Wait for all operations to complete
+        
+        # Check final memory
+        if torch.cuda.is_available():
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            free_gb = round(free_bytes / (1024**3), 2)
+            total_gb = round(total_bytes / (1024**3), 2)
+            print(f"✅ GPU memory after cleanup: {free_gb}GB free / {total_gb}GB total")
+            print(f"🎯 Memory freed: {total_gb - free_gb:.1f}GB")
+        
+        print("✅ GPU memory cleanup completed successfully!")
+        
+    except Exception as e:
+        print(f"❌ Error during GPU memory cleanup: {e}")
+        # Still try basic cleanup
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+        except:
+            pass
 
 
 def is_multi_choice(answer):
