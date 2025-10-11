@@ -11,11 +11,30 @@ import pandas as pd
 
 from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse, CoTAnalysisResponseV2, OpenAITestRequest, OpenAITestResponse
 from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data
+from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse, TruncationAnalysisRequest, TruncationAnalysisResponse
+from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data, save_job_db
 from .path_manager import path_manager
 from .cot_analyzer import CoTAnalyzer
 import subprocess
 import shlex
 import requests
+
+def _build_truncation_response(job_id: str, request: TruncationAnalysisRequest, output_dir: Path, computation_time: float) -> TruncationAnalysisResponse:
+    """Helper function to build truncation analysis response"""
+    model_stub = os.path.basename(request.model_name_or_path.rstrip('/'))
+    raw_curves_path = output_dir / f"{request.dataset_name}_truncation_curves_{model_stub}.json"
+    correct_plot_path = output_dir / f"{request.dataset_name}_correct_{model_stub}.png"
+    incorrect_plot_path = output_dir / f"{request.dataset_name}_incorrect_{model_stub}.png"
+    
+    return TruncationAnalysisResponse(
+        job_id=job_id,
+        status="completed",
+        message="Truncation analysis completed successfully",
+        raw_curves_path=str(raw_curves_path) if raw_curves_path.exists() else None,
+        correct_plot_path=str(correct_plot_path) if correct_plot_path.exists() else None,
+        incorrect_plot_path=str(incorrect_plot_path) if incorrect_plot_path.exists() else None,
+        computation_time=computation_time
+    )
 
 app = FastAPI(title="Qwen Math Evaluation API", version="1.0.0")
 
@@ -143,9 +162,11 @@ async def get_prob_file(jid: str):
     return FileResponse(path=str(file_path), filename=file_path.name, media_type='application/json')
 
 @app.get("/jobs/{jid}/prob-plot")
-async def generate_prob_plot(jid: str, plot_type: str, sample_id: int | None = None):
-    if plot_type not in ("aggregate", "single"):
-        raise HTTPException(status_code=400, detail="plot_type must be 'aggregate' or 'single'")
+async def generate_prob_plot(jid: str, plot_type: str, sample_id: int | None = None, math_level: str | None = None):
+    valid_plot_types = ("aggregate", "single", "path_aggregate", "path_single", "correct_aggregate", "incorrect_aggregate", 
+                       "level_single", "level_aggregate", "starting_tokens_by_level", "ending_tokens_by_level", "correct_vs_incorrect")
+    if plot_type not in valid_plot_types:
+        raise HTTPException(status_code=400, detail=f"plot_type must be one of: {', '.join(valid_plot_types)}")
     if jid not in job_db:
         raise HTTPException(status_code=404, detail="Job not found")
     job_info = job_db[jid]
@@ -176,7 +197,30 @@ async def generate_prob_plot(jid: str, plot_type: str, sample_id: int | None = N
     # Expected output path
     if plot_type == "aggregate":
         expected_png = output_dir / f"{dataset_name}_aggregate_{method_name}.png"
-    else:
+    elif plot_type == "correct_aggregate":
+        expected_png = output_dir / f"{dataset_name}_correct_aggregate_{method_name}.png"
+    elif plot_type == "incorrect_aggregate":
+        expected_png = output_dir / f"{dataset_name}_incorrect_aggregate_{method_name}.png"
+    elif plot_type == "correct_vs_incorrect":
+        expected_png = output_dir / f"{dataset_name}_correct_vs_incorrect_{method_name}.png"
+    elif plot_type == "path_aggregate":
+        expected_png = output_dir / f"{dataset_name}_path_aggregate_{method_name}.png"
+    elif plot_type == "path_single":
+        if sample_id is None:
+            raise HTTPException(status_code=400, detail="sample_id is required for path_single plot")
+        expected_png = output_dir / f"{dataset_name}_path_single_{method_name}_id_{sample_id}.png"
+    elif plot_type == "level_single":
+        if math_level is None:
+            raise HTTPException(status_code=400, detail="math_level is required for level_single plot")
+        expected_png = output_dir / f"{dataset_name}_level_{math_level}_{method_name}.png"
+    elif plot_type == "level_aggregate":
+        # For level_aggregate, we'll return multiple images as a zip file
+        expected_png = output_dir / f"{dataset_name}_level_aggregate_{method_name}.zip"
+    elif plot_type == "starting_tokens_by_level":
+        expected_png = output_dir / f"{dataset_name}_starting_tokens_by_level_{method_name}.png"
+    elif plot_type == "ending_tokens_by_level":
+        expected_png = output_dir / f"{dataset_name}_ending_tokens_by_level_{method_name}.png"
+    else:  # single
         if sample_id is None:
             raise HTTPException(status_code=400, detail="sample_id is required for single plot")
         expected_png = output_dir / f"{dataset_name}_single_{method_name}_id_{sample_id}.png"
@@ -190,8 +234,10 @@ async def generate_prob_plot(jid: str, plot_type: str, sample_id: int | None = N
         "--output_dir", str(output_dir),
         "--plot_type", plot_type,
     ]
-    if plot_type == "single":
+    if plot_type in ("single", "path_single"):
         cmd.extend(["--sample_id", str(sample_id)])
+    elif plot_type == "level_single":
+        cmd.extend(["--math_level", str(math_level)])
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=eval_dir)
@@ -201,13 +247,25 @@ async def generate_prob_plot(jid: str, plot_type: str, sample_id: int | None = N
         raise HTTPException(status_code=500, detail=f"Error running plot script: {str(e)}")
 
     if not expected_png.exists():
-        # Fallback: try to find any recent PNG in output_dir
-        pngs = sorted(output_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not pngs:
-            raise HTTPException(status_code=500, detail="Plot image not generated")
-        expected_png = pngs[0]
+        # Fallback: try to find any recent file in output_dir
+        if plot_type == "level_aggregate":
+            # Look for zip files for level_aggregate
+            files = sorted(output_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not files:
+                raise HTTPException(status_code=500, detail="Level aggregate plot archive not generated")
+            expected_png = files[0]
+        else:
+            # Look for PNG files for other plot types
+            files = sorted(output_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not files:
+                raise HTTPException(status_code=500, detail="Plot image not generated")
+            expected_png = files[0]
 
-    return FileResponse(path=str(expected_png), filename=expected_png.name, media_type='image/png')
+    # Return appropriate media type based on file extension
+    if expected_png.suffix.lower() == '.zip':
+        return FileResponse(path=str(expected_png), filename=expected_png.name, media_type='application/zip')
+    else:
+        return FileResponse(path=str(expected_png), filename=expected_png.name, media_type='image/png')
 
 @app.websocket("/stream/{jid}")
 async def stream(jid: str, ws: WebSocket):
@@ -231,6 +289,7 @@ async def stream(jid: str, ws: WebSocket):
     # For SLURM jobs, if the files do not exist, try to parse the SBATCH script for the real paths
     if info.get("backend") == "slurm":
         sbatch_path = info.get("sbatch_path")
+        slurm_jid = info.get("slurm_jid")
         if sbatch_path and (not out_path or not err_path):
             try:
                 with open(sbatch_path, "r") as f:
@@ -240,6 +299,12 @@ async def stream(jid: str, ws: WebSocket):
                         out_path = line.split(None, 2)[-1].strip()
                     if line.startswith("#SBATCH -e"):
                         err_path = line.split(None, 2)[-1].strip()
+                
+                # Replace %j placeholder with actual SLURM job ID
+                if slurm_jid and out_path and "%j" in out_path:
+                    out_path = out_path.replace("%j", str(slurm_jid))
+                if slurm_jid and err_path and "%j" in err_path:
+                    err_path = err_path.replace("%j", str(slurm_jid))
             except Exception:
                 pass
     # Wait for the files to appear (up to 60 seconds)
@@ -1189,3 +1254,277 @@ async def test_openai_key(request: OpenAITestRequest):
             valid=False,
             error=f"Error testing API key: {str(e)}"
         ) 
+@app.post("/jobs/{job_id}/truncation-analysis", response_model=TruncationAnalysisResponse)
+async def run_truncation_analysis(job_id: str, request: TruncationAnalysisRequest):
+    """Run CoT truncation analysis for a completed job"""
+    start_time = time.time()
+    
+    try:
+        if job_id not in job_db:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        job_info = job_db[job_id]
+        result_file = job_info.get("result_file")
+        
+        if not result_file:
+            raise HTTPException(status_code=404, detail="No result file found for this job")
+        
+        result_path = Path(result_file)
+        if not result_path.exists():
+            raise HTTPException(status_code=404, detail="Result file not found on disk")
+        
+        # Security check
+        config = path_manager.get_config()
+        allowed_dirs = [Path(config.output_dir), Path(config.logs_dir), Path(config.evaluation_dir)]
+        
+        is_allowed = False
+        for allowed_dir in allowed_dirs:
+            try:
+                result_path.relative_to(allowed_dir)
+                is_allowed = True
+                break
+            except ValueError:
+                continue
+        
+        if not is_allowed:
+            raise HTTPException(status_code=403, detail="Access denied to this file path")
+        
+        # Load the JSONL results
+        samples = []
+        with open(result_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        samples.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        
+        if not samples:
+            raise HTTPException(status_code=400, detail="No valid samples found in result file")
+        
+        # Build truncation analysis command
+        python_bin = config.python_path
+        eval_dir = Path(config.evaluation_dir)
+        truncation_script = eval_dir / "run_truncation_analysis_with_logs.py"
+        
+        if not truncation_script.exists():
+            raise HTTPException(status_code=500, detail=f"Truncation analysis script not found: {truncation_script}")
+        
+        # Create output directory for this analysis
+        output_dir = result_path.parent / "truncation_analysis"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create temporary input file for the analysis
+        temp_input_file = output_dir / f"temp_input_{job_id}.jsonl"
+        with open(temp_input_file, 'w') as f:
+            for sample in samples:
+                f.write(json.dumps(sample) + '\n')
+        
+        # Handle different backends
+        if request.backend == "local":
+            # Run locally
+            cmd = [
+                python_bin,
+                str(truncation_script),
+                "--input_file", str(temp_input_file),
+                "--model_name_or_path", request.model_name_or_path,
+                "--dataset_name", request.dataset_name,
+                "--output_dir", str(output_dir),
+                "--temperature", str(request.temperature),
+                "--top_p", str(request.top_p),
+            ]
+            
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, cwd=eval_dir, timeout=3600)  # 1 hour timeout
+                if result.returncode != 0:
+                    raise HTTPException(status_code=500, detail=f"Truncation analysis failed: {result.stderr}")
+                
+                computation_time = time.time() - start_time
+                return _build_truncation_response(job_id, request, output_dir, computation_time)
+                
+            except subprocess.TimeoutExpired:
+                raise HTTPException(status_code=500, detail="Truncation analysis timed out after 1 hour")
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error running truncation analysis: {str(e)}")
+        
+        elif request.backend == "slurm":
+            # Submit to SLURM
+            truncation_job_id = f"trunc_{job_id}_{int(time.time())}"
+            
+            # Create SLURM script
+            scripts_dir = Path(config.scripts_dir)
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+            
+            script_path = scripts_dir / f"run_truncation_{truncation_job_id}.sh"
+            sbatch_path = scripts_dir / f"job_truncation_{truncation_job_id}.sbatch"
+            
+            # Build the command for the script
+            cmd = [
+                python_bin,
+                str(truncation_script),
+                "--input_file", str(temp_input_file),
+                "--model_name_or_path", request.model_name_or_path,
+                "--dataset_name", request.dataset_name,
+                "--output_dir", str(output_dir),
+                "--temperature", str(request.temperature),
+                "--top_p", str(request.top_p),
+                "--job_id", truncation_job_id,  # Add job ID for unique filenames
+            ]
+            
+            # Create the shell script
+            escaped_cli = []
+            for arg in cmd:
+                escaped_cli.append(shlex.quote(str(arg)))
+            
+            script_content = f"""#!/bin/bash
+cd {eval_dir}
+
+# Set Hugging Face cache to work directory
+
+# Fix MKL threading conflict
+export MKL_THREADING_LAYER=GNU
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+# Activate conda environment
+source {config.conda_env_path}/etc/profile.d/conda.sh
+conda activate mathevalUI
+
+# Run the truncation analysis
+{' '.join(escaped_cli)}
+"""
+            
+            script_path.write_text(script_content)
+            script_path.chmod(0o755)
+            
+            # Create SLURM sbatch script with GPU allocation
+            out_file_pattern = os.path.join(config.logs_dir, f"truncation-{truncation_job_id}-%j.out")
+            err_file_pattern = os.path.join(config.logs_dir, f"truncation-{truncation_job_id}-%j.err")
+            
+            sbatch_content = f"""#!/bin/bash
+#SBATCH -J truncation-{truncation_job_id}   # Job name
+#SBATCH -o {out_file_pattern}      # Name of stdout output file (uses %j)
+#SBATCH -e {err_file_pattern}      # Name of stderr error file (uses %j)
+#SBATCH -p {config.slurm_partition}              # Queue (partition) name
+#SBATCH -N 1                    # Total # of nodes
+#SBATCH -n 1                    # Total # of tasks (single process for all GPUs)
+#SBATCH -t {config.slurm_wall_time}              # Run time (hh:mm:ss)
+#SBATCH --mail-type=all         # Send email at begin and end of job
+#SBATCH -A {config.slurm_account}             # Project/Allocation name
+
+# Fix MKL threading conflict
+export MKL_THREADING_LAYER=GNU
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
+
+{script_path}
+"""
+            
+            sbatch_path.write_text(sbatch_content)
+            
+            try:
+                result = subprocess.run(
+                    ["sbatch", str(sbatch_path)],
+                    capture_output=True,
+                    text=True,
+                    cwd=scripts_dir
+                )
+                
+                if result.returncode == 0:
+                    slurm_jid = result.stdout.strip().split()[-1]
+                    
+                    # Create actual file paths by replacing %j with SLURM job ID
+                    actual_out_file = out_file_pattern.replace("%j", str(slurm_jid))
+                    actual_err_file = err_file_pattern.replace("%j", str(slurm_jid))
+                    
+                    # Store the truncation job info
+                    truncation_job_id_full = f"truncation_{job_id}_{slurm_jid}"
+                    job_db[truncation_job_id_full] = {
+                        "status": "queued",
+                        "request": request.dict(),
+                        "parent_job_id": job_id,
+                        "run_path": str(script_path),
+                        "sbatch_path": str(sbatch_path),
+                        "backend": "slurm",
+                        "slurm_jid": slurm_jid,
+                        "out_file": actual_out_file,
+                        "err_file": actual_err_file,
+                        "output_dir": str(output_dir),
+                        "temp_input_file": str(temp_input_file),
+                        "dataset_name": request.dataset_name,
+                        "model_name_or_path": request.model_name_or_path,
+                        "temperature": request.temperature,
+                        "top_p": request.top_p,
+                        "start_time": start_time
+                    }
+                    save_job_db()
+                    
+                    return TruncationAnalysisResponse(
+                        job_id=job_id,
+                        status="queued",
+                        message=f"Truncation analysis queued on SLURM with job ID {slurm_jid}",
+                        raw_curves_path=None,
+                        correct_plot_path=None,
+                        incorrect_plot_path=None,
+                        computation_time=None
+                    )
+                else:
+                    raise HTTPException(status_code=500, detail=f"Failed to submit SLURM job: {result.stderr}")
+                    
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error submitting to SLURM: {str(e)}")
+        
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported backend: {request.backend}")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error performing truncation analysis: {str(e)}")
+
+@app.get("/jobs/{job_id}/truncation-analysis/plot")
+async def get_truncation_plot(job_id: str, plot_type: str = "correct"):
+    """Get truncation analysis plot files"""
+    if plot_type not in ["correct", "incorrect"]:
+        raise HTTPException(status_code=400, detail="plot_type must be 'correct' or 'incorrect'")
+    
+    if job_id not in job_db:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_info = job_db[job_id]
+    result_file = job_info.get("result_file")
+    
+    if not result_file:
+        raise HTTPException(status_code=404, detail="No result file found for this job")
+    
+    result_path = Path(result_file)
+    output_dir = result_path.parent / "truncation_analysis"
+    
+    # Look for plot files
+    plot_files = list(output_dir.glob(f"*_{plot_type}_*.png"))
+    if not plot_files:
+        raise HTTPException(status_code=404, detail=f"No {plot_type} plot found for this job")
+    
+    # Return the most recent plot file
+    latest_plot = max(plot_files, key=lambda p: p.stat().st_mtime)
+    
+    # Security check
+    config = path_manager.get_config()
+    allowed_dirs = [Path(config.output_dir), Path(config.logs_dir), Path(config.evaluation_dir)]
+    
+    is_allowed = False
+    for allowed_dir in allowed_dirs:
+        try:
+            latest_plot.relative_to(allowed_dir)
+            is_allowed = True
+            break
+        except ValueError:
+            continue
+    
+    if not is_allowed:
+        raise HTTPException(status_code=403, detail="Access denied to this file path")
+    
+    return FileResponse(path=str(latest_plot), filename=latest_plot.name, media_type='image/png') 

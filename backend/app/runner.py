@@ -237,6 +237,12 @@ class MathEvalRunner:
             if "--use_vllm" not in cli:
                 cli.append("--use_vllm")
             cli.append("--enable_prob_tracking")
+            
+            # Add path vectors flags if enabled
+            if getattr(req, 'enable_path_vectors', False):
+                cli.append("--enable_path_vectors")
+                max_path_steps = getattr(req, 'max_path_steps', 50)
+                cli.extend(["--max_path_steps", str(max_path_steps)])
         
         # Add eval_method parameter
         cli.extend(["--eval_method", req.eval_method])
@@ -272,7 +278,9 @@ class MathEvalRunner:
         # Pre-compute probability JSONL path that math_eval will generate when enabled
         prob_file = None
         if getattr(req, 'enable_prob_tracking', False) or (getattr(req, 'use_together_api', False) and getattr(req, 'together_logprobs', 0) and req.together_logprobs > 0):
-            prob_suffix = f"_{prompt_type_for_file}_prob.jsonl"
+            # Use req.prompt_type directly to match math_eval.py logic (line 629)
+            # math_eval.py uses args.prompt_type, not the computed prompt_type_for_file
+            prob_suffix = f"_{req.prompt_type}_prob.jsonl"
             if job_id:
                 base = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}_{job_id}"
             else:
@@ -360,6 +368,8 @@ class MathEvalRunner:
                 escaped_cli.append('--prompt')
                 escaped_cli.append(shlex.quote(req.prompt))
             
+            # Define newline for f-string usage
+            newline = '\n'
             script_content = f"""#!/bin/bash
 cd {self.evaluation_dir}
 
@@ -373,7 +383,7 @@ export MKL_NUM_THREADS=1
 # Activate conda environment
 source {path_config.conda_env_path}/etc/profile.d/conda.sh
 conda activate mathevalUI
-{('export TOGETHER_API_KEY=' + shlex.quote(req.together_api_key) + '\n') if getattr(req, 'use_together_api', False) and getattr(req, 'together_api_key', None) else ''}
+{('export TOGETHER_API_KEY=' + shlex.quote(req.together_api_key) + newline) if getattr(req, 'use_together_api', False) and getattr(req, 'together_api_key', None) else ''}
 {' '.join(escaped_cli)}
 """
             try:
@@ -513,6 +523,90 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
         except Exception:
             return False
     
+    def _run_post_processing(self, jid: str, result_file: str, model_name: str) -> bool:
+        """Run post-processing script on completed probability tracking job"""
+        try:
+            # Build post-processing command
+            config = path_manager.get_config()
+            python_bin = config.python_path
+            eval_dir = Path(config.evaluation_dir)
+            process_script = eval_dir / "process_results.py"
+            
+            if not process_script.exists():
+                print(f"Warning: process_results.py not found at {process_script}")
+                return False
+            
+            # Determine output file path
+            result_path = Path(result_file)
+            processed_file = result_path.parent / f"{result_path.stem}_processed{result_path.suffix}"
+            
+            # Build command
+            cmd = [
+                python_bin,
+                str(process_script),
+                "--input_file", str(result_file),
+                "--model_name_or_path", model_name,
+                "--output_file", str(processed_file)
+            ]
+            
+            print(f"Running post-processing for job {jid}: {' '.join(cmd)}")
+            
+            # Run post-processing
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=eval_dir)
+            
+            if result.returncode == 0:
+                # Update job info with processed file path
+                job_db[jid]["processed_file"] = str(processed_file)
+                save_job_db()
+                print(f"Post-processing completed for job {jid}")
+                return True
+            else:
+                print(f"Post-processing failed for job {jid}: {result.stderr}")
+                return False
+                
+        except Exception as e:
+            print(f"Error running post-processing for job {jid}: {str(e)}")
+            return False
+    
+    def _check_and_run_post_processing(self, jid: str, job_info: dict) -> None:
+        """Check if job needs post-processing and run it if needed"""
+        try:
+            # Check if this job has probability tracking enabled
+            request = job_info.get("request", {})
+            enable_prob_tracking = request.get("enable_prob_tracking", False)
+            
+            if not enable_prob_tracking:
+                return
+                
+            # Check if post-processing has already been done
+            if "processed_file" in job_info:
+                return
+                
+            # Get result file and model name
+            result_file = job_info.get("result_file")
+            if not result_file or not Path(result_file).exists():
+                # Only print warning once per job to avoid spam
+                if "post_processing_warning_printed" not in job_info:
+                    print(f"Warning: Result file not found for job {jid}: {result_file}")
+                    job_info["post_processing_warning_printed"] = True
+                    save_job_db()
+                return
+                
+            model_name = request.get("model", "")
+            if not model_name:
+                # Only print warning once per job to avoid spam
+                if "model_warning_printed" not in job_info:
+                    print(f"Warning: Model name not found for job {jid}")
+                    job_info["model_warning_printed"] = True
+                    save_job_db()
+                return
+                
+            # Run post-processing
+            self._run_post_processing(jid, result_file, model_name)
+            
+        except Exception as e:
+            print(f"Error checking post-processing for job {jid}: {str(e)}")
+    
     def get_job_status(self, jid: str) -> Dict[str, Any]:
         """Get the status of a running or completed job"""
         if jid not in job_db:
@@ -528,6 +622,8 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                 # Process finished
                 if proc.returncode == 0:
                     job_info["status"] = JobStatus.DONE
+                    # Check if this job needs post-processing
+                    self._check_and_run_post_processing(jid, job_info)
                 else:
                     job_info["status"] = JobStatus.ERROR
                 job_info["return_code"] = proc.returncode
@@ -569,10 +665,14 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                         if result_file.exists() and result_file.stat().st_size > 0:
                             job_info["status"] = JobStatus.DONE
                             job_info.pop("error", None)
+                            # Check if this job needs post-processing
+                            self._check_and_run_post_processing(jid, job_info)
                         # Fallback: check if output file exists and has content
                         elif output_file.exists() and output_file.stat().st_size > 0:
                             job_info["status"] = JobStatus.DONE
                             job_info.pop("error", None)
+                            # Check if this job needs post-processing
+                            self._check_and_run_post_processing(jid, job_info)
                         else:
                             job_info["status"] = JobStatus.ERROR
                             job_info["error"] = f"Job completed but output/result files missing or empty"
@@ -599,10 +699,14 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     if result_file.exists() and result_file.stat().st_size > 0:
                         job_info["status"] = JobStatus.DONE
                         job_info.pop("error", None)
+                        # Check if this job needs post-processing
+                        self._check_and_run_post_processing(jid, job_info)
                     # Fallback: check if output file exists and has content
                     elif output_file.exists() and output_file.stat().st_size > 0:
                         job_info["status"] = JobStatus.DONE
                         job_info.pop("error", None)
+                        # Check if this job needs post-processing
+                        self._check_and_run_post_processing(jid, job_info)
                     else:
                         job_info["status"] = JobStatus.ERROR
                         job_info["error"] = f"Failed to check SLURM status: {result.stderr}"

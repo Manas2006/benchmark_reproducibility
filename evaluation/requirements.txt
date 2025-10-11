@@ -16,3 +16,5 @@ timeout-decorator
 latex2sympy2
 multiprocess
 matplotlib
+scikit-learn  # Required for prob_plot.py (PCA, t-SNE)
+# umap-learn  # Optional for prob_plot.py (UMAP dimensionality reduction) - commented out due to numpy version conflicts with vllm

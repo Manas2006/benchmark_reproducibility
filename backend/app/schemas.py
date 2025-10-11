@@ -51,13 +51,15 @@ class EvalRequest(BaseModel):
     path_config: Optional[PathConfig] = None  # Use default if not provided
     # Probability tracking
     enable_prob_tracking: bool = Field(default=False, description="Track probabilities of target answer tokens (requires vLLM)")
+    enable_path_vectors: bool = Field(default=False, description="Enable Path of Distributions vectors (high memory usage)")
+    max_path_steps: int = Field(default=50, description="Maximum steps to record for path vectors")
     # Together API options
     use_together_api: bool = Field(default=False, description="Use Together API instead of local models")
     together_api_key: Optional[str] = Field(default=None, description="Together API key (if not in env)")
     together_logprobs: conint(ge=0, le=5) = 0
     # Optional plotting directives (frontend convenience; plotting done post-hoc)
-    prob_plot_type: Optional[str] = Field(default=None, description="'aggregate' or 'single' for probability plots")
-    prob_plot_sample_id: Optional[int] = Field(default=None, description="Sample idx for single plot")
+    prob_plot_type: Optional[str] = Field(default=None, description="Plot type: 'aggregate', 'single', 'correct_aggregate', 'incorrect_aggregate', 'correct_vs_incorrect', 'path_aggregate', 'path_single', 'level_single', 'level_aggregate', 'starting_tokens_by_level', 'ending_tokens_by_level'")
+    prob_plot_sample_id: Optional[int] = Field(default=None, description="Sample idx for single/path_single plot")
 
 class EvalResponse(BaseModel):
     job_id: str
@@ -249,3 +251,21 @@ class CoTAnalysisResponseV2(BaseModel):
     analysis_method: str = "pillars_v2"
     config: Dict[str, Any]
     timestamp: str 
+class TruncationAnalysisRequest(BaseModel):
+    """Request for CoT truncation analysis"""
+    job_id: str = Field(description="Job ID to analyze")
+    model_name_or_path: str = Field(description="Model path for analysis")
+    dataset_name: str = Field(description="Dataset name for analysis")
+    backend: str = Field(default="local", description="Backend to use (local/slurm)")
+    temperature: float = Field(default=0.0, ge=0, le=2, description="Sampling temperature")
+    top_p: float = Field(default=1.0, ge=0, le=1, description="Top-p sampling parameter")
+
+class TruncationAnalysisResponse(BaseModel):
+    """Response for CoT truncation analysis"""
+    job_id: str = Field(description="Job identifier")
+    status: str = Field(description="Analysis status")
+    message: str = Field(description="Status message")
+    raw_curves_path: Optional[str] = Field(description="Path to raw curves JSON file")
+    correct_plot_path: Optional[str] = Field(description="Path to correct samples plot")
+    incorrect_plot_path: Optional[str] = Field(description="Path to incorrect samples plot")
+    computation_time: Optional[float] = Field(description="Time taken for analysis in seconds") 

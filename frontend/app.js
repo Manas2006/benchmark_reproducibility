@@ -1,6 +1,6 @@
 // Configuration
-const API_BASE = 'http://localhost:8001';
-const WS_BASE = 'ws://localhost:8001';
+const API_BASE = 'http://localhost:8000';
+const WS_BASE = 'ws://localhost:8000';
 
 // Available options
 const AVAILABLE_MODELS = [
@@ -123,6 +123,10 @@ function showTab(tabName, event = null) {
                 console.error('Failed to create cot-analysis tab');
                 return;
             }
+        } else if (tabName === 'truncation-analysis') {
+            // Load jobs when switching to truncation analysis tab
+            loadTruncationJobs();
+            return;
         } else {
             return;
         }
@@ -322,6 +326,8 @@ function addModelConfig() {
         prompt: '',
         prompt_type: 'custom',
         enable_prob_tracking: false,
+        enable_path_vectors: false,
+        max_path_steps: '50',
         prob_plot_type: 'aggregate',
         prob_plot_sample_id: ''
     };
@@ -511,6 +517,18 @@ function renderModelConfigs() {
                     </label>
                     <p class="text-xs text-gray-500 mt-1">If enabled, vLLM will be used and probabilities will be recorded to a separate JSONL.</p>
                 </div>
+                <div>
+                    <label class="inline-flex items-center mt-4">
+                        <input type="checkbox" ${config.enable_path_vectors ? 'checked' : ''} onchange="updateModelConfig(${config.id}, 'enable_path_vectors', this.checked)" class="form-checkbox h-5 w-5 text-purple-600">
+                        <span class="ml-2 text-sm text-gray-700">Enable path vectors (high memory usage)</span>
+                    </label>
+                    <p class="text-xs text-gray-500 mt-1">Records full probability distributions for Path of Distributions visualization. Requires probability tracking.</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700">Max Path Steps</label>
+                    <input type="number" min="1" max="1000" onchange="updateModelConfig(${config.id}, 'max_path_steps', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" value="${config.max_path_steps}">
+                    <p class="text-xs text-gray-500 mt-1">Maximum number of steps to record for path vectors.</p>
+                </div>
                 ` : ''}
                 
                 <div>
@@ -696,7 +714,9 @@ async function submitEvaluation() {
                                                 eval_method: config.eval_method,
                                                 k: parseInt(k),
                                                 max_tokens: parseInt(max_token),
-                                                enable_prob_tracking: !!config.enable_prob_tracking
+                                                enable_prob_tracking: !!config.enable_prob_tracking,
+                                                enable_path_vectors: !!config.enable_path_vectors,
+                                                max_path_steps: parseInt(config.max_path_steps || '50')
                                             };
                                             allJobs.push(requestData);
                                         });
@@ -762,6 +782,7 @@ function renderJobList(jobs) {
                     <button onclick="showMetricsModal('${job.job_id}', 'Metrics')" class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">View Metrics Inline</button>
                     <button onclick="showResultModal('${job.result_file}', 'Model Outputs')" class="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700">View Model Outputs Inline</button>
                     <button onclick="openCoTAnalysisForJob('${job.job_id}')" class="px-3 py-1 bg-orange-600 text-white text-sm rounded hover:bg-orange-700">🧠 CoT Analysis</button>
+                    <button onclick="openTruncationAnalysisForJob('${job.job_id}')" class="px-3 py-1 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700">📊 Truncation Analysis</button>
                     <button onclick="exportToExcel('${job.job_id}')" class="px-3 py-1 bg-purple-600 text-white text-sm rounded hover:bg-purple-700">Export to Excel</button>
                     ${job.prob_file ? `<button onclick="showResultModal('${job.prob_file}','Probability JSONL')" class="px-3 py-1 bg-teal-600 text-white text-sm rounded hover:bg-teal-700">View Prob JSONL</button>` : ''}
                     ${job.prob_file ? `<button onclick="openProbPlotModal('${job.job_id}')" class="px-3 py-1 bg-pink-600 text-white text-sm rounded hover:bg-pink-700">Plot Probabilities</button>` : ''}
@@ -1311,27 +1332,82 @@ async function showResultModal(resultFilePath, title = 'Results') {
     }
 }
 
-function openProbPlotModal(jobId) {
+async function openProbPlotModal(jobId) {
+    // First, get job info to check if dataset is math
+    let isMathDataset = false;
+    try {
+        const jobResponse = await fetch(`${API_BASE}/jobs/${jobId}`);
+        if (jobResponse.ok) {
+            const jobInfo = await jobResponse.json();
+            const dataset = jobInfo.request?.dataset || '';
+            // Only treat "math" as a math dataset, not "sat_math"
+            isMathDataset = dataset.toLowerCase() === 'math';
+        }
+    } catch (e) {
+        console.warn('Could not fetch job info for dataset check:', e);
+    }
+
     const modal = document.createElement('div');
     modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+
+    // Add math level plotting options if this is a math dataset
+    const mathLevelOptions = isMathDataset ? `
+        <option value="level_single">Math Level (Single Level)</option>
+        <option value="level_aggregate">Math Level (All Levels Comparison)</option>
+        <option value="starting_tokens_by_level">Starting Tokens by Level</option>
+        <option value="ending_tokens_by_level">Ending Tokens by Level</option>
+    ` : '';
+
+    const mathLevelControlsHTML = isMathDataset ? `
+        <div id="math-level-controls" class="hidden">
+            <div id="level-single-controls" class="hidden">
+                <label class="block text-sm font-medium text-gray-700">Select Level</label>
+                <select id="math-level-select" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                    <option value="1">Level 1</option>
+                    <option value="2">Level 2</option>
+                    <option value="3">Level 3</option>
+                    <option value="4">Level 4</option>
+                    <option value="5">Level 5</option>
+                </select>
+            </div>
+            <div id="level-aggregate-controls" class="hidden">
+                <div class="text-sm text-gray-600 p-3 bg-blue-50 rounded-md">
+                    <strong>Aggregate Mode:</strong> This will generate 3 separate plots showing all 5 difficulty levels:
+                    <ul class="list-disc list-inside mt-2">
+                        <li>Correct Token Probability vs Step</li>
+                        <li>Chosen Token Probability vs Step</li>
+                        <li>Entropy vs Step</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    ` : '';
+
     modal.innerHTML = `
         <div class="bg-white rounded-lg p-6 w-full max-w-xl">
             <div class="flex justify-between items-center mb-4">
-                <h3 class="text-lg font-semibold">Plot Probabilities</h3>
+                <h3 class="text-lg font-semibold">Plot Probabilities ${isMathDataset ? '(Math Dataset)' : ''}</h3>
                 <button onclick="this.closest('.fixed').remove()" class="text-gray-500 hover:text-gray-700 text-xl">&times;</button>
             </div>
             <div class="space-y-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Plot Type</label>
                     <select id="prob-plot-type" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
-                        <option value="aggregate" selected>Aggregate</option>
-                        <option value="single">Single</option>
+                        <option value="aggregate" selected>Aggregate (All Samples)</option>
+                        <option value="correct_aggregate">Aggregate (Correct Answers Only)</option>
+                        <option value="incorrect_aggregate">Aggregate (Incorrect Answers Only)</option>
+                        <option value="correct_vs_incorrect">Correct vs Incorrect Comparison</option>
+                        <option value="single">Single Sample</option>
+                        <option value="path_aggregate">Path of Distributions (Aggregate)</option>
+                        <option value="path_single">Path of Distributions (Single Sample)</option>
+                        ${mathLevelOptions}
                     </select>
                 </div>
                 <div id="prob-sample-id-field" class="hidden">
                     <label class="block text-sm font-medium text-gray-700">Sample ID (idx)</label>
                     <input id="prob-sample-id" type="number" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" placeholder="Enter sample idx">
                 </div>
+                ${mathLevelControlsHTML}
                 <div class="flex justify-end gap-2">
                     <button id="prob-plot-run" class="px-4 py-2 bg-pink-600 text-white rounded hover:bg-pink-700">Generate Plot</button>
                 </div>
@@ -1342,21 +1418,49 @@ function openProbPlotModal(jobId) {
     document.body.appendChild(modal);
     const plotTypeSel = modal.querySelector('#prob-plot-type');
     const sampleField = modal.querySelector('#prob-sample-id-field');
+    const mathLevelControls = modal.querySelector('#math-level-controls');
+    const levelSingleControls = modal.querySelector('#level-single-controls');
+    const levelAggregateControls = modal.querySelector('#level-aggregate-controls');
+
     plotTypeSel.addEventListener('change', () => {
-        if (plotTypeSel.value === 'single') sampleField.classList.remove('hidden');
-        else sampleField.classList.add('hidden');
+        // Hide all conditional fields first
+        if (sampleField) sampleField.classList.add('hidden');
+        if (mathLevelControls) mathLevelControls.classList.add('hidden');
+        if (levelSingleControls) levelSingleControls.classList.add('hidden');
+        if (levelAggregateControls) levelAggregateControls.classList.add('hidden');
+
+        // Show appropriate fields based on plot type
+        if (plotTypeSel.value === 'single' || plotTypeSel.value === 'path_single') {
+            if (sampleField) sampleField.classList.remove('hidden');
+        } else if (plotTypeSel.value === 'level_single') {
+            if (mathLevelControls) mathLevelControls.classList.remove('hidden');
+            if (levelSingleControls) levelSingleControls.classList.remove('hidden');
+        } else if (plotTypeSel.value === 'level_aggregate') {
+            if (mathLevelControls) mathLevelControls.classList.remove('hidden');
+            if (levelAggregateControls) levelAggregateControls.classList.remove('hidden');
+        }
     });
     modal.querySelector('#prob-plot-run').addEventListener('click', async () => {
         const plotType = plotTypeSel.value;
-        const sampleIdVal = modal.querySelector('#prob-sample-id').value;
+        const sampleIdVal = modal.querySelector('#prob-sample-id')?.value;
+        const mathLevelVal = modal.querySelector('#math-level-select')?.value;
         const params = new URLSearchParams();
         params.append('plot_type', plotType);
-        if (plotType === 'single') {
+
+        if (plotType === 'single' || plotType === 'path_single') {
             if (!sampleIdVal) {
                 alert('Please enter a sample idx for single plot');
                 return;
             }
             params.append('sample_id', String(parseInt(sampleIdVal)));
+        } else if (plotType === 'level_single') {
+            if (!mathLevelVal) {
+                alert('Please select a math level');
+                return;
+            }
+            params.append('math_level', mathLevelVal);
+        } else if (plotType === 'level_aggregate') {
+            // No additional parameters needed for level aggregate
         }
         const imgContainer = modal.querySelector('#prob-plot-output');
         imgContainer.innerHTML = 'Generating plot...';
@@ -1368,8 +1472,31 @@ function openProbPlotModal(jobId) {
                 throw new Error(err || `HTTP ${resp.status}`);
             }
             const blob = await resp.blob();
-            const imgUrl = URL.createObjectURL(blob);
-            imgContainer.innerHTML = `<img src="${imgUrl}" class="max-h-[60vh] rounded border"/>`;
+
+            // Handle different response types
+            if (plotType === 'level_aggregate') {
+                // For level aggregate, provide download link for ZIP file
+                const downloadUrl = URL.createObjectURL(blob);
+                imgContainer.innerHTML = `
+                    <div class="text-center p-4 bg-green-50 border border-green-200 rounded-lg">
+                        <h4 class="font-semibold text-green-800 mb-2">✅ Level Aggregate Plots Generated!</h4>
+                        <p class="text-sm text-green-700 mb-3">
+                            3 plots have been generated showing all 5 difficulty levels:<br>
+                            • Correct Token Probability vs Step<br>
+                            • Chosen Token Probability vs Step<br>
+                            • Entropy vs Step
+                        </p>
+                        <a href="${downloadUrl}" download="math_level_plots.zip" 
+                           class="inline-block px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">
+                            📥 Download All Plots (ZIP)
+                        </a>
+                    </div>
+                `;
+            } else {
+                // For regular plots, display the image
+                const imgUrl = URL.createObjectURL(blob);
+                imgContainer.innerHTML = `<img src="${imgUrl}" class="max-h-[60vh] rounded border"/>`;
+            }
         } catch (e) {
             imgContainer.innerHTML = `<div class="text-red-600">Error: ${escapeHtml(e.message || String(e))}</div>`;
         }
@@ -1964,6 +2091,48 @@ function openCoTAnalysisForJob(jobId) {
     }
 }
 
+function openTruncationAnalysisForJob(jobId) {
+    try {
+        console.log(`Opening Truncation analysis for job: ${jobId}`);
+
+        // Switch to Truncation Analysis tab
+        showTab('truncation-analysis');
+
+        // Load jobs for the dropdown first, then wait for elements
+        loadTruncationJobs().then(() => {
+            // Wait for the truncation-job-select element to be available
+            waitForElement('#truncation-job-select').then((jobSelect) => {
+                // Select the job
+                jobSelect.value = jobId;
+                console.log(`Selected job ${jobId} in dropdown`);
+
+                // Enable the analyze button
+                const analyzeBtn = document.getElementById('truncation-analyze-btn');
+                if (analyzeBtn) {
+                    analyzeBtn.disabled = false;
+                    console.log('Analyze button enabled');
+                }
+
+                // Optionally run analysis immediately
+                setTimeout(() => {
+                    if (confirm('Run Truncation analysis for this job now?')) {
+                        runTruncationAnalysis();
+                    }
+                }, 100);
+            }).catch(error => {
+                console.error('Error waiting for truncation-job-select element:', error);
+                alert('Truncation Analysis tab not properly loaded. Please try refreshing the page.');
+            });
+        }).catch(error => {
+            console.error('Error loading Truncation jobs:', error);
+            alert('Error loading jobs for Truncation analysis: ' + error.message);
+        });
+    } catch (error) {
+        console.error('Error in openTruncationAnalysisForJob:', error);
+        alert('Error opening Truncation analysis: ' + error.message);
+    }
+}
+
 async function exportCoTExcel() {
     if (!currentCoTData) {
         showCoTError('Please run CoT analysis first');
@@ -2479,6 +2648,119 @@ async function testOpenAIKey() {
     }
 }
 
+// Truncation Analysis Functions
+let currentTruncationAnalysis = null;
+
+async function loadTruncationJobs() {
+    try {
+        const response = await fetch(`${API_BASE}/jobs`);
+        const data = await response.json();
+
+        const select = document.getElementById('truncation-job-select');
+        select.innerHTML = '<option value="">Select a completed job...</option>';
+
+        data.jobs.forEach(job => {
+            if (job.status === 'DONE' && job.result_file) {
+                const option = document.createElement('option');
+                option.value = job.job_id;
+                option.textContent = `${job.job_id} - ${job.model || 'Unknown Model'} - ${job.dataset || 'Unknown Dataset'}`;
+                select.appendChild(option);
+            }
+        });
+
+        console.log(`Loaded ${data.jobs.filter(j => j.status === 'DONE').length} completed jobs for truncation analysis`);
+    } catch (error) {
+        console.error('Error loading jobs for truncation analysis:', error);
+        showTruncationError('Failed to load jobs: ' + error.message);
+    }
+}
+
+function validateTruncationInputs() {
+    const jobId = document.getElementById('truncation-job-select').value;
+    const modelPath = document.getElementById('truncation-model-path').value.trim();
+    const datasetName = document.getElementById('truncation-dataset-name').value.trim();
+    const backend = document.getElementById('truncation-backend').value;
+    const temperature = parseFloat(document.getElementById('truncation-temperature').value);
+    const topP = parseFloat(document.getElementById('truncation-top-p').value);
+
+    const isValid = jobId && modelPath && datasetName && backend &&
+        !isNaN(temperature) && temperature >= 0 && temperature <= 2 &&
+        !isNaN(topP) && topP >= 0 && topP <= 1;
+
+    const analyzeBtn = document.getElementById('truncation-analyze-btn');
+    if (analyzeBtn) {
+        analyzeBtn.disabled = !isValid;
+    }
+
+    // Clear any previous error messages when inputs are valid
+    if (isValid) {
+        const errorDiv = document.getElementById('truncation-error');
+        if (errorDiv) {
+            errorDiv.classList.add('hidden');
+        }
+    }
+
+    return isValid;
+}
+
+async function runTruncationAnalysis() {
+    if (!validateTruncationInputs()) {
+        return;
+    }
+
+    const jobId = document.getElementById('truncation-job-select').value;
+    const modelPath = document.getElementById('truncation-model-path').value.trim();
+    const datasetName = document.getElementById('truncation-dataset-name').value.trim();
+    const backend = document.getElementById('truncation-backend').value;
+    const temperature = parseFloat(document.getElementById('truncation-temperature').value);
+    const topP = parseFloat(document.getElementById('truncation-top-p').value);
+
+    // Show loading state
+    document.getElementById('truncation-loading').classList.remove('hidden');
+    document.getElementById('truncation-analysis-results').classList.add('hidden');
+    document.getElementById('truncation-error').classList.add('hidden');
+    document.getElementById('truncation-analyze-btn').disabled = true;
+
+    try {
+        const request = {
+            job_id: jobId,
+            model_name_or_path: modelPath,
+            dataset_name: datasetName,
+            backend: backend,
+            temperature: temperature,
+            top_p: topP
+        };
+
+        console.log('Starting truncation analysis:', request);
+
+        const response = await fetch(`${API_BASE}/jobs/${jobId}/truncation-analysis`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(request)
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        currentTruncationAnalysis = result;
+
+        console.log('Truncation analysis completed:', result);
+        displayTruncationResults(result);
+
+    } catch (error) {
+        console.error('Error running truncation analysis:', error);
+        showTruncationError('Analysis failed: ' + error.message);
+    } finally {
+        document.getElementById('truncation-loading').classList.add('hidden');
+        document.getElementById('truncation-analyze-btn').disabled = false;
+    }
+}
+
 // Comprehensive Analysis UI Functions
 function showPillarsAnalysisUI(data) {
     console.log('Showing pillars analysis UI...');
@@ -2502,13 +2784,103 @@ function populateDetailedResults(samples) {
     return;
 }
 
+function displayTruncationResults(result) {
+    const resultsDiv = document.getElementById('truncation-analysis-results');
+    const summaryDiv = document.getElementById('truncation-summary');
+
+    // Display summary
+    summaryDiv.innerHTML = `
+        <div class="bg-white p-4 rounded-lg border">
+            <h4 class="font-semibold text-gray-900">Analysis Status</h4>
+            <p class="text-sm text-gray-600">${result.status}</p>
+        </div>
+        <div class="bg-white p-4 rounded-lg border">
+            <h4 class="font-semibold text-gray-900">Computation Time</h4>
+            <p class="text-sm text-gray-600">${result.computation_time ? result.computation_time.toFixed(2) + 's' : 'N/A'}</p>
+        </div>
+        <div class="bg-white p-4 rounded-lg border">
+            <h4 class="font-semibold text-gray-900">Raw Data</h4>
+            <p class="text-sm text-gray-600">${result.raw_curves_path ? 'Available' : 'Not available'}</p>
+        </div>
+        <div class="bg-white p-4 rounded-lg border">
+            <h4 class="font-semibold text-gray-900">Plots Generated</h4>
+            <p class="text-sm text-gray-600">${result.correct_plot_path ? 'Correct ✓' : 'Correct ✗'} | ${result.incorrect_plot_path ? 'Incorrect ✓' : 'Incorrect ✗'}</p>
+        </div>
+    `;
+
+    // Enable plot buttons if plots are available
+    const correctBtn = document.getElementById('show-correct-plot-btn');
+    const incorrectBtn = document.getElementById('show-incorrect-plot-btn');
+    const downloadBtn = document.getElementById('download-truncation-btn');
+
+    correctBtn.disabled = !result.correct_plot_path;
+    incorrectBtn.disabled = !result.incorrect_plot_path;
+    downloadBtn.disabled = !result.raw_curves_path;
+
+    resultsDiv.classList.remove('hidden');
+}
+
+function showTruncationPlot(plotType) {
+    if (!currentTruncationAnalysis) {
+        showTruncationError('No analysis results available');
+        return;
+    }
+
+    const jobId = currentTruncationAnalysis.job_id;
+    const plotContainer = document.getElementById('truncation-plot-container');
+
+    // Show loading state
+    plotContainer.innerHTML = '<div class="text-center py-4"><div class="inline-block animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div><p class="mt-2 text-gray-600">Loading plot...</p></div>';
+
+    // Create image element
+    const img = document.createElement('img');
+    img.src = `${API_BASE}/jobs/${jobId}/truncation-analysis/plot?plot_type=${plotType}`;
+    img.alt = `${plotType} samples confidence curve`;
+    img.className = 'max-w-full h-auto mx-auto rounded-lg shadow-lg';
+
+    img.onload = () => {
+        plotContainer.innerHTML = '';
+        plotContainer.appendChild(img);
+    };
+
+    img.onerror = () => {
+        plotContainer.innerHTML = '<p class="text-red-600">Failed to load plot. Please try again.</p>';
+    };
+}
+
+function downloadTruncationData() {
+    if (!currentTruncationAnalysis || !currentTruncationAnalysis.raw_curves_path) {
+        showTruncationError('No raw data available for download');
+        return;
+    }
+
+    // Create a temporary link to download the file
+    const link = document.createElement('a');
+    link.href = `${API_BASE}/file?path=${encodeURIComponent(currentTruncationAnalysis.raw_curves_path)}`;
+    link.download = `truncation_curves_${currentTruncationAnalysis.job_id}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+function showTruncationError(message) {
+    const errorDiv = document.getElementById('truncation-error');
+    const errorMessage = document.getElementById('truncation-error-message');
+
+    errorMessage.textContent = message;
+    errorDiv.classList.remove('hidden');
+
+    // Hide other sections
+    document.getElementById('truncation-analysis-results').classList.add('hidden');
+    document.getElementById('truncation-loading').classList.add('hidden');
+}
 
 // Ensure DOM is loaded before running any functions
 document.addEventListener('DOMContentLoaded', function () {
     console.log('DOM loaded, initializing UI...');
 
     // Verify that all expected tab elements exist
-    const expectedTabs = ['configure', 'monitor', 'jobs', 'cot-analysis', 'settings'];
+    const expectedTabs = ['configure', 'monitor', 'jobs', 'cot-analysis', 'truncation-analysis', 'settings'];
     let missingTabs = [];
 
     expectedTabs.forEach(tabId => {

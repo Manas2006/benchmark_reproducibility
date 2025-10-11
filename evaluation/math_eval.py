@@ -7,6 +7,9 @@ from vllm import LLM, SamplingParams
 from datetime import datetime
 from tqdm import tqdm
 from math import exp
+import sys
+import uuid
+sys.path.insert(0, os.path.abspath("."))
 
 try:
     # Optional Together API import; only required when using --use_together_api
@@ -16,6 +19,7 @@ except Exception:
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import numpy as np
 
 from evaluate import evaluate
 from utils import set_seed, load_jsonl, save_jsonl, construct_prompt
@@ -24,7 +28,390 @@ from trajectory import *
 from data_loader import load_data
 from python_executor import PythonExecutor
 from model_utils import load_hf_lm_and_tokenizer, generate_completions
-from prob_recorder import ProbabilityRecorder
+from prob_recorder import BatchProbabilityRecorder
+from run_truncation_analysis import run_truncation_analysis_over_samples
+
+# --- NEW: helpers for subprocess Pass-1
+import tempfile, subprocess
+
+# ============================================================
+# OOM-safe streaming scorer for Pass-2 (HF, fp32 recommended)
+# ============================================================
+
+from typing import List, Dict, Any, Tuple, Optional
+
+try:
+    from tqdm import tqdm as _tqdm  # reuse tqdm alias safely
+except Exception:
+    _tqdm = None
+
+
+# ---------- batching helpers ----------
+
+def _build_len_metadata(vllm_outputs) -> List[Dict[str, int]]:
+    """Collect prompt/gen lengths for each vLLM output entry."""
+    meta = []
+    for i_out, out in enumerate(vllm_outputs):
+        p_ids = out.prompt_token_ids
+        g_ids = out.outputs[0].token_ids if out.outputs and out.outputs[0].token_ids else []
+        meta.append({
+            "i_out": i_out,
+            "pl": len(p_ids),
+            "gl": len(g_ids),
+            "L": len(p_ids) + len(g_ids),
+        })
+    return meta
+
+
+def _form_token_budget_batches(
+    meta: List[Dict[str, int]],
+    max_tokens_per_batch: int = 16384,
+    max_len_per_batch: Optional[int] = None,
+) -> List[List[Dict[str, int]]]:
+    """
+    Greedy packing by 'token budget':
+      batch_size * max_len_in_batch <= max_tokens_per_batch
+    and an optional hard cap on per-sample sequence length:
+      max_len_in_batch <= max_len_per_batch
+    """
+    meta = sorted(meta, key=lambda x: x["L"], reverse=True)
+    batches: List[List[Dict[str, int]]] = []
+    cur: List[Dict[str, int]] = []
+    cur_max = 0
+
+    for m in meta:
+        L = m["L"]
+
+        # If a hard cap is set and the sample itself exceeds it, run it alone.
+        if max_len_per_batch is not None and L > max_len_per_batch:
+            if cur:
+                batches.append(cur)
+                cur, cur_max = [], 0
+            batches.append([m])
+            continue
+
+        prospective_bs = len(cur) + 1
+        prospective_max = max(cur_max, L)
+
+        # Honor the hard per-batch length cap if given
+        if max_len_per_batch is not None and prospective_max > max_len_per_batch:
+            if cur:
+                batches.append(cur)
+            cur, cur_max = [m], L
+            continue
+
+        cost = prospective_bs * prospective_max
+        if cur and cost > max_tokens_per_batch:
+            batches.append(cur)
+            cur, cur_max = [], 0
+
+        cur.append(m)
+        cur_max = max(cur_max, L)
+
+    if cur:
+        batches.append(cur)
+    return batches
+
+
+def _pack_microbatch(
+    batch_meta: List[Dict[str, int]],
+    vllm_outputs,
+    tokenizer,
+    device: torch.device,
+):
+    """Right-pad each row to the microbatch max length; return (ids, mask, pos_ids, lens...)."""
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    pad_id = tokenizer.pad_token_id
+
+    B = len(batch_meta)
+    max_len = max((m["L"] for m in batch_meta), default=0)
+
+    input_ids = torch.full((B, max_len), pad_id, dtype=torch.long, device=device)
+    attn_mask = torch.zeros((B, max_len), dtype=torch.long, device=device)
+    position_ids = torch.zeros((B, max_len), dtype=torch.long, device=device)
+
+    prompt_lens, gen_lens, gen_ids_list = [], [], []
+
+    for row, m in enumerate(batch_meta):
+        out = vllm_outputs[m["i_out"]]
+        p_ids = out.prompt_token_ids
+        g_ids = out.outputs[0].token_ids if out.outputs and out.outputs[0].token_ids else []
+        ids = p_ids + g_ids
+        L = len(ids)
+        if L > 0:
+            input_ids[row, :L] = torch.tensor(ids, dtype=torch.long, device=device)
+            attn_mask[row, :L] = 1
+            position_ids[row, :L] = torch.arange(L, dtype=torch.long, device=device)
+        prompt_lens.append(len(p_ids))
+        gen_lens.append(len(g_ids))
+        gen_ids_list.append(g_ids)
+
+    return input_ids, attn_mask, position_ids, prompt_lens, gen_lens, gen_ids_list
+
+
+# ---------- metrics: chosen probs + pointer-correct probs ----------
+
+def _pointer_metrics_for_sample(
+    probs_i: torch.Tensor,            # [gl, V], float on device
+    gen_ids: List[int],
+    gold_answer_text: str,
+    tokenizer,
+) -> Dict[str, Any]:
+    """
+    - chosen_probs: P(model's actual token at each step)
+    - correct_probs: pointer semantics over gold answer tokens:
+        pointer starts at t1; advance only if chosen==current gold token; else reset to t1.
+        At each step, 'correct' = P(gold_token[pointer]).
+    - entropies: per-step categorical entropy.
+    """
+    gl, V = probs_i.shape
+    device = probs_i.device
+
+    if gl == 0:
+        return {
+            "chosen_ids": [],
+            "chosen_probs": [],
+            "correct_ids": [],
+            "correct_probs": [],
+            "entropies": [],
+            "exact_matches": 0,
+        }
+
+    gen_ids_t = torch.tensor(gen_ids, dtype=torch.long, device=device)
+    chosen_probs_t = probs_i.gather(1, gen_ids_t.unsqueeze(1)).squeeze(1)  # [gl]
+
+    ans = (gold_answer_text or "").strip()
+    ans_ids = tokenizer.encode(ans, add_special_tokens=False)
+
+    entropies = [
+        float(torch.distributions.Categorical(probs=probs_i[s]).entropy().item())
+        for s in range(gl)
+    ]
+
+    correct_ids: List[Optional[int]] = []
+    correct_probs: List[Optional[float]] = []
+    ptr = 0 if len(ans_ids) > 0 else -1
+    exact_matches = 0
+
+    for s in range(gl):
+        chosen_id = int(gen_ids[s])
+        if ptr == -1:
+            correct_ids.append(None)
+            correct_probs.append(None)
+        else:
+            gold_id = int(ans_ids[ptr])
+            correct_ids.append(gold_id)
+            correct_probs.append(float(probs_i[s, gold_id].item()))
+
+            if chosen_id == gold_id:
+                exact_matches += 1
+                ptr += 1
+                if ptr >= len(ans_ids):
+                    ptr = 0  # reset after a full match of the answer
+            else:
+                ptr = 0   # fallback to first token
+
+    return {
+        "chosen_ids": [int(x) for x in gen_ids],
+        "chosen_probs": [float(x) for x in chosen_probs_t.tolist()],
+        "correct_ids": correct_ids,
+        "correct_probs": correct_probs,
+        "entropies": entropies,
+        "exact_matches": int(exact_matches),
+    }
+
+
+# ---------- main streaming scorer ----------
+
+def run_hf_scoring_streaming(
+    hf_model,                              # AutoModelForCausalLM (fp32/bf16)
+    vllm_outputs,                          # list of vLLM-like outputs (supports _MiniOut)
+    samples: List[Dict[str, Any]],         # parallel to prompts; each must have 'gt'
+    tokenizer,
+    n_sampling: int,
+    enable_path_vectors: bool,
+    path_vectors_npz: str,
+    *,
+    max_tokens_per_batch: int = 16384,     # total token budget per microbatch (B * L_max)
+    max_len_per_batch: Optional[int] = None,  # optional hard cap on per-sample L
+    show_progress: bool = True,
+    progress_label: str = "Pass2(HF)",
+    log_monitor_json: bool = False,
+    vram_guard_gb: Optional[float] = None,     # if set, CPU fallback when free VRAM < this
+) -> Tuple[List[Optional[Dict[str, Any]]], bool]:
+    """
+    Returns:
+      - hf_results_per_output: list aligned to vllm_outputs; each item includes:
+          chosen_ids, chosen_probs, correct_ids, correct_probs, entropies, exact_matches
+      - wrote_npz: True if path vectors saved
+    """
+    device = next(hf_model.parameters()).device
+    use_cuda = (device.type == "cuda")
+
+    # Build batches by token budget / optional length cap
+    meta = _build_len_metadata(vllm_outputs)
+    batches = _form_token_budget_batches(
+        meta, max_tokens_per_batch=max_tokens_per_batch, max_len_per_batch=max_len_per_batch
+    )
+
+    hf_results_per_output: List[Optional[Dict[str, Any]]] = [None] * len(vllm_outputs)
+    pathvec_store: Dict[str, Any] = {}
+
+    total_samples = len(vllm_outputs)
+    samples_done = 0
+    t0 = time.time()
+
+    # Progress bar over samples, not batches
+    pbar = None
+    if show_progress and _tqdm is not None:
+        pbar = _tqdm(
+            total=total_samples,
+            desc=progress_label,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} samples | Elapsed: {elapsed} | ETA: {remaining}",
+            leave=True,
+        )
+
+    for b_idx, batch_meta in enumerate(batches):
+        # Decide device per batch (optional CPU fallback if free VRAM is low)
+        this_device = device
+        moved_model_to_cpu = False
+        free_gb = None
+
+        if vram_guard_gb is not None and use_cuda:
+            try:
+                free_bytes, total_bytes = torch.cuda.mem_get_info()
+                free_gb = round(free_bytes / (1024**3), 2)
+                if free_gb < float(vram_guard_gb):
+                    # CPU fallback for this batch
+                    hf_model.to("cpu")
+                    this_device = torch.device("cpu")
+                    moved_model_to_cpu = True
+            except Exception:
+                pass  # ignore mem probe failures
+
+        # Pack batch tensors on 'this_device'
+        input_ids, attn_mask, position_ids, prompt_lens, gen_lens, gen_ids_list = \
+            _pack_microbatch(batch_meta, vllm_outputs, tokenizer, this_device)
+
+        # Forward
+        with torch.no_grad():
+            logits_mb = hf_model(
+                input_ids=input_ids,
+                attention_mask=attn_mask,
+                position_ids=position_ids,
+                use_cache=False,
+                output_hidden_states=False,
+            ).logits  # [B, L, V] on 'this_device'
+
+        # Per-row processing
+        B = input_ids.size(0)
+        rows_this_batch = 0
+        for row in range(B):
+            info = batch_meta[row]
+            i_out = info["i_out"]
+            pl = prompt_lens[row]
+            gl = gen_lens[row]
+
+            if gl == 0:
+                hf_results_per_output[i_out] = {
+                    "chosen_ids": [],
+                    "chosen_probs": [],
+                    "correct_ids": [],
+                    "correct_probs": [],
+                    "entropies": [],
+                    "exact_matches": 0,
+                }
+                continue
+
+            start_idx = max(pl - 1, 0)
+            end_idx = start_idx + gl
+            l_rows = logits_mb[row, start_idx:end_idx, :]           # [gl, V]
+            probs_i = torch.softmax(l_rows.float(), dim=-1)          # [gl, V]
+
+            sample_index = i_out // n_sampling
+            gold_answer_text = samples[sample_index].get("gt", "")
+
+            metrics = _pointer_metrics_for_sample(probs_i, gen_ids_list[row], gold_answer_text, tokenizer)
+            hf_results_per_output[i_out] = metrics
+
+            if enable_path_vectors and np is not None:
+                pathvec_store[f"s{i_out}"] = probs_i.detach().to("cpu").half().numpy()
+
+            rows_this_batch += gl
+
+        # Free batch tensors and (optionally) move model back to original device
+        del logits_mb
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        if moved_model_to_cpu:
+            hf_model.to(device)
+
+        # Progress + monitor
+        samples_done += len(batch_meta)
+        if pbar is not None:
+            pbar.update(len(batch_meta))
+        if log_monitor_json:
+            elapsed = time.time() - t0
+            monitor = {
+                "type": "MONITOR_SCORING",
+                "batch_index": b_idx,
+                "batches_total": len(batches),
+                "batch_size": len(batch_meta),
+                "rows_scored_this_batch": rows_this_batch,
+                "samples_done": samples_done,
+                "samples_total": total_samples,
+                "elapsed_sec_total": round(elapsed, 3),
+            }
+            if free_gb is not None:
+                monitor["free_vram_gb_before_batch"] = free_gb
+            print(json.dumps(monitor))
+
+    if pbar is not None:
+        pbar.close()
+        print(f"[Pass2] All {total_samples} samples processed in {time.time() - t0:.1f}s")
+
+    wrote_npz = False
+    if enable_path_vectors and len(pathvec_store) > 0:
+        try:
+            os.makedirs(os.path.dirname(path_vectors_npz), exist_ok=True)
+            np.savez_compressed(path_vectors_npz, **pathvec_store)
+            wrote_npz = True
+        except Exception as e:
+            print(f"WARNING: failed to write path vectors npz: {e}")
+
+    return hf_results_per_output, wrote_npz
+
+
+# --- NEW: Pass-1 in a child process (so EngineCore exits and frees VRAM)
+def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], sampling_cfg: Dict[str, Any], gpu_memory_utilization: float = 0.4):
+    """
+    sampling_cfg keys: temperature, top_p, top_k, max_tokens, stop (list[str]), stop_token_ids (list[int]|None)
+    Returns list of dicts: {prompt, prompt_token_ids, generated_text, generated_token_ids}
+    (Requires pass1_child_vllm.py next to this file.)
+    """
+    with tempfile.TemporaryDirectory() as td:
+        in_path  = os.path.join(td, "pass1_in.json")
+        out_path = os.path.join(td, "pass1_out.json")
+        payload = {
+            "model": model_name_or_path,
+            "prompts": prompts,
+            "temperature": sampling_cfg.get("temperature", 0.0),
+            "top_p": sampling_cfg.get("top_p", 1.0),
+            "top_k": sampling_cfg.get("top_k", 0),
+            "max_tokens": sampling_cfg.get("max_tokens_per_call", 2048),
+            "stop": sampling_cfg.get("stop", []),
+            "stop_token_ids": sampling_cfg.get("stop_token_ids", None),
+            "gpu_memory_utilization": gpu_memory_utilization,
+        }
+        with open(in_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        # Spawn child. It will exit and release all VRAM.
+        subprocess.run([sys.executable, "pass1_child_vllm.py", in_path, out_path], check=True)
+        with open(out_path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
 
 def parse_args():
@@ -64,18 +451,28 @@ def parse_args():
         help="Few shot for multiple-choice questions, zero shot for others.",
     )
     parser.add_argument("--eval_method", type=str, default="pass@k", help="Evaluation method (pass@k, maj@k, rm@k)")
-    parser.add_argument("--enable_prob_tracking", action="store_true", help="Enable probability tracking of target answer tokens (requires vLLM)")
+    parser.add_argument("--enable_prob_tracking", action="store_true",
+                        help="Enable probability tracking of target answer tokens (requires vLLM)")
+    # Single switch for full distribution (path vectors)
+    parser.add_argument("--enable_path_vectors", action="store_true",
+                        help="Store full per-step token distributions to an .npz file (one run/job per file).")
+    parser.add_argument("--max_path_steps", type=int, default=50,
+                        help="Maximum steps to record for path vectors (to limit memory)")
+    parser.add_argument("--run_truncation_analysis_after_eval", action="store_true",
+                        help="Run CoT truncation analysis immediately after evaluation")
     # Together API integration
     parser.add_argument("--use_together_api", action="store_true", help="Use Together API for generation instead of local models")
     parser.add_argument("--together_api_key", type=str, default=None, help="Together API key (or via TOGETHER_API_KEY env var)")
     parser.add_argument("--together_logprobs", type=int, default=0, help="Return top logprobs per token (0-5); if 0, do not request logprobs")
+
+    # --- NEW: run vLLM generation in a short-lived subprocess (frees VRAM before HF scoring)
+    parser.add_argument("--pass1_subprocess", action="store_true",
+                        help="Run vLLM Pass-1 in a subprocess so its VRAM is freed before Pass-2 HF scoring.")
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.35,
+                        help="GPU memory utilization for VLLM (default: 0.35, lower values leave more memory for HF scoring)")
+
     args = parser.parse_args()
-    args.top_p = (
-        1 if args.temperature == 0 else args.top_p
-    )  # top_p must be 1 when using greedy sampling (vllm)
-    
-    # For pass@k evaluation, n_sampling directly controls the k value
-    
+    args.top_p = (1 if args.temperature == 0 else args.top_p)  # top_p must be 1 when using greedy sampling (vllm)
     return args
 
 
@@ -84,7 +481,6 @@ def prepare_data(data_name, args):
 
     # sample `num_test_sample` from dataset
     if args.num_test_sample > 0:
-        # examples = random.sample(examples, min(args.num_test_sample, len(examples)))
         examples = examples[: args.num_test_sample]
 
     # shuffle
@@ -134,34 +530,87 @@ def prepare_data(data_name, args):
                 list(load_jsonl(f"{output_dir}/{data_name}/{f}"))
             )
 
-    # dedepulicate
+    # deduplicate
     processed_samples = {sample["idx"]: sample for sample in processed_samples}
     processed_idxs = list(processed_samples.keys())
     processed_samples = list(processed_samples.values())
     examples = [example for example in examples if example["idx"] not in processed_idxs]
     return examples, processed_samples, out_file
 
+def load_recorder_sidecar(output_dir, dataset, run_id, request_id):
+    """Return dict or None."""
+    req_dir = os.path.join(output_dir, dataset, run_id, "requests")
+    path = os.path.join(req_dir, f"{request_id}.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Warning: failed to read recorder sidecar {path}: {e}")
+        return None
+
+
 
 def setup(args):
     # load model
     available_gpus = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")
-    ##available_gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
     if args.use_together_api:
         # Defer model loading; Together API uses HTTP
         llm = "together_api"
         tokenizer = None
+
     elif args.use_vllm:
-        llm = LLM(
-            model=args.model_name_or_path,
-            tensor_parallel_size=len(available_gpus) // args.pipeline_parallel_size,
-            pipeline_parallel_size=args.pipeline_parallel_size,
-            trust_remote_code=True,
-        )
-        tokenizer = None
-        if args.apply_chat_template:
-            tokenizer = AutoTokenizer.from_pretrained(
-                args.model_name_or_path, trust_remote_code=True
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+
+        if getattr(args, "pass1_subprocess", False):
+            # Do NOT load vLLM in the parent; child will load & exit (freeing VRAM)
+            llm = "vllm_subprocess"
+        else:
+            # In-process vLLM (original behavior)
+            llm = LLM(
+                model=args.model_name_or_path,
+                tensor_parallel_size=len(available_gpus) // args.pipeline_parallel_size,
+                pipeline_parallel_size=args.pipeline_parallel_size,
+                trust_remote_code=True,
+                gpu_memory_utilization=args.vllm_gpu_memory_utilization,  # Configurable memory utilization
             )
+
+        # Load an HF scorer if probability tracking is enabled
+        hf_scorer = None
+        if args.enable_prob_tracking:
+            try:
+                # Check available GPU memory before loading
+                if torch.cuda.is_available():
+                    free_bytes, total_bytes = torch.cuda.mem_get_info()
+                    free_gb = round(free_bytes / (1024**3), 2)
+                    print(f"Available GPU memory before HF scorer loading: {free_gb}GB")
+                    
+                    # Only try GPU if we have at least 4GB free
+                    if free_gb >= 4.0:
+                        device_map = {"": 0}
+                        print("Loading HF scorer on GPU...")
+                        hf_scorer = AutoModelForCausalLM.from_pretrained(
+                            args.model_name_or_path,
+                            torch_dtype=torch.bfloat16,
+                            device_map=device_map,
+                            trust_remote_code=True,
+                        ).eval()
+                    else:
+                        print(f"Insufficient GPU memory ({free_gb}GB), loading HF scorer on CPU...")
+                        raise RuntimeError("Insufficient GPU memory")
+                else:
+                    raise RuntimeError("CUDA not available")
+            except Exception as e:
+                print(f"WARNING: failed to load HF scorer on CUDA; falling back to CPU. Error: {e}")
+                hf_scorer = AutoModelForCausalLM.from_pretrained(
+                    args.model_name_or_path,
+                    torch_dtype=torch.float32,
+                    device_map={"": "cpu"},
+                    trust_remote_code=True,
+                ).eval()
+        args._hf_scorer = hf_scorer
+
     else:
         llm, tokenizer = load_hf_lm_and_tokenizer(
             model_name_or_path=args.model_name_or_path,
@@ -169,6 +618,7 @@ def setup(args):
             use_fast_tokenizer=True,
             use_safetensors=args.use_safetensors,
         )
+        args._hf_scorer = None
 
     # infer & eval
     data_list = args.data_names.split(",")
@@ -199,10 +649,18 @@ def is_multi_choice(answer):
 
 def main(llm, tokenizer, data_name, args):
     examples, processed_samples, out_file = prepare_data(data_name, args)
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    sidecar_base = os.path.join(args.output_dir, data_name, run_id, "requests")
+    os.makedirs(sidecar_base, exist_ok=True)
+    if getattr(args, "job_id", None):
+        run_id += f"_{args.job_id}"
     print("=" * 50)
     print("data:", data_name, " ,remain samples:", len(examples))
     if len(examples) > 0:
         print(examples[0])
+
+    # A unique run id to avoid overwrites and to key the path-vectors file
+    path_vectors_npz = os.path.join(args.output_dir, data_name, f"pathvec_{run_id}.npz")
 
     # init python executor
     if "pal" in args.prompt_type:
@@ -233,6 +691,9 @@ def main(llm, tokenizer, data_name, args):
             "gt_cot": gt_cot,
             "gt": gt_ans,
             "prompt": full_prompt,
+            # Path vectors metadata goes in every sample
+            "path_vectors_enabled": bool(args.enable_path_vectors),
+            "path_vectors_file": None,  # filled in at end if enabled
         }
 
         # add remain fields
@@ -292,15 +753,11 @@ def main(llm, tokenizer, data_name, args):
     elif "pure" in args.prompt_type:
         stop_words.append("\n\n\n")
 
-    # Prepare containers for optional probability tracking
-    all_probability_logs = [{} for _ in range(len(remain_prompts))]
-    all_exact_matches = [{} for _ in range(len(remain_prompts))]
-    all_chosen_token_probs = [{} for _ in range(len(remain_prompts))]
-    all_entropies = [{} for _ in range(len(remain_prompts))]
-
     # start inference
     # measure time use
     start_time = time.time()
+    vllm_outputs = []  # Store vLLM outputs for HF scoring later
+    epoch_request_maps = []
     for epoch in range(max_func_call):
         print("-" * 20, "Epoch", epoch)
         print(f"MONITOR_EPOCH: {json.dumps({'epoch': epoch, 'total_epochs': max_func_call, 'remaining_prompts': len(remain_prompts)})}")
@@ -330,106 +787,82 @@ def main(llm, tokenizer, data_name, args):
                 )
                 choice = completion.choices[0]
                 outputs.append(choice.message.content or "")
-                # If logprobs requested, convert and attach probability log similar to local models
-                if args.together_logprobs and args.together_logprobs > 0:
-                    # Prefer generated token probabilities if available; otherwise, use max of top_logprobs
-                    try:
-                        probs_seq = []
-                        if hasattr(choice, "logprobs") and choice.logprobs:
-                            lp = choice.logprobs
-                            # tokens/logprobs may be attributes or dict keys depending on SDK version
-                            token_logprobs = getattr(lp, "token_logprobs", None)
-                            if token_logprobs is None and isinstance(lp, dict):
-                                token_logprobs = lp.get("token_logprobs")
-                            if token_logprobs:
-                                probs_seq = [exp(v) if isinstance(v, (int, float)) else None for v in token_logprobs]
-                            else:
-                                top_logprobs = getattr(lp, "top_logprobs", None)
-                                if top_logprobs is None and isinstance(lp, dict):
-                                    top_logprobs = lp.get("top_logprobs")
-                                if top_logprobs:
-                                    for step_probs in top_logprobs:
-                                        if isinstance(step_probs, dict) and step_probs:
-                                            max_logprob = max(step_probs.values())
-                                            probs_seq.append(exp(max_logprob))
-                                        else:
-                                            probs_seq.append(None)
-                            original_idx = current_prompts[i][0]
-                            all_probability_logs[original_idx][f"epoch_{epoch}"] = [p for p in probs_seq if isinstance(p, (int, float))]
-                            all_exact_matches[original_idx][f"epoch_{epoch}"] = []
-                            # Together API doesn't support chosen token probs and entropy tracking
-                            all_chosen_token_probs[original_idx][f"epoch_{epoch}"] = []
-                            all_entropies[original_idx][f"epoch_{epoch}"] = []
-                    except Exception:
-                        pass
+        
         elif args.use_vllm:
-            # If prob tracking is enabled, we need tokenizer for target ids
-            if args.enable_prob_tracking and tokenizer is None:
-                tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+            # ----- vLLM path -----
+            if isinstance(llm, str) and llm == "vllm_subprocess":
+                # Pass-1 in child (EngineCore exits → frees VRAM)
+                sampling_cfg = dict(
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    top_k=args.top_k,
+                    max_tokens=args.max_tokens_per_call,
+                    stop=stop_words,
+                    stop_token_ids=([151645, 151643] if "qwen2" in args.model_name_or_path.lower() else None),
+                )
+                child_records = run_pass1_in_subprocess(args.model_name_or_path, prompts, sampling_cfg, args.vllm_gpu_memory_utilization)
 
-            if args.enable_prob_tracking:
-                outputs = []
-                # Process one prompt at a time to keep recorder state clean
-                for i, prompt_text in enumerate(prompts):
-                    original_idx = current_prompts[i][0]
-                    # Gold answer for this prompt comes from constructed samples below
-                    # It was stored as example['gt'] when building samples; replicate using index mapping
-                    # We attached ground-truths in samples in the same order as input_prompts expansion
-                    # For UI evaluator we have example gt in samples list aligned with input order
-                    # Derive which sample this prompt belongs to
-                    sample_index = original_idx // args.n_sampling
-                    gold_answer = samples[sample_index]["gt"]
+                # Re-wrap into minimal objects that mimic vLLM outputs you use later
+                class _MiniOut:
+                    __slots__ = ("prompt", "prompt_token_ids", "outputs", "request_id")
+                    def __init__(self, rec, rid):
+                        self.prompt = rec["prompt"]
+                        self.prompt_token_ids = rec["prompt_token_ids"]
+                        self.outputs = [type("O", (), {"text": rec["generated_text"], "token_ids": rec["generated_token_ids"]})()]
+                        self.request_id = rid
 
-                    gold_token_ids = tokenizer.encode(str(gold_answer), add_special_tokens=False)
-                    if not gold_token_ids:
-                        gold_token_ids = []
+                current_vllm_outputs = []
+                for ridx, rec in enumerate(child_records):
+                    current_vllm_outputs.append(_MiniOut(rec, ridx))
 
-                    recorder = ProbabilityRecorder(gold_token_ids, tokenizer)
+                outputs = [rec["generated_text"] for rec in child_records]
 
-                    vllm_output = llm.generate(
-                        [prompt_text],
-                        SamplingParams(
-                            temperature=args.temperature,
-                            top_p=args.top_p,
-                            top_k=args.top_k,
-                            max_tokens=args.max_tokens_per_call,
-                            n=1,
-                            stop=stop_words,
-                            stop_token_ids=(
-                                [151645, 151643]
-                                if "qwen2" in args.model_name_or_path.lower()
-                                else None
-                            ),
-                            logits_processors=[recorder],
-                        ),
-                    )
-                    outputs.append(vllm_output[0].outputs[0].text)
-                    # Store per-epoch
-                    all_probability_logs[original_idx][f"epoch_{epoch}"] = recorder.probs
-                    all_exact_matches[original_idx][f"epoch_{epoch}"] = recorder.successful_matches
-                    all_chosen_token_probs[original_idx][f"epoch_{epoch}"] = recorder.chosen_token_probs
-                    all_entropies[original_idx][f"epoch_{epoch}"] = recorder.entropies
+                # Map (synthesized) request_ids to (sample_idx, draw_idx, epoch)
+                request_map = {}
+                for prompt_idx, out in enumerate(current_vllm_outputs):
+                    original_idx = current_prompts[prompt_idx][0]
+                    sample_idx = original_idx // args.n_sampling
+                    draw_idx = original_idx % args.n_sampling
+                    request_map[str(out.request_id)] = (sample_idx, draw_idx, epoch)
+
+                if epoch == 0:
+                    vllm_outputs.extend(current_vllm_outputs)
+                epoch_request_maps.append(request_map)
+
             else:
-                outputs = llm.generate(
-                    prompts,
-                    SamplingParams(
+                # In-process vLLM (original)
+                sampling_params_list = []
+                num_reqs = len(prompts)
+                request_map = {}
+
+                for prompt_idx in range(num_reqs):
+                    sp = SamplingParams(
                         temperature=args.temperature,
                         top_p=args.top_p,
                         top_k=args.top_k,
                         max_tokens=args.max_tokens_per_call,
                         n=1,
                         stop=stop_words,
-                        stop_token_ids=(
-                            [151645, 151643]
-                            if "qwen2" in args.model_name_or_path.lower()
-                            else None
-                        ),
-                    ),
-                )
+                        stop_token_ids=([151645, 151643] if "qwen2" in args.model_name_or_path.lower() else None),
+                    )
+                    sampling_params_list.append(sp)
 
-                outputs = sorted(outputs, key=lambda x: int(x.request_id))
-                outputs = [output.outputs[0].text for output in outputs]
+                current_vllm_outputs = llm.generate(prompts, sampling_params_list)
+
+                for prompt_idx, out in enumerate(current_vllm_outputs):
+                    original_idx = current_prompts[prompt_idx][0]
+                    sample_idx = original_idx // args.n_sampling
+                    draw_idx = original_idx % args.n_sampling
+                    request_map[str(out.request_id)] = (sample_idx, draw_idx, epoch)
+
+                if epoch == 0:
+                    vllm_outputs.extend(current_vllm_outputs)
+                epoch_request_maps.append(request_map)
+
+                outputs = [out.outputs[0].text for out in current_vllm_outputs]
+
         else:
+            # Plain HF generation (not vLLM)
             outputs = generate_completions(
                 model=llm,
                 tokenizer=tokenizer,
@@ -553,6 +986,50 @@ def main(llm, tokenizer, data_name, args):
         ]
     time_use = time.time() - start_time
 
+    # === MEMORY CLEANUP: Clear GPU cache before HF scoring ===
+    if args.use_vllm:
+        print("Clearing GPU cache before HF scoring...")
+        try:
+            torch.cuda.empty_cache()
+            # Force garbage collection
+            import gc
+            gc.collect()
+            # Check available memory
+            if torch.cuda.is_available():
+                free_bytes, total_bytes = torch.cuda.mem_get_info()
+                free_gb = round(free_bytes / (1024**3), 2)
+                total_gb = round(total_bytes / (1024**3), 2)
+                print(f"GPU memory after cleanup: {free_gb}GB free / {total_gb}GB total")
+        except Exception as e:
+            print(f"Warning: GPU cache cleanup failed: {e}")
+
+    # === PASS 2: HF scoring (microbatched & OOM-safe) ===
+    hf_results_per_output = None
+    if args.enable_prob_tracking and args.use_vllm:
+        hf_model = getattr(args, "_hf_scorer", None)
+        if hf_model is None:
+            print("WARNING: enable_prob_tracking requested but HF scorer unavailable; skipping prob tracking.")
+        else:
+            # Tune this up/down based on GPU VRAM. Safe defaults:
+            SCORING_MAX_TOKENS = 2048     # e.g., 2k (try 4096/8192 if you have headroom)
+            MAX_LEN_PER_BATCH  = 1024     # cap long outliers (optional)
+            print("Starting HF scoring with max tokens:", SCORING_MAX_TOKENS)
+            hf_results_per_output, wrote_npz = run_hf_scoring_streaming(
+                hf_model=hf_model,
+                vllm_outputs=vllm_outputs,
+                samples=samples,                 # each has "gt"
+                tokenizer=tokenizer,
+                n_sampling=args.n_sampling,
+                enable_path_vectors=bool(args.enable_path_vectors),
+                path_vectors_npz=path_vectors_npz,
+                max_tokens_per_batch=SCORING_MAX_TOKENS,
+                max_len_per_batch=MAX_LEN_PER_BATCH,
+                show_progress=True,
+                progress_label=f"Pass2 Scoring [{data_name}]",
+                log_monitor_json=True,
+                vram_guard_gb=2.0,            # CPU-fallback a batch when free VRAM < 2 GB
+            )
+
     # put results back to examples
     all_samples = []
     for i, sample in enumerate(samples):
@@ -599,13 +1076,22 @@ def main(llm, tokenizer, data_name, args):
         # Keep the prompt in the results for Excel export
         sample.update({"code": code, "pred": preds, "report": reports})
 
-        # Attach probability logs if available (first sample among n_sampling replicas)
-        sample_idx_for_logs = i * args.n_sampling
-        if any(all_probability_logs[sample_idx_for_logs].values()):
-            sample["probability_log"] = all_probability_logs[sample_idx_for_logs]
-            sample["exact_match_steps"] = all_exact_matches[sample_idx_for_logs]
-            sample["chosen_token_probs"] = all_chosen_token_probs[sample_idx_for_logs]
-            sample["entropies"] = all_entropies[sample_idx_for_logs]
+        # === Fill probability fields from HF results (epoch_0) ===
+        if args.enable_prob_tracking and args.use_vllm and hf_results_per_output is not None:
+            output_index = i * args.n_sampling
+            if output_index < len(hf_results_per_output) and hf_results_per_output[output_index] is not None:
+                m = hf_results_per_output[output_index]
+                sample["probability_log"] = {"epoch_0": m["correct_probs"]}
+                sample["chosen_token_probs"] = {"epoch_0": m["chosen_probs"]}
+                sample["entropies"] = {"epoch_0": m["entropies"]}
+                sample["exact_match_steps"] = {"epoch_0": m["exact_matches"]}
+                sample["path_vectors"] = {
+                    "enabled": bool(args.enable_path_vectors),
+                    "file": (path_vectors_npz if bool(args.enable_path_vectors) else None),
+                    "run_id": run_id,
+                }
+            else:
+                print(f"Warning: HF results missing for output index {output_index}")
         all_samples.append(sample)
 
     # add processed samples
@@ -619,6 +1105,33 @@ def main(llm, tokenizer, data_name, args):
         k=args.n_sampling,  # Use n_sampling as k
     )
 
+    # After evaluation, if path vectors were enabled, ensure every sample points to the run's .npz file
+    if args.enable_path_vectors and args.use_vllm:
+        for s in all_samples:
+            s["path_vectors_file"] = path_vectors_npz
+
+    # Optionally run truncation analysis on in-memory results
+    if getattr(args, 'run_truncation_analysis_after_eval', False):
+        try:
+            print("\n--- Main evaluation finished. Starting truncation analysis... ---")
+            # Ensure tokenizer for vLLM path
+            local_tokenizer = tokenizer
+            if args.use_vllm and local_tokenizer is None:
+                from transformers import AutoTokenizer as _AT
+                local_tokenizer = _AT.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+
+            analysis_out_dir = os.path.join(args.output_dir, data_name)
+            run_truncation_analysis_over_samples(
+                samples=all_samples,
+                llm=llm if not (isinstance(llm, str) and llm == "vllm_subprocess") else None,
+                tokenizer=local_tokenizer,
+                dataset_name=data_name,
+                output_dir=analysis_out_dir,
+                model_name_or_path=args.model_name_or_path,
+            )
+        except Exception as _e:
+            print(f"Truncation analysis failed: {_e}")
+
     # save outputs
     if len(processed_samples) < len(all_samples) and args.save_outputs:
         save_jsonl(all_samples, out_file)
@@ -630,12 +1143,31 @@ def main(llm, tokenizer, data_name, args):
             )
             prob_records = []
             for rec in all_samples:
+                # Convert numpy arrays to lists for JSON serialization in prob file too
+                model_path_vectors = {}
+                raw_model_vectors = rec.get("model_path_vectors", {})
+                for epoch, vectors in raw_model_vectors.items():
+                    if vectors:
+                        model_path_vectors[epoch] = [v.tolist() if hasattr(v, 'tolist') else v for v in vectors]
+                    else:
+                        model_path_vectors[epoch] = vectors
+                
+                gold_path_vectors = {}
+                raw_gold_vectors = rec.get("gold_path_vectors", {})
+                for epoch, vectors in raw_gold_vectors.items():
+                    if vectors:
+                        gold_path_vectors[epoch] = [v.tolist() if hasattr(v, 'tolist') else v for v in vectors]
+                    else:
+                        gold_path_vectors[epoch] = vectors
+                
                 entry = {
                     "idx": rec.get("idx"),
                     "probability_log": rec.get("probability_log", {}),
                     "exact_match_steps": rec.get("exact_match_steps", {}),
                     "chosen_token_probs": rec.get("chosen_token_probs", {}),
                     "entropies": rec.get("entropies", {}),
+                    "model_path_vectors": model_path_vectors,
+                    "gold_path_vectors": gold_path_vectors,
                     "score": rec.get("score", []),
                 }
                 prob_records.append(entry)
@@ -662,6 +1194,7 @@ def main(llm, tokenizer, data_name, args):
         "max_tokens": args.max_tokens_per_call,
         "eval_method": args.eval_method,
         "k": args.n_sampling,  # k equals n_sampling
+        "run_id": run_id,
     }
     # Add Together API config if used
     if getattr(args, 'use_together_api', False):
@@ -678,12 +1211,8 @@ def main(llm, tokenizer, data_name, args):
     
     result_json["job_configuration"] = job_config
 
-    # Create metrics filename with job_id if provided
-    if hasattr(args, 'job_id') and args.job_id:
-        metrics_file = out_file.replace(".jsonl", f"_{args.prompt_type}_metrics.json")
-    else:
-        metrics_file = out_file.replace(".jsonl", f"_{args.prompt_type}_metrics.json")
-    
+    # Create metrics filename
+    metrics_file = out_file.replace(".jsonl", f"_{args.prompt_type}_metrics.json")
     with open(metrics_file, "w") as f:
         json.dump(result_json, f, indent=4)
     
