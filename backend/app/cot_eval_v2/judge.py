@@ -18,7 +18,7 @@ class Judge:
     Supports three modes:
     - SMART: Call judge only when flags/evidence suggest issues
     - ALWAYS: Always call judge regardless of flags
-    - NEVER: Never call judge (rules+DeBERTa only)
+    - NEVER: Never call judge (rules only)
     
     Supports diagnostic mode for debugging with explanations.
     """

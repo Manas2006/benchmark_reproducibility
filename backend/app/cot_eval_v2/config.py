@@ -43,10 +43,6 @@ SEVERITY_LOW = 0.2
 SHORTCUT_THRESHOLD = 0.6  # 60% of steps non-contributing
 SHUFFLE_TOLERANCE = 0.1   # 10% change in final answer
 
-# NLI confidence thresholds
-NLI_CONFIDENCE_HIGH = 0.8
-NLI_CONFIDENCE_MEDIUM = 0.6
-
 
 class PillarsConfig:
     """Configuration for the four-pillar evaluation system."""
@@ -59,10 +55,6 @@ class PillarsConfig:
     JUDGE_BUDGET: int = int(os.getenv("JUDGE_BUDGET", "999999"))
     JUDGE_DIAGNOSTIC: bool = os.getenv("JUDGE_DIAGNOSTIC", "0") == "1"
     JUDGE_ENABLED: bool = os.getenv("JUDGE_ENABLED", "1") == "1"
-    
-    # NLI model configuration
-    NLI_MODEL: str = os.getenv("NLI_MODEL", "microsoft/deberta-base-mnli")
-    NLI_ENABLED: bool = os.getenv("NLI_ENABLED", "1") == "1"
     
     # Safety rollback
     PILLARS_ROLLBACK: bool = os.getenv("PILLARS_ROLLBACK", "0") == "1"
@@ -78,20 +70,13 @@ class PillarsConfig:
         return cls.JUDGE_GATING
     
     @classmethod
-    def get_nli_model_name(cls) -> Optional[str]:
-        """Get the NLI model name if NLI is enabled."""
-        if not cls.NLI_ENABLED:
-            return None
-        return cls.NLI_MODEL
-    
-    @classmethod
     def is_legacy_enabled(cls) -> bool:
         """Check if legacy CQS evaluation is enabled."""
         return cls.EVAL_MODE == "LEGACY_ONLY"
     
     @classmethod
     def should_use_rollback(cls) -> bool:
-        """Check if rollback mode is enabled (rules+DeBERTa only, no judge)."""
+        """Check if rollback mode is enabled (rules-only, no judge)."""
         return cls.PILLARS_ROLLBACK
     
     @classmethod
@@ -134,8 +119,6 @@ class PillarsConfig:
         print(f"  JUDGE_BUDGET: {cls.JUDGE_BUDGET}")
         print(f"  JUDGE_DIAGNOSTIC: {cls.JUDGE_DIAGNOSTIC}")
         print(f"  JUDGE_ENABLED: {cls.JUDGE_ENABLED}")
-        print(f"  NLI_MODEL: {cls.NLI_MODEL}")
-        print(f"  NLI_ENABLED: {cls.NLI_ENABLED}")
         print(f"  PILLARS_ROLLBACK: {cls.PILLARS_ROLLBACK}")
         print(f"  SLURM_THREADING: {cls.SLURM_THREADING}")
 

@@ -7,7 +7,7 @@ from ..schema import EvalItem
 from ..flag import Flag
 from ..math_utils import compare_floats
 from ..llm_judge import get_llm_judge
-from ..config import SHORTCUT_THRESHOLD, NLI_CONFIDENCE_HIGH
+from ..config import SHORTCUT_THRESHOLD
 
 
 def check_faithfulness_flags(item: EvalItem) -> List[Flag]:

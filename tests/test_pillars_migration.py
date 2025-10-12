@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock
 
 # Set up test environment
 os.environ['JUDGE_GATING'] = 'NEVER'  # Disable judge for testing
-os.environ['NLI_ENABLED'] = '0'  # Disable NLI for testing
+# NLI has been removed from the system
 os.environ['EVAL_MODE'] = 'PILLARS_ONLY'
 
 
@@ -135,30 +135,6 @@ class TestConfiguration:
         }):
             config = PillarsConfig()
             assert config.get_judge_mode() == "NEVER"
-
-
-class TestNLIFactory:
-    """Test NLI factory functionality."""
-    
-    def test_device_resolution(self):
-        """Test device resolution logic."""
-        from backend.app.cot_eval_v2.checks.nli_factory import resolve_device, get_device_info
-        
-        # Test device info collection
-        info = get_device_info()
-        assert 'cuda_available' in info
-        assert 'slurm_job_gpus' in info
-        assert 'cuda_visible_devices' in info
-        assert 'current_device' in info
-    
-    @patch('backend.app.cot_eval_v2.checks.nli_factory.torch.cuda.is_available')
-    def test_cpu_fallback(self, mock_cuda_available):
-        """Test CPU fallback when CUDA is not available."""
-        from backend.app.cot_eval_v2.checks.nli_factory import resolve_device
-        
-        mock_cuda_available.return_value = False
-        device = resolve_device()
-        assert device == -1  # CPU fallback
 
 
 class TestJudgeValidation:

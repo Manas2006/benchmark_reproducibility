@@ -11,34 +11,13 @@ import time
 
 # Set up test environment
 os.environ['JUDGE_GATING'] = 'NEVER'  # Disable judge for smoke test
-os.environ['NLI_ENABLED'] = '0'       # Disable NLI for smoke test
+# NLI has been removed from the system
 os.environ['EVAL_MODE'] = 'PILLARS_ONLY'
 
 # Add backend to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'backend', 'app'))
 
 
-def test_nli_factory():
-    """Test NLI factory functionality."""
-    print("🧪 Testing NLI Factory...")
-    
-    try:
-        from cot_eval_v2.checks.nli_factory import get_device_info, resolve_device
-        
-        # Test device info
-        info = get_device_info()
-        print(f"  Device info: {info}")
-        
-        # Test device resolution
-        device = resolve_device()
-        print(f"  Resolved device: {device}")
-        
-        print("✅ NLI Factory test passed")
-        return True
-        
-    except Exception as e:
-        print(f"❌ NLI Factory test failed: {e}")
-        return False
 
 
 def test_configuration():
@@ -256,7 +235,6 @@ def main():
     
     tests = [
         test_configuration,
-        test_nli_factory,
         test_judge_validation,
         test_score_fusion,
         test_schema_validation,

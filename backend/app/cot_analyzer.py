@@ -80,7 +80,7 @@ class CoTAnalyzer:
     def analyze_answer_comprehensive(self, question: str, answer: str, ground_truth: str = None) -> Dict[str, Any]:
         """
         Analyze a single Chain-of-Thought answer using comprehensive evaluation framework
-        (Rule-based + DeBERTa NLI + GPT Judge)
+        (Rule-based + GPT Judge)
         
         Args:
             question: The problem/question text
@@ -101,9 +101,8 @@ class CoTAnalyzer:
             from cot_eval_v2.evaluator import PillarsEvaluator
             from cot_eval_v2.judge import Judge
             
-            # Initialize evaluator with NLI (DeBERTa) disabled for CPU compatibility
-            # Note: NLI works on GPU via SLURM, but has threading issues on CPU
-            evaluator = PillarsEvaluator(use_nli=False)
+            # Initialize evaluator
+            evaluator = PillarsEvaluator()
             
             # Initialize judge if OpenAI key is available
             if hasattr(self, 'openai_api_key') and self.openai_api_key:
@@ -113,8 +112,8 @@ class CoTAnalyzer:
                 evaluator.judge = judge
                 print(f"✅ Initialized real GPT judge for comprehensive analysis")
             else:
-                print(f"⚠️ No OpenAI API key available, using rules+DeBERTa only (no judge)")
-                # No judge - will use rules+DeBERTa only
+                print(f"⚠️ No OpenAI API key available, using rules only (no judge)")
+                # No judge - will use rules only
             
             # Run comprehensive analysis
             print(f"🔍 Running comprehensive CoT analysis...")

@@ -977,7 +977,7 @@ async def get_cot_analysis(job_id: str):
             judge = Judge(mode="ALWAYS")
         
         # Initialize evaluator
-        evaluator = PillarsEvaluator(judge=judge, use_nli=False)
+        evaluator = PillarsEvaluator(judge=judge)
         
         # Process each sample
         results = []

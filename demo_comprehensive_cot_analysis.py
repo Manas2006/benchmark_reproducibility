@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Demonstration of Comprehensive CoT Analysis Integration
-Shows the complete pipeline: Rule-based + DeBERTa NLI + GPT Judge
+Shows the complete pipeline: Rule-based + GPT Judge
 """
 
 import sys
@@ -20,7 +20,7 @@ def demo_comprehensive_analysis():
     print("=" * 80)
     print("This demo shows the complete evaluation framework:")
     print("• Rule-based analysis (arithmetic, coverage, etc.)")
-    print("• DeBERTa NLI analysis (coherence, factuality) - CPU compatible")
+    print("• Rule-based analysis (coherence, factuality)")
     print("• GPT-4o-mini judge (subjective scoring)")
     print("• Score fusion (combining all methods)")
     print("=" * 80)
@@ -175,7 +175,7 @@ Therefore, Josh made a profit of $70,000.""",
         
         print(f"\n🎉 DEMONSTRATION COMPLETE!")
         print("The comprehensive CoT analysis framework is working correctly.")
-        print("It combines rule-based analysis, DeBERTa NLI, and GPT judge scoring.")
+        print("It combines rule-based analysis and GPT judge scoring.")
         
         return True
         

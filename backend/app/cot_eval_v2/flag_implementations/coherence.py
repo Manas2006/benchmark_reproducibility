@@ -7,7 +7,6 @@ from ..schema import EvalItem
 from ..flag import Flag
 from ..nlp_utils import get_nlp_utils
 from ..llm_judge import get_llm_judge
-from ..config import NLI_CONFIDENCE_HIGH
 
 
 def check_coherence_flags(item: EvalItem) -> List[Flag]:

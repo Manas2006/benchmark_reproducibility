@@ -225,7 +225,7 @@ class TestPillarsEvaluator:
 2. Therefore, the total cost is $6
 #### 6"""
         
-        evaluator = PillarsEvaluator(nli_pipe=None, use_nli=False)
+        evaluator = PillarsEvaluator()
         flags, evidence, rule_scores, judge_scores, fused_scores = evaluator.analyze(problem, cot_text, "6")
         
         assert evidence["final_correct"] == True
@@ -241,7 +241,7 @@ class TestPillarsEvaluator:
 3. Therefore, the answer is 7
 #### 7"""
         
-        evaluator = PillarsEvaluator(nli_pipe=None, use_nli=False)
+        evaluator = PillarsEvaluator()
         flags, evidence, rule_scores, judge_scores, fused_scores = evaluator.analyze(problem, cot_text, "7")
         
         assert evidence["final_correct"] == True
@@ -259,7 +259,7 @@ class TestPillarsEvaluator:
 2. The total is 6
 #### 6"""
         
-        evaluator = PillarsEvaluator(nli_pipe=None, use_nli=False)
+        evaluator = PillarsEvaluator()
         flags, evidence, rule_scores, judge_scores, fused_scores = evaluator.analyze(problem, cot_text, "6")
         
         # Should have utility flags for unused numbers
@@ -272,7 +272,7 @@ class TestPillarsEvaluator:
         problem = "What is 2 + 2?"
         cot_text = ""
         
-        evaluator = PillarsEvaluator(nli_pipe=None, use_nli=False)
+        evaluator = PillarsEvaluator()
         flags, evidence, rule_scores, judge_scores, fused_scores = evaluator.analyze(problem, cot_text, "4")
         
         assert evidence["final_correct"] == False

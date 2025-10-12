@@ -329,7 +329,7 @@ class TestPillarsEvaluatorIntegration:
     
     def test_evaluator_without_judge(self):
         """Test evaluator works without judge (backward compatibility)."""
-        evaluator = PillarsEvaluator(nli_pipe=None, use_nli=False, judge=None)
+        evaluator = PillarsEvaluator(judge=None)
         
         problem = "What is 2 + 2?"
         cot = "Step 1. I calculate 2 + 2 = 4\n#### 4"
@@ -355,7 +355,7 @@ class TestPillarsEvaluatorIntegration:
     def test_evaluator_with_mock_judge(self):
         """Test evaluator with mock judge."""
         mock_judge = MockJudge(mode="ALWAYS")
-        evaluator = PillarsEvaluator(nli_pipe=None, use_nli=False, judge=mock_judge)
+        evaluator = PillarsEvaluator(judge=mock_judge)
         
         problem = "What is 2 + 2?"
         cot = "Step 1. I calculate 2 + 2 = 4\n#### 4"
@@ -379,7 +379,7 @@ class TestPillarsEvaluatorIntegration:
     def test_evaluator_with_never_judge(self):
         """Test evaluator with NEVER mode judge."""
         mock_judge = MockJudge(mode="NEVER")
-        evaluator = PillarsEvaluator(nli_pipe=None, use_nli=False, judge=mock_judge)
+        evaluator = PillarsEvaluator(judge=mock_judge)
         
         problem = "What is 2 + 2?"
         cot = "Step 1. I calculate 2 + 2 = 4\n#### 4"
@@ -396,7 +396,7 @@ class TestPillarsEvaluatorIntegration:
     def test_evaluator_with_smart_judge(self):
         """Test evaluator with SMART mode judge."""
         mock_judge = MockJudge(mode="SMART")
-        evaluator = PillarsEvaluator(nli_pipe=None, use_nli=False, judge=mock_judge)
+        evaluator = PillarsEvaluator(judge=mock_judge)
         
         # Test case with no issues - should not call judge
         problem = "What is 2 + 2?"

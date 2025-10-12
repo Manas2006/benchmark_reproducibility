@@ -195,41 +195,19 @@ class PillarsEvaluator:
     
     def __init__(
         self, 
-        nli_pipe: Optional[Any] = None, 
         encoder: Optional[Any] = None, 
-        use_nli: bool = True, 
-        judge: Optional[Any] = None,
-        nli_model_name: Optional[str] = None
+        judge: Optional[Any] = None
     ):
         """
         Initialize the evaluator with optional external models.
         
         Args:
-            nli_pipe: Optional HuggingFace NLI pipeline (deprecated)
             encoder: Optional sentence encoder (deprecated)
-            use_nli: If True and nli_pipe is None, auto-load DeBERTa MNLI (deprecated)
             judge: Optional Judge instance for LLM-based evaluation
-            nli_model_name: Optional model name override (deprecated)
         """
-        # Store old parameters for compatibility but use new system
-        self.nli_pipe = nli_pipe
+        # Store parameters
         self.encoder = encoder
         self.judge = judge
-        self.use_nli = use_nli
-        
-        # Auto-load DeBERTa MNLI if requested and no pipe provided
-        if use_nli and self.nli_pipe is None:
-            try:
-                from .checks.nli_factory import create_nli_pipeline
-                
-                model_name = nli_model_name or "microsoft/deberta-base-mnli"
-                print(f"🔄 Auto-loading NLI model: {model_name}")
-                
-                self.nli_pipe = create_nli_pipeline(model_name)
-                print(f"✅ DeBERTa MNLI loaded successfully")
-            except Exception as e:
-                print(f"Failed to auto-load DeBERTa MNLI: {e}")
-                self.nli_pipe = None
     
     def analyze(self, problem: str, cot_text: str, gold: Optional[str] = None) -> Tuple[FlagCollector, Dict[str, Any], Dict[str, float], Dict[str, float], Dict[str, float]]:
         """
