@@ -19,16 +19,16 @@ cd ..
 sleep 3
 
 # Start frontend
-echo "🌐 Starting frontend server on http://localhost:3002..."
+echo "🌐 Starting frontend server on http://localhost:3000..."
 cd frontend
-python3 -m http.server 3002 &
+python3 -m http.server 3000 &
 FRONTEND_PID=$!
 cd ..
 
 echo ""
 echo "✅ Qwen Math Evaluation UI is running!"
 echo "   Backend:  http://localhost:8000"
-echo "   Frontend: http://localhost:3002"
+echo "   Frontend: http://localhost:3000"
 echo ""
 echo "Press Ctrl+C to stop both servers"
 

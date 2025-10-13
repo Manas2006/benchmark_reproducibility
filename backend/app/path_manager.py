@@ -27,7 +27,7 @@ class PathManager:
         python_path = sys.executable if 'sys' in globals() else "/usr/bin/python3"
         
         # Try to detect conda environment
-        conda_env = os.environ.get('CONDA_PREFIX', '/work/10757/cc123456/ls6/miniconda3/envs/mathevalUI')
+        conda_env = os.environ.get('CONDA_PREFIX', '/work/10757/manasp123/ls6/miniconda3')
         
         # Default output directories - Fix path construction issues
         output_dir = str(Path(workspace_dir) / "evaluation" / "outputs")

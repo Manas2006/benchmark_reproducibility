@@ -61,6 +61,10 @@
                             class="tab-btn px-4 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
                             Truncation Analysis
                         </button>
+                        <button onclick="showTab('heatmap')"
+                            class="tab-btn px-4 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
+                            Heatmap Visualization
+                        </button>
                         <button onclick="showTab('settings')"
                             class="tab-btn px-4 py-2 rounded-md text-sm font-medium text-gray-500 hover:text-gray-700">
                             Settings
@@ -436,6 +440,108 @@
                     <div id="truncation-error" class="hidden bg-red-50 border border-red-200 rounded-lg p-4">
                         <h3 class="text-red-800 font-semibold">Analysis Error</h3>
                         <p id="truncation-error-message" class="text-red-600 mt-1"></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Heatmap Visualization Tab -->
+            <div id="heatmap" class="tab-content">
+                <div class="bg-white shadow rounded-lg p-6">
+                    <h2 class="text-xl font-semibold mb-4">Token Probability Heatmaps</h2>
+                    <p class="text-sm text-gray-600 mb-6">
+                        Visualize token-level probabilities for chosen vs correct tokens with color intensity (white = low, red = high).
+                    </p>
+
+                    <!-- Job Selection -->
+                    <div class="mb-6">
+                        <label for="heatmap-job-select" class="block text-sm font-medium text-gray-700 mb-2">
+                            Select Job with Probability Tracking
+                        </label>
+                        <select id="heatmap-job-select"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            onchange="loadHeatmapQuestions()">
+                            <option value="">Select a completed job...</option>
+                        </select>
+                    </div>
+
+                    <!-- Question Selection -->
+                    <div class="mb-6">
+                        <label for="heatmap-question-select" class="block text-sm font-medium text-gray-700 mb-2">
+                            Select Question
+                        </label>
+                        <select id="heatmap-question-select"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            onchange="loadHeatmapData()" disabled>
+                            <option value="">Select a question...</option>
+                        </select>
+                    </div>
+
+                    <!-- Load Button -->
+                    <div class="mb-6">
+                        <button onclick="loadHeatmapJobs()"
+                            class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                            Refresh Jobs
+                        </button>
+                    </div>
+
+                    <!-- Question Display -->
+                    <div id="heatmap-question-display" class="hidden mb-6 bg-gray-50 border border-gray-200 rounded-lg p-4">
+                        <h3 class="text-lg font-semibold text-gray-900 mb-2">Question</h3>
+                        <p id="heatmap-question-text" class="text-sm text-gray-700"></p>
+                    </div>
+
+                    <!-- Heatmaps Display -->
+                    <div id="heatmap-display" class="hidden">
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <!-- Chosen Token Probabilities -->
+                            <div class="bg-white border border-gray-200 rounded-lg p-4">
+                                <h3 class="text-lg font-semibold text-gray-900 mb-3">Chosen Token Probabilities</h3>
+                                <p class="text-xs text-gray-500 mb-3">Color intensity shows model's confidence in tokens it actually chose</p>
+                                <div id="heatmap-chosen" class="text-sm leading-relaxed" style="line-height: 2.5;">
+                                    <!-- Tokens will be rendered here -->
+                                </div>
+                            </div>
+
+                            <!-- Correct Token Probabilities -->
+                            <div class="bg-white border border-gray-200 rounded-lg p-4">
+                                <h3 class="text-lg font-semibold text-gray-900 mb-3">Correct Token Probabilities</h3>
+                                <p class="text-xs text-gray-500 mb-3">Color intensity shows probability of correct answer token (log-scaled)</p>
+                                <div id="heatmap-correct" class="text-sm leading-relaxed" style="line-height: 2.5;">
+                                    <!-- Tokens will be rendered here -->
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Legend -->
+                        <div class="mt-6 bg-gray-50 border border-gray-200 rounded-lg p-4">
+                            <h4 class="text-sm font-semibold text-gray-900 mb-2">Color Legend</h4>
+                            <div class="flex items-center space-x-4">
+                                <div class="flex items-center">
+                                    <div class="w-16 h-6 rounded" style="background: white; border: 1px solid #ccc;"></div>
+                                    <span class="ml-2 text-xs text-gray-600">Low (0%)</span>
+                                </div>
+                                <div class="flex items-center">
+                                    <div class="w-16 h-6 rounded" style="background: rgb(255, 128, 128);"></div>
+                                    <span class="ml-2 text-xs text-gray-600">Medium (50%)</span>
+                                </div>
+                                <div class="flex items-center">
+                                    <div class="w-16 h-6 rounded" style="background: rgb(255, 0, 0);"></div>
+                                    <span class="ml-2 text-xs text-gray-600">High (100%)</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Loading State -->
+                    <div id="heatmap-loading" class="hidden text-center py-8">
+                        <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                        <p class="mt-2 text-gray-600">Loading heatmap data...</p>
+                    </div>
+
+                    <!-- Error State -->
+                    <div id="heatmap-error" class="hidden bg-red-50 border border-red-200 rounded-lg p-4">
+                        <h3 class="text-red-800 font-semibold">Error</h3>
+                        <p id="heatmap-error-message" class="text-red-600 mt-1"></p>
                     </div>
                 </div>
             </div>

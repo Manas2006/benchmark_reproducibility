@@ -13,7 +13,7 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 
-from prob_recorder import ProbabilityRecorder
+from prob_recorder import BatchProbabilityRecorder
 
 
 def _safe_first(item):

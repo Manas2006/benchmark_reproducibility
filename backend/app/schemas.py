@@ -268,4 +268,22 @@ class TruncationAnalysisResponse(BaseModel):
     raw_curves_path: Optional[str] = Field(description="Path to raw curves JSON file")
     correct_plot_path: Optional[str] = Field(description="Path to correct samples plot")
     incorrect_plot_path: Optional[str] = Field(description="Path to incorrect samples plot")
-    computation_time: Optional[float] = Field(description="Time taken for analysis in seconds") 
+    computation_time: Optional[float] = Field(description="Time taken for analysis in seconds")
+
+class QuestionPreview(BaseModel):
+    """Preview of a question for selection"""
+    idx: int = Field(description="Question index")
+    preview: str = Field(description="First ~100 characters of the question")
+    has_prob_data: bool = Field(description="Whether probability data is available for this question")
+
+class HeatmapDataResponse(BaseModel):
+    """Token-level probability data for heatmap visualization"""
+    job_id: str = Field(description="Job identifier")
+    question_idx: int = Field(description="Question index")
+    question_text: str = Field(description="Full question text")
+    model_output: str = Field(description="Full model output/answer")
+    output_tokens: List[str] = Field(description="List of decoded output tokens")
+    chosen_probs: List[float] = Field(description="Probability of each chosen token (0-1)")
+    correct_probs: List[float] = Field(description="Probability of correct answer token at each step (log-scaled for visualization)")
+    chosen_token_ids: List[int] = Field(description="Token IDs that were chosen by model")
+    correct_token_ids: List[int] = Field(description="Token IDs of correct answer tokens") 

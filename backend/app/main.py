@@ -2,6 +2,7 @@ from fastapi import FastAPI, BackgroundTasks, WebSocket, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from typing import List
 import json
 import asyncio
 import os
@@ -9,7 +10,7 @@ import time
 from pathlib import Path
 import pandas as pd
 
-from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse, CoTAnalysisResponseV2, OpenAITestRequest, OpenAITestResponse
+from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse, CoTAnalysisResponseV2, OpenAITestRequest, OpenAITestResponse, QuestionPreview, HeatmapDataResponse
 from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data
 from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse, TruncationAnalysisRequest, TruncationAnalysisResponse
 from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data, save_job_db
@@ -545,6 +546,161 @@ async def list_jobs():
     except Exception as e:
         print(f"Error in /jobs: {e}")
         return {"jobs": [], "error": str(e)}
+
+@app.get("/jobs/{job_id}/questions", response_model=List[QuestionPreview])
+async def get_job_questions(job_id: str):
+    """Get list of questions/samples for a job"""
+    if job_id not in job_db:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_info = job_db[job_id]
+    result_file = job_info.get("result_file")
+    prob_file = job_info.get("prob_file")
+    
+    if not result_file or not Path(result_file).exists():
+        raise HTTPException(status_code=404, detail="Result file not found")
+    
+    try:
+        questions = []
+        with open(result_file, 'r') as f:
+            for line in f:
+                if line.strip():
+                    sample = json.loads(line)
+                    idx = sample.get("idx", 0)
+                    question = sample.get("question", sample.get("problem", ""))
+                    preview = question[:100] + "..." if len(question) > 100 else question
+                    has_prob_data = prob_file is not None and Path(prob_file).exists()
+                    questions.append(QuestionPreview(
+                        idx=idx,
+                        preview=preview,
+                        has_prob_data=has_prob_data
+                    ))
+        return questions
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading questions: {str(e)}")
+
+@app.get("/jobs/{job_id}/heatmap-data/{question_idx}", response_model=HeatmapDataResponse)
+async def get_heatmap_data(job_id: str, question_idx: int):
+    """Get token-level probability data for heatmap visualization"""
+    if job_id not in job_db:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_info = job_db[job_id]
+    result_file = job_info.get("result_file")
+    prob_file = job_info.get("prob_file")
+    
+    if not result_file or not Path(result_file).exists():
+        raise HTTPException(status_code=404, detail="Result file not found")
+    
+    if not prob_file or not Path(prob_file).exists():
+        raise HTTPException(status_code=404, detail="Probability data not available for this job")
+    
+    try:
+        # Load the specific sample from result file
+        sample = None
+        with open(result_file, 'r') as f:
+            for line in f:
+                if line.strip():
+                    s = json.loads(line)
+                    if s.get("idx") == question_idx:
+                        sample = s
+                        break
+        
+        if sample is None:
+            raise HTTPException(status_code=404, detail=f"Question {question_idx} not found")
+        
+        # Load probability data
+        prob_data = None
+        with open(prob_file, 'r') as f:
+            for line in f:
+                if line.strip():
+                    p = json.loads(line)
+                    if p.get("idx") == question_idx:
+                        prob_data = p
+                        break
+        
+        if prob_data is None:
+            raise HTTPException(status_code=404, detail=f"Probability data for question {question_idx} not found")
+        
+        # Extract data
+        question_text = sample.get("question", sample.get("problem", ""))
+        
+        # Get the full model output (reasoning + answer)
+        # Try different fields in order of preference
+        model_output_raw = None
+        for field in ["code", "pred", "output", "model_output"]:
+            if field in sample and sample[field]:
+                model_output_raw = sample[field]
+                break
+        
+        if model_output_raw is None:
+            model_output = ""
+        elif isinstance(model_output_raw, list):
+            # Join list elements with newlines for better readability
+            model_output = "\n".join(str(x) for x in model_output_raw)
+        else:
+            model_output = str(model_output_raw)
+        
+        # Get probability arrays
+        chosen_probs_dict = prob_data.get("chosen_token_probs", {})
+        correct_probs_dict = prob_data.get("probability_log", {})
+        
+        # Get epoch_0 data (main generation pass)
+        chosen_probs = chosen_probs_dict.get("epoch_0", [])
+        correct_probs_raw = correct_probs_dict.get("epoch_0", [])
+        
+        # The correct_probs_raw are the actual probabilities of correct tokens
+        # But they're very small, so we need to scale them for visualization
+        if correct_probs_raw:
+            # Use log scaling to make small probabilities more visible
+            import math
+            # Add small epsilon to avoid log(0)
+            epsilon = 1e-15
+            correct_probs = [math.log(max(p, epsilon)) for p in correct_probs_raw]
+            # Normalize to 0-1 range
+            min_log = min(correct_probs)
+            max_log = max(correct_probs)
+            if max_log > min_log:
+                correct_probs = [(p - min_log) / (max_log - min_log) for p in correct_probs]
+            else:
+                correct_probs = [0.0] * len(correct_probs_raw)
+        else:
+            correct_probs = [0.0] * len(chosen_probs)
+        
+        # Use improved word-based tokenization that handles punctuation better
+        import re
+        
+        # Split on whitespace and punctuation, but keep punctuation as separate tokens
+        tokens = re.findall(r'\S+', model_output)
+        token_ids = list(range(len(tokens)))
+        
+        # Align arrays - truncate to shortest length
+        min_len = min(len(tokens), len(chosen_probs), len(correct_probs))
+        tokens = tokens[:min_len]
+        chosen_probs = chosen_probs[:min_len]
+        correct_probs = correct_probs[:min_len]
+        token_ids = token_ids[:min_len]
+        
+        # For correct token IDs, we need to get them from the ground truth
+        # For now, use the same token_ids (this could be improved)
+        correct_token_ids = token_ids  # Placeholder
+        
+        return HeatmapDataResponse(
+            job_id=job_id,
+            question_idx=question_idx,
+            question_text=question_text,
+            model_output=model_output,
+            output_tokens=tokens,
+            chosen_probs=chosen_probs,
+            correct_probs=correct_probs,
+            chosen_token_ids=token_ids,
+            correct_token_ids=correct_token_ids
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting heatmap data: {str(e)}")
 
 def export_results_to_excel(job_id: str):
     """Export evaluation results to Excel file"""
@@ -1389,7 +1545,7 @@ export MKL_NUM_THREADS=1
 
 # Activate conda environment
 source {config.conda_env_path}/etc/profile.d/conda.sh
-conda activate mathevalUI
+conda activate qwen-eval
 
 # Run the truncation analysis
 {' '.join(escaped_cli)}

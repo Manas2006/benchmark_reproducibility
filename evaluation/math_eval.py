@@ -29,7 +29,7 @@ from data_loader import load_data
 from python_executor import PythonExecutor
 from model_utils import load_hf_lm_and_tokenizer, generate_completions
 from prob_recorder import BatchProbabilityRecorder
-from run_truncation_analysis import run_truncation_analysis_over_samples
+from run_truncation_analysis_with_logs import run_truncation_analysis_over_samples_with_logs as run_truncation_analysis_over_samples
 
 # --- NEW: helpers for subprocess Pass-1
 import tempfile, subprocess
@@ -135,8 +135,8 @@ def _pack_microbatch(
 
     for row, m in enumerate(batch_meta):
         out = vllm_outputs[m["i_out"]]
-        p_ids = out.prompt_token_ids
-        g_ids = out.outputs[0].token_ids if out.outputs and out.outputs[0].token_ids else []
+        p_ids = list(out.prompt_token_ids)
+        g_ids = list(out.outputs[0].token_ids) if out.outputs and out.outputs[0].token_ids else []
         ids = p_ids + g_ids
         L = len(ids)
         if L > 0:
@@ -1091,8 +1091,39 @@ def main(llm, tokenizer, data_name, args):
         ]
     time_use = time.time() - start_time
 
-    # === MEMORY CLEANUP: Clear GPU cache before HF scoring ===
-    if args.use_vllm:
+    # === MEMORY CLEANUP: Delete vLLM and clear GPU cache before HF scoring ===
+    if args.use_vllm and args.enable_prob_tracking:
+        print("Freeing vLLM model from GPU memory before HF scoring...")
+        try:
+            # Delete vLLM engine to free GPU memory
+            if 'llm' in locals():
+                try:
+                    # Destroy vLLM engine components
+                    if hasattr(llm, 'llm_engine'):
+                        del llm.llm_engine
+                    del llm
+                    print("✓ vLLM model deleted")
+                except Exception as e:
+                    print(f"Warning: Error deleting vLLM model: {e}")
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            # Clear PyTorch CUDA cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            # Check available memory
+            if torch.cuda.is_available():
+                free_bytes, total_bytes = torch.cuda.mem_get_info()
+                free_gb = round(free_bytes / (1024**3), 2)
+                total_gb = round(total_bytes / (1024**3), 2)
+                print(f"GPU memory after vLLM cleanup: {free_gb}GB free / {total_gb}GB total")
+        except Exception as e:
+            print(f"Warning: GPU cleanup failed: {e}")
+    elif args.use_vllm:
         print("Clearing GPU cache before HF scoring...")
         try:
             torch.cuda.empty_cache()

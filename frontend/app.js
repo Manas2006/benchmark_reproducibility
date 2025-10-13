@@ -3268,3 +3268,188 @@ document.addEventListener('click', function(event) {
         }
     }
 });
+
+// ============================================================================
+// HEATMAP VISUALIZATION
+// ============================================================================
+
+// Load jobs that have probability tracking enabled
+async function loadHeatmapJobs() {
+    try {
+        const response = await fetch(`${API_BASE}/jobs`);
+        const data = await response.json();
+        
+        const jobSelect = document.getElementById('heatmap-job-select');
+        jobSelect.innerHTML = '<option value="">Select a completed job...</option>';
+        
+        // Filter for completed jobs with prob_file
+        const jobsWithProb = data.jobs.filter(job => 
+            job.status === 'DONE' && 
+            job.prob_file && 
+            job.prob_file !== null
+        );
+        
+        jobsWithProb.forEach(job => {
+            const option = document.createElement('option');
+            option.value = job.job_id;
+            const model = job.request?.model || 'Unknown';
+            const dataset = job.request?.dataset || 'Unknown';
+            option.textContent = `${job.job_id.substring(0, 8)} - ${model} - ${dataset}`;
+            jobSelect.appendChild(option);
+        });
+        
+        if (jobsWithProb.length === 0) {
+            showHeatmapError('No completed jobs with probability tracking found. Submit a job with "Enable Probability Tracking" checked.');
+        }
+    } catch (error) {
+        console.error('Error loading heatmap jobs:', error);
+        showHeatmapError('Failed to load jobs: ' + error.message);
+    }
+}
+
+// Load questions for selected job
+async function loadHeatmapQuestions() {
+    const jobId = document.getElementById('heatmap-job-select').value;
+    const questionSelect = document.getElementById('heatmap-question-select');
+    
+    if (!jobId) {
+        questionSelect.innerHTML = '<option value="">Select a question...</option>';
+        questionSelect.disabled = true;
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_BASE}/jobs/${jobId}/questions`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        }
+        
+        const questions = await response.json();
+        questionSelect.innerHTML = '<option value="">Select a question...</option>';
+        
+        questions.forEach(q => {
+            const option = document.createElement('option');
+            option.value = q.idx;
+            option.textContent = `Question ${q.idx}: ${q.preview}`;
+            if (!q.has_prob_data) {
+                option.textContent += ' (No prob data)';
+                option.disabled = true;
+            }
+            questionSelect.appendChild(option);
+        });
+        
+        questionSelect.disabled = false;
+        hideHeatmapError();
+    } catch (error) {
+        console.error('Error loading questions:', error);
+        showHeatmapError('Failed to load questions: ' + error.message);
+        questionSelect.disabled = true;
+    }
+}
+
+// Load and display heatmap data
+async function loadHeatmapData() {
+    const jobId = document.getElementById('heatmap-job-select').value;
+    const questionIdx = document.getElementById('heatmap-question-select').value;
+    
+    if (!jobId || questionIdx === '') {
+        return;
+    }
+    
+    // Show loading state
+    document.getElementById('heatmap-loading').classList.remove('hidden');
+    document.getElementById('heatmap-display').classList.add('hidden');
+    document.getElementById('heatmap-question-display').classList.add('hidden');
+    hideHeatmapError();
+    
+    try {
+        const response = await fetch(`${API_BASE}/jobs/${jobId}/heatmap-data/${questionIdx}`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        }
+        
+        const data = await response.json();
+        
+        // Display question
+        document.getElementById('heatmap-question-text').textContent = data.question_text;
+        document.getElementById('heatmap-question-display').classList.remove('hidden');
+        
+        // Render both heatmaps
+        renderHeatmap(data.output_tokens, data.chosen_probs, 'heatmap-chosen');
+        renderHeatmap(data.output_tokens, data.correct_probs, 'heatmap-correct');
+        
+        // Show heatmap display
+        document.getElementById('heatmap-loading').classList.add('hidden');
+        document.getElementById('heatmap-display').classList.remove('hidden');
+        
+    } catch (error) {
+        console.error('Error loading heatmap data:', error);
+        document.getElementById('heatmap-loading').classList.add('hidden');
+        showHeatmapError('Failed to load heatmap data: ' + error.message);
+    }
+}
+
+// Render heatmap with colored tokens
+function renderHeatmap(tokens, probs, containerId) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = '';
+    
+    if (!tokens || tokens.length === 0) {
+        container.innerHTML = '<p class="text-gray-500">No tokens to display</p>';
+        return;
+    }
+    
+    tokens.forEach((token, idx) => {
+        const prob = probs[idx] || 0;
+        const color = getHeatmapColor(prob);
+        
+        const span = document.createElement('span');
+        span.textContent = token;
+        span.style.backgroundColor = color;
+        span.style.padding = '2px 4px';
+        span.style.margin = '2px';
+        span.style.borderRadius = '3px';
+        span.style.display = 'inline-block';
+        span.style.border = '1px solid #e5e7eb';
+        span.title = `Probability: ${(prob * 100).toFixed(2)}%`;
+        
+        container.appendChild(span);
+    });
+}
+
+// Convert probability (0-1) to white-to-red color
+function getHeatmapColor(prob) {
+    // Clamp probability between 0 and 1
+    prob = Math.max(0, Math.min(1, prob));
+    
+    // Calculate RGB values for white-to-red gradient
+    // White = rgb(255, 255, 255) when prob = 0
+    // Red = rgb(255, 0, 0) when prob = 1
+    const g = Math.round(255 * (1 - prob));
+    const b = Math.round(255 * (1 - prob));
+    
+    return `rgb(255, ${g}, ${b})`;
+}
+
+// Show/hide error messages
+function showHeatmapError(message) {
+    const errorDiv = document.getElementById('heatmap-error');
+    const errorMessage = document.getElementById('heatmap-error-message');
+    errorMessage.textContent = message;
+    errorDiv.classList.remove('hidden');
+}
+
+function hideHeatmapError() {
+    document.getElementById('heatmap-error').classList.add('hidden');
+}
+
+// Initialize heatmap tab on load
+document.addEventListener('DOMContentLoaded', function() {
+    // Load jobs when heatmap tab is shown
+    const heatmapTab = document.querySelector('[onclick="showTab(\'heatmap\')"]');
+    if (heatmapTab) {
+        heatmapTab.addEventListener('click', function() {
+            loadHeatmapJobs();
+        });
+    }
+});

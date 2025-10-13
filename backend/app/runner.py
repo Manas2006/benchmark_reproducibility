@@ -382,7 +382,7 @@ export MKL_NUM_THREADS=1
 
 # Activate conda environment
 source {path_config.conda_env_path}/etc/profile.d/conda.sh
-conda activate mathevalUI
+conda activate qwen-eval
 {('export TOGETHER_API_KEY=' + shlex.quote(req.together_api_key) + newline) if getattr(req, 'use_together_api', False) and getattr(req, 'together_api_key', None) else ''}
 {' '.join(escaped_cli)}
 """
