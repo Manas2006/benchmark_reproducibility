@@ -504,8 +504,8 @@ def parse_args():
     # --- NEW: run vLLM generation in a short-lived subprocess (frees VRAM before HF scoring)
     parser.add_argument("--pass1_subprocess", action="store_true",
                         help="Run vLLM Pass-1 in a subprocess so its VRAM is freed before Pass-2 HF scoring.")
-    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.7,
-                        help="GPU memory utilization for VLLM (default: 0.55, conservative to handle residual memory)")
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9,
+                        help="GPU memory utilization for VLLM (default: 0.9)")
 
     args = parser.parse_args()
     args.top_p = (1 if args.temperature == 0 else args.top_p)  # top_p must be 1 when using greedy sampling (vllm)
@@ -1106,55 +1106,6 @@ def main(llm, tokenizer, data_name, args):
         ]
     time_use = time.time() - start_time
 
-<<<<<<< Updated upstream
-    # === MEMORY CLEANUP: Delete vLLM and clear GPU cache before HF scoring ===
-    if args.use_vllm and args.enable_prob_tracking:
-        print("Freeing vLLM model from GPU memory before HF scoring...")
-        try:
-            # Delete vLLM engine to free GPU memory
-            if 'llm' in locals():
-                try:
-                    # Destroy vLLM engine components
-                    if hasattr(llm, 'llm_engine'):
-                        del llm.llm_engine
-                    del llm
-                    print("✓ vLLM model deleted")
-                except Exception as e:
-                    print(f"Warning: Error deleting vLLM model: {e}")
-            
-            # Force garbage collection
-            import gc
-            gc.collect()
-            
-            # Clear PyTorch CUDA cache
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            
-            # Check available memory
-            if torch.cuda.is_available():
-                free_bytes, total_bytes = torch.cuda.mem_get_info()
-                free_gb = round(free_bytes / (1024**3), 2)
-                total_gb = round(total_bytes / (1024**3), 2)
-                print(f"GPU memory after vLLM cleanup: {free_gb}GB free / {total_gb}GB total")
-        except Exception as e:
-            print(f"Warning: GPU cleanup failed: {e}")
-    elif args.use_vllm:
-        print("Clearing GPU cache before HF scoring...")
-        try:
-            torch.cuda.empty_cache()
-            # Force garbage collection
-            import gc
-            gc.collect()
-            # Check available memory
-            if torch.cuda.is_available():
-                free_bytes, total_bytes = torch.cuda.mem_get_info()
-                free_gb = round(free_bytes / (1024**3), 2)
-                total_gb = round(total_bytes / (1024**3), 2)
-                print(f"GPU memory after cleanup: {free_gb}GB free / {total_gb}GB total")
-        except Exception as e:
-            print(f"Warning: GPU cache cleanup failed: {e}")
-=======
     # === COMPREHENSIVE MEMORY CLEANUP: Free vLLM memory before HF scoring ===
     if args.use_vllm and not getattr(args, "pass1_subprocess", False):
         print("\n" + "="*60)
@@ -1172,7 +1123,6 @@ def main(llm, tokenizer, data_name, args):
         print("="*60)
         print("✅ vLLM MEMORY CLEANUP COMPLETED - READY FOR HF SCORING")
         print("="*60)
->>>>>>> Stashed changes
 
     # === PASS 2: HF scoring (microbatched & OOM-safe) ===
     hf_results_per_output = None
@@ -1203,7 +1153,6 @@ def main(llm, tokenizer, data_name, args):
                     device_map={"": "cpu"},
                     trust_remote_code=True,
                 ).eval()
-        hf_model = getattr(args, "_hf_scorer", None)
         if hf_model is None:
             print("WARNING: enable_prob_tracking requested but HF scorer unavailable; skipping prob tracking.")
         else:
