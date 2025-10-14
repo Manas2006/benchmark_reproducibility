@@ -18,6 +18,7 @@ except Exception:
     Together = None
 
 import torch
+import gc # <<< NEW: Ensure gc is imported
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import numpy as np
 
@@ -33,6 +34,36 @@ from run_truncation_analysis_with_logs import run_truncation_analysis_over_sampl
 
 # --- NEW: helpers for subprocess Pass-1
 import tempfile, subprocess
+
+
+# <<< NEW: Helper Function to Report Memory Usage (Copied from our previous example)
+def print_gpu_memory_usage(stage_name: str):
+    """
+    Prints the current, free, and total GPU memory usage.
+    """
+    if not torch.cuda.is_available():
+        print("CUDA is not available. Cannot measure GPU memory.")
+        return
+        
+    # Get the memory stats for the primary GPU device
+    device = torch.cuda.current_device()
+    total_memory = torch.cuda.get_device_properties(device).total_memory
+    free_memory, _ = torch.cuda.mem_get_info(device)
+    used_memory = total_memory - free_memory
+
+    # Convert bytes to Gigabytes (GB) for readability
+    bytes_to_gb = 1 / (1024 ** 3)
+    used_gb = used_memory * bytes_to_gb
+    free_gb = free_memory * bytes_to_gb
+    total_gb = total_memory * bytes_to_gb
+
+    print("\n" + "="*50)
+    print(f"--- {stage_name} ---")
+    print(f"Used Memory : {used_gb:.2f} GB")
+    print(f"Free Memory : {free_gb:.2f} GB")
+    print(f"Total Memory: {total_gb:.2f} GB")
+    print("="*50 + "\n")
+
 
 # ============================================================
 # OOM-safe streaming scorer for Pass-2 (HF, fp32 recommended)
@@ -153,7 +184,7 @@ def _pack_microbatch(
 # ---------- metrics: chosen probs + pointer-correct probs ----------
 
 def _pointer_metrics_for_sample(
-    probs_i: torch.Tensor,            # [gl, V], float on device
+    probs_i: torch.Tensor,              # [gl, V], float on device
     gen_ids: List[int],
     gold_answer_text: str,
     tokenizer,
@@ -226,7 +257,7 @@ def _pointer_metrics_for_sample(
 
 def run_hf_scoring_streaming(
     hf_model,                              # AutoModelForCausalLM (fp32/bf16)
-    vllm_outputs,                          # list of vLLM-like outputs (supports _MiniOut)
+    vllm_outputs,                              # list of vLLM-like outputs (supports _MiniOut)
     samples: List[Dict[str, Any]],         # parallel to prompts; each must have 'gt'
     tokenizer,
     n_sampling: int,
@@ -326,8 +357,8 @@ def run_hf_scoring_streaming(
 
             start_idx = max(pl - 1, 0)
             end_idx = start_idx + gl
-            l_rows = logits_mb[row, start_idx:end_idx, :]           # [gl, V]
-            probs_i = torch.softmax(l_rows.float(), dim=-1)          # [gl, V]
+            l_rows = logits_mb[row, start_idx:end_idx, :]         # [gl, V]
+            probs_i = torch.softmax(l_rows.float(), dim=-1)         # [gl, V]
 
             sample_index = i_out // n_sampling
             gold_answer_text = samples[sample_index].get("gt", "")
@@ -386,7 +417,7 @@ def run_hf_scoring_streaming(
 
 
 # --- NEW: Pass-1 in a child process (so EngineCore exits and frees VRAM)
-def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], sampling_cfg: Dict[str, Any], gpu_memory_utilization: float = 0.4):
+def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], sampling_cfg: Dict[str, Any], gpu_memory_utilization: float = 0.4, max_model_len: int = 8192):
     """
     sampling_cfg keys: temperature, top_p, top_k, max_tokens, stop (list[str]), stop_token_ids (list[int]|None)
     Returns list of dicts: {prompt, prompt_token_ids, generated_text, generated_token_ids}
@@ -405,11 +436,16 @@ def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], samplin
             "stop": sampling_cfg.get("stop", []),
             "stop_token_ids": sampling_cfg.get("stop_token_ids", None),
             "gpu_memory_utilization": gpu_memory_utilization,
+            "max_model_len": max_model_len,  # Limit context length to reduce KV cache memory
         }
         with open(in_path, "w", encoding="utf-8") as f:
             json.dump(payload, f)
+        
+        print(f"🚀 Starting vLLM subprocess with max_model_len={max_model_len}, gpu_memory_utilization={gpu_memory_utilization}")
         # Spawn child. It will exit and release all VRAM.
         subprocess.run([sys.executable, "pass1_child_vllm.py", in_path, out_path], check=True)
+        print("✅ vLLM subprocess completed successfully")
+        
         with open(out_path, "r", encoding="utf-8") as f:
             return json.load(f)
 
@@ -468,11 +504,19 @@ def parse_args():
     # --- NEW: run vLLM generation in a short-lived subprocess (frees VRAM before HF scoring)
     parser.add_argument("--pass1_subprocess", action="store_true",
                         help="Run vLLM Pass-1 in a subprocess so its VRAM is freed before Pass-2 HF scoring.")
-    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.85,
-                        help="GPU memory utilization for VLLM (default: 0.85, high utilization since we now have proper cleanup)")
+    parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.7,
+                        help="GPU memory utilization for VLLM (default: 0.55, conservative to handle residual memory)")
 
     args = parser.parse_args()
     args.top_p = (1 if args.temperature == 0 else args.top_p)  # top_p must be 1 when using greedy sampling (vllm)
+    
+    # 🚀 AUTO-ENABLE SUBPROCESS MODE FOR PROBABILITY TRACKING
+    # This automatically uses subprocess mode when probability tracking is enabled
+    # to avoid memory conflicts between vLLM and HF scorer
+    if args.enable_prob_tracking and args.use_vllm and not getattr(args, "pass1_subprocess", False):
+        print("🔧 Auto-enabling subprocess mode for probability tracking to avoid memory conflicts")
+        args.pass1_subprocess = True
+    
     return args
 
 
@@ -568,52 +612,44 @@ def setup(args):
             llm = "vllm_subprocess"
         else:
             # In-process vLLM (original behavior)
-            # Check GPU memory before loading
-            if torch.cuda.is_available():
-                free_bytes, total_bytes = torch.cuda.mem_get_info()
-                free_gb = round(free_bytes / (1024**3), 2)
-                total_gb = round(total_bytes / (1024**3), 2)
-                print(f"📊 GPU memory before vLLM loading: {free_gb}GB free / {total_gb}GB total")
-                print(f"🎯 Will use {args.vllm_gpu_memory_utilization*100:.0f}% of GPU memory ({args.vllm_gpu_memory_utilization*total_gb:.1f}GB)")
-                
-                if free_gb < 4.0:
-                    print("⚠️ WARNING: Low GPU memory available. Consider using --pass1_subprocess or reducing model size.")
-            
             print(f"🚀 Loading vLLM model: {args.model_name_or_path}")
+            
+            # Limit max_model_len to 8192 to reduce KV cache memory requirements
+            # Most math problems are much shorter than this, so this is a safe limit
+            max_model_len = getattr(args, 'max_model_len', 8192)
+            
             llm = LLM(
                 model=args.model_name_or_path,
                 tensor_parallel_size=len(available_gpus) // args.pipeline_parallel_size,
                 pipeline_parallel_size=args.pipeline_parallel_size,
                 trust_remote_code=True,
-                gpu_memory_utilization=args.vllm_gpu_memory_utilization,  # Now using 85% by default
+                gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+                max_model_len=max_model_len,  # Limit context length
             )
-            print("✅ vLLM model loaded successfully!")
+            print(f"✅ vLLM model loaded successfully with max_model_len={max_model_len}!")
+            # <<< NEW: Print memory after loading vLLM
+            print_gpu_memory_usage("Stage 2: After Loading Model with vLLM")
+
 
         # Load an HF scorer if probability tracking is enabled
         hf_scorer = None
+        """
         if args.enable_prob_tracking:
             try:
-                # Check available GPU memory before loading
-                if torch.cuda.is_available():
-                    free_bytes, total_bytes = torch.cuda.mem_get_info()
-                    free_gb = round(free_bytes / (1024**3), 2)
-                    print(f"Available GPU memory before HF scorer loading: {free_gb}GB")
-                    
-                    # Only try GPU if we have at least 4GB free
-                    if free_gb >= 4.0:
-                        device_map = {"": 0}
-                        print("Loading HF scorer on GPU...")
-                        hf_scorer = AutoModelForCausalLM.from_pretrained(
-                            args.model_name_or_path,
-                            torch_dtype=torch.bfloat16,
-                            device_map=device_map,
-                            trust_remote_code=True,
-                        ).eval()
-                    else:
-                        print(f"Insufficient GPU memory ({free_gb}GB), loading HF scorer on CPU...")
-                        raise RuntimeError("Insufficient GPU memory")
+                # Only try GPU if we have a decent amount of memory
+                if torch.cuda.is_available() and torch.cuda.mem_get_info()[0] / (1024**3) >= 4.0:
+                    device_map = {"": 0}
+                    print("Loading HF scorer on GPU...")
+                    hf_scorer = AutoModelForCausalLM.from_pretrained(
+                        args.model_name_or_path,
+                        torch_dtype=torch.bfloat16,
+                        device_map=device_map,
+                        trust_remote_code=True,
+                    ).eval()
+                    # <<< NEW: Print memory after loading HF Scorer
+                    print_gpu_memory_usage("Stage 4: After Loading HF Scorer Model (on GPU)")
                 else:
-                    raise RuntimeError("CUDA not available")
+                    raise RuntimeError("Insufficient GPU memory for HF scorer")
             except Exception as e:
                 print(f"WARNING: failed to load HF scorer on CUDA; falling back to CPU. Error: {e}")
                 hf_scorer = AutoModelForCausalLM.from_pretrained(
@@ -622,6 +658,9 @@ def setup(args):
                     device_map={"": "cpu"},
                     trust_remote_code=True,
                 ).eval()
+                # <<< NEW: Print message for CPU fallback
+                print("--- Stage 4: HF Scorer loaded on CPU (no GPU memory used) ---")
+        """
         args._hf_scorer = hf_scorer
 
     else:
@@ -653,10 +692,8 @@ def setup(args):
     print("\t".join([f"{result['acc']:.1f}".ljust(pad, " ") for result in results]))
     
     # 🧹 COMPREHENSIVE GPU MEMORY CLEANUP
-    # This ensures all GPU memory is freed when the job completes
-    # This is crucial for switching between different models
     print("\n" + "="*60)
-    print("🎯 EVALUATION COMPLETED - STARTING GPU MEMORY CLEANUP")
+    print("🎯 EVALUATION COMPLETED - STARTING FINAL GPU MEMORY CLEANUP")
     print("="*60)
     
     # Get references to models for cleanup
@@ -686,63 +723,39 @@ def cleanup_gpu_memory(llm=None, hf_scorer=None):
     """
     print("🧹 Starting comprehensive GPU memory cleanup...")
     
-    try:
-        # Check initial memory
-        if torch.cuda.is_available():
-            free_bytes, total_bytes = torch.cuda.mem_get_info()
-            free_gb = round(free_bytes / (1024**3), 2)
-            total_gb = round(total_bytes / (1024**3), 2)
-            print(f"📊 GPU memory before cleanup: {free_gb}GB free / {total_gb}GB total")
-        
-        # Cleanup vLLM model
-        if llm is not None and hasattr(llm, 'llm_engine'):
-            print("🗑️ Cleaning up vLLM model...")
-            try:
-                # Force cleanup of vLLM engine
-                if hasattr(llm.llm_engine, 'engine_core'):
-                    del llm.llm_engine.engine_core
-                del llm.llm_engine
-            except Exception as e:
-                print(f"⚠️ Warning: Error cleaning vLLM engine: {e}")
-            del llm
-        
-        # Cleanup HF scorer
-        if hf_scorer is not None:
-            print("🗑️ Cleaning up HF scorer...")
-            try:
-                del hf_scorer
-            except Exception as e:
-                print(f"⚠️ Warning: Error cleaning HF scorer: {e}")
-        
-        # Force garbage collection
-        import gc
-        gc.collect()
-        
-        # Clear PyTorch cache
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()  # Wait for all operations to complete
-        
-        # Check final memory
-        if torch.cuda.is_available():
-            free_bytes, total_bytes = torch.cuda.mem_get_info()
-            free_gb = round(free_bytes / (1024**3), 2)
-            total_gb = round(total_bytes / (1024**3), 2)
-            print(f"✅ GPU memory after cleanup: {free_gb}GB free / {total_gb}GB total")
-            print(f"🎯 Memory freed: {total_gb - free_gb:.1f}GB")
-        
-        print("✅ GPU memory cleanup completed successfully!")
-        
-    except Exception as e:
-        print(f"❌ Error during GPU memory cleanup: {e}")
-        # Still try basic cleanup
+    # <<< NEW: Use our helper to show memory BEFORE cleanup
+    print_gpu_memory_usage("Memory State Before Cleanup")
+    
+    # Cleanup vLLM model
+    if llm is not None and hasattr(llm, 'llm_engine'):
+        print("🗑️ Cleaning up vLLM model...")
         try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            import gc
-            gc.collect()
-        except:
-            pass
+            # Force cleanup of vLLM engine
+            if hasattr(llm.llm_engine, 'engine_core'):
+                del llm.llm_engine.engine_core
+            del llm.llm_engine
+        except Exception as e:
+            print(f"⚠️ Warning: Error cleaning vLLM engine: {e}")
+        del llm
+    
+    # Cleanup HF scorer
+    if hf_scorer is not None:
+        print("🗑️ Cleaning up HF scorer...")
+        try:
+            del hf_scorer
+        except Exception as e:
+            print(f"⚠️ Warning: Error cleaning HF scorer: {e}")
+    
+    # Force garbage collection
+    gc.collect()
+    
+    # Clear PyTorch cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()  # Wait for all operations to complete
+    
+    # <<< NEW: Use our helper to show memory AFTER cleanup
+    print_gpu_memory_usage("Memory State After Cleanup")
 
 
 def is_multi_choice(answer):
@@ -905,7 +918,9 @@ def main(llm, tokenizer, data_name, args):
                     stop=stop_words,
                     stop_token_ids=([151645, 151643] if "qwen2" in args.model_name_or_path.lower() else None),
                 )
-                child_records = run_pass1_in_subprocess(args.model_name_or_path, prompts, sampling_cfg, args.vllm_gpu_memory_utilization)
+                # Use max_model_len of 8192 to reduce KV cache memory requirements
+                max_model_len = getattr(args, 'max_model_len', 8192)
+                child_records = run_pass1_in_subprocess(args.model_name_or_path, prompts, sampling_cfg, args.vllm_gpu_memory_utilization, max_model_len)
 
                 # Re-wrap into minimal objects that mimic vLLM outputs you use later
                 class _MiniOut:
@@ -1091,6 +1106,7 @@ def main(llm, tokenizer, data_name, args):
         ]
     time_use = time.time() - start_time
 
+<<<<<<< Updated upstream
     # === MEMORY CLEANUP: Delete vLLM and clear GPU cache before HF scoring ===
     if args.use_vllm and args.enable_prob_tracking:
         print("Freeing vLLM model from GPU memory before HF scoring...")
@@ -1138,22 +1154,67 @@ def main(llm, tokenizer, data_name, args):
                 print(f"GPU memory after cleanup: {free_gb}GB free / {total_gb}GB total")
         except Exception as e:
             print(f"Warning: GPU cache cleanup failed: {e}")
+=======
+    # === COMPREHENSIVE MEMORY CLEANUP: Free vLLM memory before HF scoring ===
+    if args.use_vllm and not getattr(args, "pass1_subprocess", False):
+        print("\n" + "="*60)
+        print("🧹 vLLM GENERATION COMPLETED - CLEANING UP vLLM MEMORY")
+        print("="*60)
+        
+        # Clean up vLLM model to free memory for HF scorer
+        cleanup_gpu_memory(llm, None)
+        # <<< NEW: Print memory after this intermediate cleanup
+        print_gpu_memory_usage("Stage 3: After Deleting vLLM and Clearing Cache")
+        
+        # Set llm to None to prevent further use
+        llm = None
+        
+        print("="*60)
+        print("✅ vLLM MEMORY CLEANUP COMPLETED - READY FOR HF SCORING")
+        print("="*60)
+>>>>>>> Stashed changes
 
     # === PASS 2: HF scoring (microbatched & OOM-safe) ===
     hf_results_per_output = None
     if args.enable_prob_tracking and args.use_vllm:
+        if args.enable_prob_tracking and args.use_vllm:
+            print("\n" + "="*60)
+            print("🚀 Loading Hugging Face scorer model for Pass 2...")
+            print("="*60)
+            hf_model = None
+            try:
+                if torch.cuda.is_available() and torch.cuda.mem_get_info()[0] / (1024**3) >= 4.0:
+                    device_map = {"": 0}
+                    print("Loading HF scorer on GPU...")
+                    hf_model = AutoModelForCausalLM.from_pretrained(
+                        args.model_name_or_path,
+                        torch_dtype=torch.bfloat16,
+                        device_map=device_map,
+                        trust_remote_code=True,
+                    ).eval()
+                    print_gpu_memory_usage("Stage 4: After Loading HF Scorer Model (on GPU)")
+                else:
+                    raise RuntimeError("Insufficient GPU memory for HF scorer")
+            except Exception as e:
+                print(f"WARNING: failed to load HF scorer on CUDA; falling back to CPU. Error: {e}")
+                hf_model = AutoModelForCausalLM.from_pretrained(
+                    args.model_name_or_path,
+                    torch_dtype=torch.float32,
+                    device_map={"": "cpu"},
+                    trust_remote_code=True,
+                ).eval()
         hf_model = getattr(args, "_hf_scorer", None)
         if hf_model is None:
             print("WARNING: enable_prob_tracking requested but HF scorer unavailable; skipping prob tracking.")
         else:
             # Tune this up/down based on GPU VRAM. Safe defaults:
-            SCORING_MAX_TOKENS = 2048     # e.g., 2k (try 4096/8192 if you have headroom)
-            MAX_LEN_PER_BATCH  = 1024     # cap long outliers (optional)
+            SCORING_MAX_TOKENS = 2048      # e.g., 2k (try 4096/8192 if you have headroom)
+            MAX_LEN_PER_BATCH  = 1024      # cap long outliers (optional)
             print("Starting HF scoring with max tokens:", SCORING_MAX_TOKENS)
             hf_results_per_output, wrote_npz = run_hf_scoring_streaming(
                 hf_model=hf_model,
                 vllm_outputs=vllm_outputs,
-                samples=samples,                 # each has "gt"
+                samples=samples,              # each has "gt"
                 tokenizer=tokenizer,
                 n_sampling=args.n_sampling,
                 enable_path_vectors=bool(args.enable_path_vectors),
@@ -1358,4 +1419,8 @@ def main(llm, tokenizer, data_name, args):
 if __name__ == "__main__":
     args = parse_args()
     set_seed(args.seed)
+    
+    # <<< NEW: Print initial memory state
+    print_gpu_memory_usage("Stage 1: Initial State (before any models are loaded)")
+
     setup(args)
