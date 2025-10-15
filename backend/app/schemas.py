@@ -286,4 +286,7 @@ class HeatmapDataResponse(BaseModel):
     chosen_probs: List[float] = Field(description="Probability of each chosen token (0-1)")
     correct_probs: List[float] = Field(description="Probability of correct answer token at each step (log-scaled for visualization)")
     chosen_token_ids: List[int] = Field(description="Token IDs that were chosen by model")
-    correct_token_ids: List[int] = Field(description="Token IDs of correct answer tokens") 
+    correct_token_ids: List[int] = Field(description="Token IDs of correct answer tokens")
+    is_correct: bool = Field(description="Whether the model got the correct answer")
+    predicted_answer: Optional[str] = Field(default=None, description="Model's predicted answer")
+    ground_truth: Optional[str] = Field(default=None, description="Ground truth answer") 

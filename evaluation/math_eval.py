@@ -1219,6 +1219,8 @@ def main(llm, tokenizer, data_name, args):
                 m = hf_results_per_output[output_index]
                 sample["probability_log"] = {"epoch_0": m["correct_probs"]}
                 sample["chosen_token_probs"] = {"epoch_0": m["chosen_probs"]}
+                sample["chosen_token_ids"] = {"epoch_0": m["chosen_ids"]}
+                sample["correct_token_ids"] = {"epoch_0": m["correct_ids"]}
                 sample["entropies"] = {"epoch_0": m["entropies"]}
                 sample["exact_match_steps"] = {"epoch_0": m["exact_matches"]}
                 sample["path_vectors"] = {
@@ -1301,6 +1303,8 @@ def main(llm, tokenizer, data_name, args):
                     "probability_log": rec.get("probability_log", {}),
                     "exact_match_steps": rec.get("exact_match_steps", {}),
                     "chosen_token_probs": rec.get("chosen_token_probs", {}),
+                    "chosen_token_ids": rec.get("chosen_token_ids", {}),
+                    "correct_token_ids": rec.get("correct_token_ids", {}),
                     "entropies": rec.get("entropies", {}),
                     "model_path_vectors": model_path_vectors,
                     "gold_path_vectors": gold_path_vectors,

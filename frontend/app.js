@@ -3372,7 +3372,42 @@ async function loadHeatmapData() {
         
         // Display question
         document.getElementById('heatmap-question-text').textContent = data.question_text;
+        
+        // Display answer status
+        const statusElement = document.getElementById('heatmap-answer-status');
+        const predictedElement = document.getElementById('heatmap-predicted-answer');
+        const groundTruthElement = document.getElementById('heatmap-ground-truth');
+        
+        // Update status badge
+        if (data.is_correct) {
+            statusElement.textContent = 'CORRECT';
+            statusElement.className = 'ml-2 px-2 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800';
+        } else {
+            statusElement.textContent = 'INCORRECT';
+            statusElement.className = 'ml-2 px-2 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800';
+        }
+        
+        // Update predicted and ground truth answers
+        predictedElement.textContent = data.predicted_answer || 'N/A';
+        groundTruthElement.textContent = data.ground_truth || 'N/A';
+        
         document.getElementById('heatmap-question-display').classList.remove('hidden');
+        
+        // Update heatmap panel titles with correctness info
+        const correctTitle = document.querySelector('#heatmap-correct .text-center h3');
+        const chosenTitle = document.querySelector('#heatmap-chosen .text-center h3');
+        
+        if (correctTitle) {
+            const statusText = data.is_correct ? '✓' : '✗';
+            correctTitle.innerHTML = `Ground Truth Token Probabilities <span class="ml-2 text-sm ${data.is_correct ? 'text-green-600' : 'text-red-600'}">${statusText}</span>`;
+            correctTitle.title = "Shows the probability of the ground truth token at each generation step. Low probabilities indicate the model was not confident in the correct answer. Note: Due to tokenization differences, some probabilities may appear unusually high.";
+        }
+        
+        if (chosenTitle) {
+            const statusText = data.is_correct ? '✓' : '✗';
+            chosenTitle.innerHTML = `Chosen Token Probabilities <span class="ml-2 text-sm ${data.is_correct ? 'text-green-600' : 'text-red-600'}">${statusText}</span>`;
+            chosenTitle.title = "Shows the probability of the token the model actually chose at each generation step. High probabilities indicate the model was confident in its choice.";
+        }
         
         // Render both heatmaps
         renderHeatmap(data.output_tokens, data.chosen_probs, 'heatmap-chosen');

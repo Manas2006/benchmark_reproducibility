@@ -178,23 +178,27 @@ class BatchProbabilityRecorder(LogitsProcessor):
                     ent = -(probs.clamp_min(1e-12).log() * probs).sum(dim=-1)
 
                 # Append to per-request buffers
-                for rid, cp, H in zip(
+                for rid, cp, H, chosen_id in zip(
                     [str(r) for r in req_ids],
                     chosen_probs.detach().cpu().tolist(),
                     ent.detach().cpu().tolist(),
+                    chosen_ids.detach().cpu().tolist(),
                 ):
                     # Store in both internal sidecars and global state
                     buf = self._sidecars.setdefault(rid, {
                         "chosen_token_probs": [],
                         "entropies": [],
+                        "chosen_token_ids": [],
                     })
                     buf["chosen_token_probs"].append(cp)
                     buf["entropies"].append(H)
+                    buf["chosen_token_ids"].append(chosen_id)
                     
                     # Also store in global state for retrieval
                     global_buf = _RECORDER_STATE.setdefault(_norm_req_id(rid), {
                         "chosen_token_probs": [],
                         "entropies": [],
+                        "chosen_token_ids": [],
                         "correct_token_probs": [],
                         "successful_matches": 0,
                         "enable_path_vectors": False,
@@ -203,6 +207,7 @@ class BatchProbabilityRecorder(LogitsProcessor):
                     })
                     global_buf["chosen_token_probs"].append(cp)
                     global_buf["entropies"].append(H)
+                    global_buf["chosen_token_ids"].append(chosen_id)
 
             except Exception as e:
                 # Never crash the engine from here; just log and continue

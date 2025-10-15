@@ -624,6 +624,7 @@ async def get_heatmap_data(job_id: str, question_idx: int):
         
         # Extract data
         question_text = sample.get("question", sample.get("problem", ""))
+        ground_truth = sample.get("gt", sample.get("answer", ""))
         
         # Get the full model output (reasoning + answer)
         # Try different fields in order of preference
@@ -641,49 +642,132 @@ async def get_heatmap_data(job_id: str, question_idx: int):
         else:
             model_output = str(model_output_raw)
         
-        # Get probability arrays
+        # Extract predicted answer (final answer from model output)
+        predicted_answer = None
+        if model_output:
+            # Try to extract the final answer from the model output
+            # Look for patterns like "#### 42" or "The answer is 42" or just the last number
+            import re
+            # Pattern 1: #### followed by answer
+            match = re.search(r'####\s*([^\n]+)', model_output)
+            if match:
+                predicted_answer = match.group(1).strip()
+            else:
+                # Pattern 2: "The answer is" or similar
+                match = re.search(r'(?:answer is|final answer is|result is)\s*:?\s*([^\n.]+)', model_output, re.IGNORECASE)
+                if match:
+                    predicted_answer = match.group(1).strip()
+                else:
+                    # Pattern 3: Last number in the text
+                    numbers = re.findall(r'-?\d+\.?\d*', model_output)
+                    if numbers:
+                        predicted_answer = numbers[-1]
+        
+        # Determine correctness
+        is_correct = False
+        if predicted_answer and ground_truth:
+            # Normalize both answers for comparison
+            def normalize_answer(ans):
+                if not ans:
+                    return ""
+                # Remove extra whitespace and convert to lowercase
+                ans = str(ans).strip().lower()
+                # Remove common prefixes/suffixes
+                ans = re.sub(r'^(the answer is|answer:|final answer:|result:)\s*', '', ans)
+                ans = re.sub(r'[^\w\d.-]', '', ans)  # Keep only alphanumeric, dots, and hyphens
+                return ans
+            
+            norm_pred = normalize_answer(predicted_answer)
+            norm_gt = normalize_answer(ground_truth)
+            is_correct = norm_pred == norm_gt
+        
+        # If we couldn't determine from extracted answer, check the score field
+        if predicted_answer is None:
+            score = sample.get("score", [])
+            if isinstance(score, list) and score:
+                is_correct = bool(score[0])
+            elif isinstance(score, (bool, int)):
+                is_correct = bool(score)
+        
+        # Get probability arrays and token IDs
         chosen_probs_dict = prob_data.get("chosen_token_probs", {})
         correct_probs_dict = prob_data.get("probability_log", {})
+        chosen_token_ids_dict = prob_data.get("chosen_token_ids", {})
+        correct_token_ids_dict = prob_data.get("correct_token_ids", {})
         
         # Get epoch_0 data (main generation pass)
         chosen_probs = chosen_probs_dict.get("epoch_0", [])
-        correct_probs_raw = correct_probs_dict.get("epoch_0", [])
+        chosen_token_ids = chosen_token_ids_dict.get("epoch_0", [])
+        correct_token_ids = correct_token_ids_dict.get("epoch_0", [])
         
-        # The correct_probs_raw are the actual probabilities of correct tokens
-        # But they're very small, so we need to scale them for visualization
-        if correct_probs_raw:
-            # Use log scaling to make small probabilities more visible
+        # Use actual ground truth token probabilities from probability_log
+        correct_probs = correct_probs_dict.get("epoch_0", [])
+        
+        # If no probability_log data available, create minimal fallback
+        if not correct_probs and chosen_probs:
+            correct_probs = [0.01] * len(chosen_probs)
+        
+        # Apply log scaling to make small probabilities more visible
+        if correct_probs:
             import math
             # Add small epsilon to avoid log(0)
             epsilon = 1e-15
-            correct_probs = [math.log(max(p, epsilon)) for p in correct_probs_raw]
+            correct_probs = [math.log(max(p, epsilon)) for p in correct_probs]
             # Normalize to 0-1 range
             min_log = min(correct_probs)
             max_log = max(correct_probs)
             if max_log > min_log:
                 correct_probs = [(p - min_log) / (max_log - min_log) for p in correct_probs]
             else:
-                correct_probs = [0.0] * len(correct_probs_raw)
+                correct_probs = [0.0] * len(correct_probs)
+        
+        # Use actual model tokenization if available, otherwise fallback to word-based
+        if chosen_token_ids and len(chosen_token_ids) > 0:
+            # We have actual token IDs from the model
+            # Decode them using the model's tokenizer
+            try:
+                from transformers import AutoTokenizer
+                # Load the tokenizer for the model used in evaluation
+                # From the path, it looks like it used Qwen2.5-Math-1.5B
+                tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Math-1.5B")
+                
+                tokens = []
+                for token_id in chosen_token_ids:
+                    if token_id is not None:
+                        try:
+                            # Decode the token ID to get the actual token
+                            decoded_token = tokenizer.decode([token_id])
+                            # Clean up the token (remove extra spaces, special characters)
+                            decoded_token = decoded_token.strip()
+                            if not decoded_token:
+                                decoded_token = f"<{token_id}>"
+                            tokens.append(decoded_token)
+                        except Exception as e:
+                            # If decoding fails, use the token ID
+                            tokens.append(f"<{token_id}>")
+                    else:
+                        tokens.append("<unknown>")
+            except Exception as e:
+                # If tokenizer loading fails, fallback to simple representation
+                print(f"Warning: Could not load tokenizer: {e}")
+                tokens = []
+                for token_id in chosen_token_ids:
+                    if token_id is not None:
+                        tokens.append(f"token_{token_id}")
+                    else:
+                        tokens.append("unknown")
         else:
-            correct_probs = [0.0] * len(chosen_probs)
-        
-        # Use improved word-based tokenization that handles punctuation better
-        import re
-        
-        # Split on whitespace and punctuation, but keep punctuation as separate tokens
-        tokens = re.findall(r'\S+', model_output)
-        token_ids = list(range(len(tokens)))
+            # Fallback to word-based tokenization if no token IDs available
+            import re
+            tokens = re.findall(r'\S+', model_output)
         
         # Align arrays - truncate to shortest length
         min_len = min(len(tokens), len(chosen_probs), len(correct_probs))
         tokens = tokens[:min_len]
         chosen_probs = chosen_probs[:min_len]
         correct_probs = correct_probs[:min_len]
-        token_ids = token_ids[:min_len]
-        
-        # For correct token IDs, we need to get them from the ground truth
-        # For now, use the same token_ids (this could be improved)
-        correct_token_ids = token_ids  # Placeholder
+        chosen_token_ids = chosen_token_ids[:min_len] if chosen_token_ids else list(range(min_len))
+        correct_token_ids = correct_token_ids[:min_len] if correct_token_ids else list(range(min_len))
         
         return HeatmapDataResponse(
             job_id=job_id,
@@ -693,8 +777,11 @@ async def get_heatmap_data(job_id: str, question_idx: int):
             output_tokens=tokens,
             chosen_probs=chosen_probs,
             correct_probs=correct_probs,
-            chosen_token_ids=token_ids,
-            correct_token_ids=correct_token_ids
+            chosen_token_ids=chosen_token_ids,
+            correct_token_ids=correct_token_ids,
+            is_correct=is_correct,
+            predicted_answer=predicted_answer,
+            ground_truth=ground_truth
         )
         
     except HTTPException:
