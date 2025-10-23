@@ -1,6 +1,6 @@
 // Configuration
-const API_BASE = 'http://localhost:8000';
-const WS_BASE = 'ws://localhost:8000';
+const API_BASE = 'http://localhost:8001';
+const WS_BASE = 'ws://localhost:8001';
 
 // Available options
 const AVAILABLE_MODELS = [
@@ -1354,9 +1354,17 @@ async function openProbPlotModal(jobId) {
     const mathLevelOptions = isMathDataset ? `
         <option value="level_single">Math Level (Single Level)</option>
         <option value="level_aggregate">Math Level (All Levels Comparison)</option>
-        <option value="starting_tokens_by_level">Starting Tokens by Level</option>
-        <option value="ending_tokens_by_level">Ending Tokens by Level</option>
     ` : '';
+    
+    // Add first/last token probability options for all datasets
+    const tokenProbOptions = `
+        <option value="first_token_prob">First Token Probability (All)</option>
+        <option value="first_token_prob_correct">First Token Probability (Correct Only)</option>
+        <option value="first_token_prob_incorrect">First Token Probability (Incorrect Only)</option>
+        <option value="last_token_prob">Last Token Probability (All)</option>
+        <option value="last_token_prob_correct">Last Token Probability (Correct Only)</option>
+        <option value="last_token_prob_incorrect">Last Token Probability (Incorrect Only)</option>
+    `;
 
     const mathLevelControlsHTML = isMathDataset ? `
         <div id="math-level-controls" class="hidden">
@@ -1401,6 +1409,7 @@ async function openProbPlotModal(jobId) {
                         <option value="path_aggregate">Path of Distributions (Aggregate)</option>
                         <option value="path_single">Path of Distributions (Single Sample)</option>
                         ${mathLevelOptions}
+                        ${tokenProbOptions}
                     </select>
                 </div>
                 <div id="prob-sample-id-field" class="hidden">
@@ -3409,9 +3418,16 @@ async function loadHeatmapData() {
             chosenTitle.title = "Shows the probability of the token the model actually chose at each generation step. High probabilities indicate the model was confident in its choice.";
         }
         
-        // Render both heatmaps
-        renderHeatmap(data.output_tokens, data.chosen_probs, 'heatmap-chosen');
-        renderHeatmap(data.output_tokens, data.correct_probs, 'heatmap-correct');
+        // Store data globally for hover interactions
+        window.currentHeatmapData = data;
+        
+        // Render both heatmaps with normalized probs for colors, original for tooltips
+        renderHeatmap(data.output_tokens, data.chosen_probs, data.chosen_probs_original, 'heatmap-chosen', 'chosen');
+        renderHeatmap(data.output_tokens, data.correct_probs, data.correct_probs_original, 'heatmap-correct', 'correct');
+        
+        // Render probability curves below heatmaps
+        renderProbabilityCurve(data.chosen_probs_original, 'chosen-prob-curve', 'Chosen Token Probability Over Generation', 'blue');
+        renderProbabilityCurve(data.correct_probs_original, 'correct-prob-curve', 'Correct Token Probability Over Generation', 'red');
         
         // Show heatmap display
         document.getElementById('heatmap-loading').classList.add('hidden');
@@ -3425,7 +3441,7 @@ async function loadHeatmapData() {
 }
 
 // Render heatmap with colored tokens
-function renderHeatmap(tokens, probs, containerId) {
+function renderHeatmap(tokens, probs, probsOriginal, containerId, curveId) {
     const container = document.getElementById(containerId);
     container.innerHTML = '';
     
@@ -3435,8 +3451,9 @@ function renderHeatmap(tokens, probs, containerId) {
     }
     
     tokens.forEach((token, idx) => {
-        const prob = probs[idx] || 0;
-        const color = getHeatmapColor(prob);
+        const probNormalized = probs[idx] || 0;
+        const probOriginal = probsOriginal[idx] || 0;
+        const color = getHeatmapColor(probNormalized);
         
         const span = document.createElement('span');
         span.textContent = token;
@@ -3446,7 +3463,21 @@ function renderHeatmap(tokens, probs, containerId) {
         span.style.borderRadius = '3px';
         span.style.display = 'inline-block';
         span.style.border = '1px solid #e5e7eb';
-        span.title = `Probability: ${(prob * 100).toFixed(2)}%`;
+        span.style.cursor = 'pointer';
+        span.title = `Token: ${token}\nProbability: ${(probOriginal * 100).toFixed(2)}%\nPosition: ${idx + 1}/${tokens.length}`;
+        
+        // Add hover effect to highlight position on curve
+        span.addEventListener('mouseenter', function() {
+            highlightTokenOnCurve(idx, curveId + '-prob-curve');
+            span.style.border = '2px solid #000';
+            span.style.fontWeight = 'bold';
+        });
+        
+        span.addEventListener('mouseleave', function() {
+            clearCurveHighlight(curveId + '-prob-curve');
+            span.style.border = '1px solid #e5e7eb';
+            span.style.fontWeight = 'normal';
+        });
         
         container.appendChild(span);
     });
@@ -3466,6 +3497,186 @@ function getHeatmapColor(prob) {
     return `rgb(255, ${g}, ${b})`;
 }
 
+// Render probability curve below heatmap
+function renderProbabilityCurve(probs, canvasId, title, color) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) {
+        console.error(`Canvas ${canvasId} not found`);
+        return;
+    }
+    
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    
+    // Clear canvas
+    ctx.clearRect(0, 0, width, height);
+    
+    if (!probs || probs.length === 0) {
+        ctx.fillStyle = '#666';
+        ctx.font = '12px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('No data to display', width / 2, height / 2);
+        return;
+    }
+    
+    // Find min and max for scaling
+    const minProb = Math.min(...probs);
+    const maxProb = Math.max(...probs);
+    const range = maxProb - minProb;
+    
+    // Margins
+    const margin = { top: 40, right: 20, bottom: 30, left: 60 };
+    const plotWidth = width - margin.left - margin.right;
+    const plotHeight = height - margin.top - margin.bottom;
+    
+    // Draw title
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(title, width / 2, 20);
+    
+    // Draw axes
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(margin.left, margin.top);
+    ctx.lineTo(margin.left, height - margin.bottom);
+    ctx.lineTo(width - margin.right, height - margin.bottom);
+    ctx.stroke();
+    
+    // Draw Y-axis labels
+    ctx.fillStyle = '#666';
+    ctx.font = '10px Arial';
+    ctx.textAlign = 'right';
+    for (let i = 0; i <= 5; i++) {
+        const y = margin.top + (plotHeight * i / 5);
+        const value = maxProb - (range * i / 5);
+        ctx.fillText(value.toFixed(3), margin.left - 5, y + 3);
+        
+        // Draw grid line
+        ctx.strokeStyle = '#ddd';
+        ctx.beginPath();
+        ctx.moveTo(margin.left, y);
+        ctx.lineTo(width - margin.right, y);
+        ctx.stroke();
+    }
+    
+    // Draw X-axis label
+    ctx.fillStyle = '#666';
+    ctx.font = '11px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Token Position', width / 2, height - 5);
+    
+    // Draw Y-axis label
+    ctx.save();
+    ctx.translate(15, height / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText('Probability', 0, 0);
+    ctx.restore();
+    
+    // Draw probability line
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    
+    probs.forEach((prob, idx) => {
+        const x = margin.left + (plotWidth * idx / (probs.length - 1 || 1));
+        const y = height - margin.bottom - (plotHeight * (prob - minProb) / (range || 1));
+        
+        if (idx === 0) {
+            ctx.moveTo(x, y);
+        } else {
+            ctx.lineTo(x, y);
+        }
+    });
+    
+    ctx.stroke();
+    
+    // Draw points
+    ctx.fillStyle = color;
+    probs.forEach((prob, idx) => {
+        const x = margin.left + (plotWidth * idx / (probs.length - 1 || 1));
+        const y = height - margin.bottom - (plotHeight * (prob - minProb) / (range || 1));
+        
+        ctx.beginPath();
+        ctx.arc(x, y, 2, 0, 2 * Math.PI);
+        ctx.fill();
+    });
+    
+    // Store metadata for hover interactions
+    canvas.dataset.probs = JSON.stringify(probs);
+    canvas.dataset.minProb = minProb;
+    canvas.dataset.maxProb = maxProb;
+    canvas.dataset.color = color;
+}
+
+// Highlight a specific token position on the curve
+function highlightTokenOnCurve(tokenIdx, canvasId) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !canvas.dataset.probs) return;
+    
+    const probs = JSON.parse(canvas.dataset.probs);
+    const minProb = parseFloat(canvas.dataset.minProb);
+    const maxProb = parseFloat(canvas.dataset.maxProb);
+    const color = canvas.dataset.color;
+    const range = maxProb - minProb;
+    
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    const margin = { top: 40, right: 20, bottom: 30, left: 60 };
+    const plotWidth = width - margin.left - margin.right;
+    const plotHeight = height - margin.top - margin.bottom;
+    
+    // Redraw the curve first
+    renderProbabilityCurve(probs, canvasId, canvas.dataset.title || 'Probability', color);
+    
+    // Highlight the specific point
+    if (tokenIdx >= 0 && tokenIdx < probs.length) {
+        const prob = probs[tokenIdx];
+        const x = margin.left + (plotWidth * tokenIdx / (probs.length - 1 || 1));
+        const y = height - margin.bottom - (plotHeight * (prob - minProb) / (range || 1));
+        
+        // Draw larger circle for highlighted point
+        ctx.fillStyle = '#000';
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, 2 * Math.PI);
+        ctx.fill();
+        
+        // Draw connecting line
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x, margin.top);
+        ctx.lineTo(x, height - margin.bottom);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        
+        // Draw label
+        ctx.fillStyle = '#000';
+        ctx.font = 'bold 11px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(`Token ${tokenIdx + 1}`, x, margin.top - 10);
+        ctx.fillText(`p=${prob.toFixed(4)}`, x, y - 10);
+    }
+}
+
+// Clear curve highlight
+function clearCurveHighlight(canvasId) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !canvas.dataset.probs) return;
+    
+    const probs = JSON.parse(canvas.dataset.probs);
+    const color = canvas.dataset.color;
+    const title = canvas.dataset.title || 'Probability';
+    
+    // Redraw without highlight
+    renderProbabilityCurve(probs, canvasId, title, color);
+}
+
 // Show/hide error messages
 function showHeatmapError(message) {
     const errorDiv = document.getElementById('heatmap-error');
@@ -3473,6 +3684,7 @@ function showHeatmapError(message) {
     errorMessage.textContent = message;
     errorDiv.classList.remove('hidden');
 }
+
 
 function hideHeatmapError() {
     document.getElementById('heatmap-error').classList.add('hidden');

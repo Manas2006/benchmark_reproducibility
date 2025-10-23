@@ -19,7 +19,7 @@ except Exception:
 
 import torch
 import gc # <<< NEW: Ensure gc is imported
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 import numpy as np
 
 from evaluate import evaluate
@@ -181,6 +181,74 @@ def _pack_microbatch(
     return input_ids, attn_mask, position_ids, prompt_lens, gen_lens, gen_ids_list
 
 
+def _pack_expert_cot_microbatch(
+    expert_samples_in_batch: List[Dict[str, int]],
+    vllm_outputs,
+    samples: List[Dict[str, Any]],
+    n_sampling: int,
+    tokenizer,
+    device: torch.device,
+):
+    """
+    Pack a microbatch for expert CoT probability calculation.
+    Each row contains: prompt_token_ids + expert_cot_token_ids
+    
+    Returns:
+        input_ids, attn_mask, position_ids, prompt_lens, expert_cot_lens, expert_cot_ids_list
+    """
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    pad_id = tokenizer.pad_token_id
+
+    B = len(expert_samples_in_batch)
+    
+    # Build sequences: prompt + expert_cot
+    all_seqs = []
+    prompt_lens = []
+    expert_cot_lens = []
+    expert_cot_ids_list = []
+    
+    for m in expert_samples_in_batch:
+        i_out = m['i_out']
+        
+        # Get prompt token IDs from vllm_outputs
+        out = vllm_outputs[i_out]
+        p_ids = list(out.prompt_token_ids)
+        
+        # Get the corresponding sample
+        sample_idx = i_out // n_sampling
+        current_sample = samples[sample_idx]
+        
+        # Get expert CoT text and tokenize it (use gt_cot as expert)
+        expert_cot_text = current_sample.get("gt_cot", "")
+        e_ids = tokenizer.encode(expert_cot_text, add_special_tokens=False)
+        
+        all_seqs.append((p_ids, e_ids))
+        prompt_lens.append(len(p_ids))
+        expert_cot_lens.append(len(e_ids))
+        expert_cot_ids_list.append(e_ids)
+    
+    # Calculate max length
+    max_len = max((len(p_ids) + len(e_ids) for p_ids, e_ids in all_seqs), default=0)
+    
+    # Create tensors
+    input_ids = torch.full((B, max_len), pad_id, dtype=torch.long, device=device)
+    attn_mask = torch.zeros((B, max_len), dtype=torch.long, device=device)
+    position_ids = torch.zeros((B, max_len), dtype=torch.long, device=device)
+    
+    # Fill tensors
+    for row, (p_ids, e_ids) in enumerate(all_seqs):
+        ids = p_ids + e_ids
+        L = len(ids)
+        
+        if L > 0:
+            input_ids[row, :L] = torch.tensor(ids, dtype=torch.long, device=device)
+            attn_mask[row, :L] = 1
+            position_ids[row, :L] = torch.arange(L, dtype=torch.long, device=device)
+    
+    return input_ids, attn_mask, position_ids, prompt_lens, expert_cot_lens, expert_cot_ids_list
+
+
 # ---------- metrics: chosen probs + pointer-correct probs ----------
 
 def _pointer_metrics_for_sample(
@@ -270,12 +338,13 @@ def run_hf_scoring_streaming(
     progress_label: str = "Pass2(HF)",
     log_monitor_json: bool = False,
     vram_guard_gb: Optional[float] = None,     # if set, CPU fallback when free VRAM < this
-) -> Tuple[List[Optional[Dict[str, Any]]], bool]:
+) -> Tuple[List[Optional[Dict[str, Any]]], bool, Dict[int, float]]:
     """
     Returns:
       - hf_results_per_output: list aligned to vllm_outputs; each item includes:
           chosen_ids, chosen_probs, correct_ids, correct_probs, entropies, exact_matches
       - wrote_npz: True if path vectors saved
+      - expert_prob_results: dict mapping i_out to expert CoT probability
     """
     device = next(hf_model.parameters()).device
     use_cuda = (device.type == "cuda")
@@ -287,6 +356,7 @@ def run_hf_scoring_streaming(
     )
 
     hf_results_per_output: List[Optional[Dict[str, Any]]] = [None] * len(vllm_outputs)
+    expert_prob_results: Dict[int, float] = {}  # <<< NEW: Store expert CoT probabilities
     pathvec_store: Dict[str, Any] = {}
 
     total_samples = len(vllm_outputs)
@@ -320,6 +390,89 @@ def run_hf_scoring_streaming(
                     moved_model_to_cpu = True
             except Exception:
                 pass  # ignore mem probe failures
+
+        # =========================================================
+        # <<< START: NEW EXPERT CoT CALCULATION BLOCK >>>
+        # =========================================================
+        expert_samples_in_batch = []
+        for m in batch_meta:
+            i_out = m['i_out']
+            sample_idx = i_out // n_sampling
+            current_sample = samples[sample_idx]
+            # Check if gt_cot exists and is non-empty (use as expert CoT)
+            if current_sample.get("gt_cot") and str(current_sample.get("gt_cot")).strip():
+                expert_samples_in_batch.append(m)
+        
+        print(f"DEBUG: Batch {b_idx} has {len(expert_samples_in_batch)} samples with valid gt_cot out of {len(batch_meta)} total samples")
+        
+        if expert_samples_in_batch:
+            print(f"DEBUG: Processing {len(expert_samples_in_batch)} expert CoT samples in batch {b_idx}")
+            try:
+                # 1. Create a new micro-batch for expert CoT sequences
+                expert_input_ids, expert_attn_mask, expert_pos_ids, expert_prompt_lens, expert_cot_lens, expert_cot_ids_list = \
+                    _pack_expert_cot_microbatch(expert_samples_in_batch, vllm_outputs, samples, n_sampling, tokenizer, this_device)
+
+                # 2. Run a new forward pass
+                with torch.no_grad():
+                    expert_logits = hf_model(
+                        input_ids=expert_input_ids,
+                        attention_mask=expert_attn_mask,
+                        position_ids=expert_pos_ids,
+                        use_cache=False,
+                        output_hidden_states=False,
+                    ).logits  # [NumExpertSamples, SeqLen, VocabSize]
+
+                # 3. Calculate joint probability for each sample
+                for row, m in enumerate(expert_samples_in_batch):
+                    pl = expert_prompt_lens[row]
+                    e_cot_l = expert_cot_lens[row]
+                    
+                    print(f"DEBUG: Sample {m['i_out']} - prompt_len={pl}, expert_cot_len={e_cot_l}")
+                    
+                    if e_cot_l == 0:
+                        print(f"DEBUG: Skipping sample {m['i_out']} - expert CoT length is 0")
+                        continue
+                    
+                    # Skip if prompt length is 0 (this shouldn't happen but could cause indexing issues)
+                    if pl == 0:
+                        print(f"WARNING: Skipping expert CoT calculation for sample {m['i_out']} - prompt length is 0")
+                        continue
+                    
+                    # Isolate logits for the CoT part
+                    # The logits at position i predict token i+1
+                    # So for expert CoT starting at position pl, we need logits[pl-1:pl+e_cot_l-1]
+                    # Fix: ensure start index is never negative
+                    start_idx = max(0, pl - 1)
+                    end_idx = pl + e_cot_l - 1
+                    
+                    # Additional safety check
+                    if start_idx >= end_idx:
+                        print(f"WARNING: Skipping expert CoT calculation for sample {m['i_out']} - invalid slice range [{start_idx}:{end_idx}]")
+                        continue
+                    
+                    cot_logits = expert_logits[row, start_idx:end_idx, :]  # [e_cot_l, V]
+                    cot_probs = torch.softmax(cot_logits.float(), dim=-1)  # [e_cot_l, V]
+                    
+                    # Get the actual expert CoT token IDs
+                    correct_token_ids = torch.tensor(expert_cot_ids_list[row], dtype=torch.long, device=this_device)  # [e_cot_l]
+                    
+                    # Gather the probabilities of the correct tokens at each step
+                    step_probs = cot_probs.gather(1, correct_token_ids.unsqueeze(1)).squeeze(1)  # [e_cot_l]
+                    
+                    # Calculate the joint probability by taking the product
+                    # Use log-probabilities for numerical stability, then exponentiate
+                    log_probs = torch.log(step_probs + 1e-10)  # Add small epsilon to avoid log(0)
+                    joint_log_prob = torch.sum(log_probs)
+                    joint_probability = torch.exp(joint_log_prob).item()
+
+                    expert_prob_results[m['i_out']] = joint_probability
+            
+            except Exception as e:
+                print(f"WARNING: Expert CoT calculation failed for batch {b_idx}: {e}")
+                # Continue with normal processing even if expert CoT fails
+        # =========================================================
+        # <<< END: NEW EXPERT CoT CALCULATION BLOCK >>>
+        # =========================================================
 
         # Pack batch tensors on 'this_device'
         input_ids, attn_mask, position_ids, prompt_lens, gen_lens, gen_ids_list = \
@@ -413,16 +566,37 @@ def run_hf_scoring_streaming(
         except Exception as e:
             print(f"WARNING: failed to write path vectors npz: {e}")
 
-    return hf_results_per_output, wrote_npz
+    return hf_results_per_output, wrote_npz, expert_prob_results
 
 
 # --- NEW: Pass-1 in a child process (so EngineCore exits and frees VRAM)
-def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], sampling_cfg: Dict[str, Any], gpu_memory_utilization: float = 0.4, max_model_len: int = 8192):
+def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], sampling_cfg: Dict[str, Any], gpu_memory_utilization: float = 0.4, max_model_len: int = 8192, args: Any = None):
     """
     sampling_cfg keys: temperature, top_p, top_k, max_tokens, stop (list[str]), stop_token_ids (list[int]|None)
     Returns list of dicts: {prompt, prompt_token_ids, generated_text, generated_token_ids}
     (Requires pass1_child_vllm.py next to this file.)
     """
+    try:
+        # 1. Load only the model's config file (very fast)
+        print("🔧 Checking model's config for max_position_embeddings...")
+        config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+        
+        # 2. Get the model's architectural limit from its config
+        derived_max_len = getattr(config, "max_position_embeddings", 8192)
+        print(f"✅ Model's architectural limit (max_position_embeddings): {derived_max_len}")
+
+        # 3. Get the user's desired limit from the command line arguments
+        user_max_len = getattr(args, 'max_model_len', 8192)
+
+        # 4. Use the SMALLER of the two values to be safe
+        final_max_model_len = min(derived_max_len, user_max_len)
+        print(f"🎯 Using final max_model_len for vLLM: {final_max_model_len}")
+
+    except Exception as e:
+        print(f"⚠️ Warning: Could not automatically determine max_model_len from config. Falling back to default. Error: {e}")
+        final_max_model_len = max_model_len # Fallback to the original value
+
+
     with tempfile.TemporaryDirectory() as td:
         in_path  = os.path.join(td, "pass1_in.json")
         out_path = os.path.join(td, "pass1_out.json")
@@ -436,12 +610,13 @@ def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], samplin
             "stop": sampling_cfg.get("stop", []),
             "stop_token_ids": sampling_cfg.get("stop_token_ids", None),
             "gpu_memory_utilization": gpu_memory_utilization,
-            "max_model_len": max_model_len,  # Limit context length to reduce KV cache memory
+            # Use the final, safe value determined above
+            "max_model_len": final_max_model_len,
         }
         with open(in_path, "w", encoding="utf-8") as f:
             json.dump(payload, f)
         
-        print(f"🚀 Starting vLLM subprocess with max_model_len={max_model_len}, gpu_memory_utilization={gpu_memory_utilization}")
+        print(f"🚀 Starting vLLM subprocess with max_model_len={final_max_model_len}, gpu_memory_utilization={gpu_memory_utilization}")
         # Spawn child. It will exit and release all VRAM.
         subprocess.run([sys.executable, "pass1_child_vllm.py", in_path, out_path], check=True)
         print("✅ vLLM subprocess completed successfully")
@@ -625,6 +800,7 @@ def setup(args):
                 trust_remote_code=True,
                 gpu_memory_utilization=args.vllm_gpu_memory_utilization,
                 max_model_len=max_model_len,  # Limit context length
+                max_num_seqs=64,
             )
             print(f"✅ vLLM model loaded successfully with max_model_len={max_model_len}!")
             # <<< NEW: Print memory after loading vLLM
@@ -920,7 +1096,7 @@ def main(llm, tokenizer, data_name, args):
                 )
                 # Use max_model_len of 8192 to reduce KV cache memory requirements
                 max_model_len = getattr(args, 'max_model_len', 8192)
-                child_records = run_pass1_in_subprocess(args.model_name_or_path, prompts, sampling_cfg, args.vllm_gpu_memory_utilization, max_model_len)
+                child_records = run_pass1_in_subprocess(args.model_name_or_path, prompts, sampling_cfg, args.vllm_gpu_memory_utilization, max_model_len, args)
 
                 # Re-wrap into minimal objects that mimic vLLM outputs you use later
                 class _MiniOut:
@@ -1126,6 +1302,7 @@ def main(llm, tokenizer, data_name, args):
 
     # === PASS 2: HF scoring (microbatched & OOM-safe) ===
     hf_results_per_output = None
+    expert_prob_results = {}
     if args.enable_prob_tracking and args.use_vllm:
         if args.enable_prob_tracking and args.use_vllm:
             print("\n" + "="*60)
@@ -1160,7 +1337,7 @@ def main(llm, tokenizer, data_name, args):
             SCORING_MAX_TOKENS = 2048      # e.g., 2k (try 4096/8192 if you have headroom)
             MAX_LEN_PER_BATCH  = 1024      # cap long outliers (optional)
             print("Starting HF scoring with max tokens:", SCORING_MAX_TOKENS)
-            hf_results_per_output, wrote_npz = run_hf_scoring_streaming(
+            hf_results_per_output, wrote_npz, expert_prob_results = run_hf_scoring_streaming(
                 hf_model=hf_model,
                 vllm_outputs=vllm_outputs,
                 samples=samples,              # each has "gt"
@@ -1238,6 +1415,13 @@ def main(llm, tokenizer, data_name, args):
                     "file": (path_vectors_npz if bool(args.enable_path_vectors) else None),
                     "run_id": run_id,
                 }
+                
+                # Add expert CoT probability if available
+                if output_index in expert_prob_results:
+                    sample["expert_cot_probability"] = expert_prob_results[output_index]
+                elif sample.get("gt_cot"):
+                    # Use gt_cot as expert CoT if available but no probability calculated, set to None
+                    sample["expert_cot_probability"] = None
             else:
                 print(f"Warning: HF results missing for output index {output_index}")
         all_samples.append(sample)
@@ -1320,6 +1504,14 @@ def main(llm, tokenizer, data_name, args):
                     "gold_path_vectors": gold_path_vectors,
                     "score": rec.get("score", []),
                 }
+                
+                # Preserve level information if it exists (for MATH dataset)
+                if "level" in rec:
+                    entry["level"] = rec["level"]
+                
+                # Preserve expert CoT probability if it exists
+                if "expert_cot_probability" in rec:
+                    entry["expert_cot_probability"] = rec["expert_cot_probability"]
                 prob_records.append(entry)
             # Write as JSONL
             with open(prob_only_file, "w") as f:

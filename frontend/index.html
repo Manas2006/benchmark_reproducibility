@@ -511,22 +511,30 @@
 
                     <!-- Heatmaps Display -->
                     <div id="heatmap-display" class="hidden">
-                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div class="space-y-8">
                             <!-- Chosen Token Probabilities -->
                             <div class="bg-white border border-gray-200 rounded-lg p-4">
                                 <h3 class="text-lg font-semibold text-gray-900 mb-3">Chosen Token Probabilities</h3>
-                                <p class="text-xs text-gray-500 mb-3">Color intensity shows model's confidence in tokens it actually chose</p>
+                                <p class="text-xs text-gray-500 mb-3">Color intensity shows model's confidence in tokens it actually chose (normalized). Hover over tokens to see position on curve.</p>
                                 <div id="heatmap-chosen" class="text-sm leading-relaxed" style="line-height: 2.5;">
                                     <!-- Tokens will be rendered here -->
+                                </div>
+                                <!-- Probability Curve -->
+                                <div class="mt-4">
+                                    <canvas id="chosen-prob-curve" width="1000" height="500" class="w-full border border-gray-200 rounded"></canvas>
                                 </div>
                             </div>
 
                             <!-- Ground Truth Token Probabilities -->
                             <div class="bg-white border border-gray-200 rounded-lg p-4">
                                 <h3 class="text-lg font-semibold text-gray-900 mb-3">Ground Truth Token Probabilities</h3>
-                                <p class="text-xs text-gray-500 mb-3">Color intensity shows probability of ground truth token at each position (log-scaled)</p>
+                                <p class="text-xs text-gray-500 mb-3">Color intensity shows probability of ground truth token at each position (normalized). Hover over tokens to see position on curve.</p>
                                 <div id="heatmap-correct" class="text-sm leading-relaxed" style="line-height: 2.5;">
                                     <!-- Tokens will be rendered here -->
+                                </div>
+                                <!-- Probability Curve -->
+                                <div class="mt-4">
+                                    <canvas id="correct-prob-curve" width="1000" height="500" class="w-full border border-gray-200 rounded"></canvas>
                                 </div>
                             </div>
                         </div>
@@ -534,18 +542,19 @@
                         <!-- Legend -->
                         <div class="mt-6 bg-gray-50 border border-gray-200 rounded-lg p-4">
                             <h4 class="text-sm font-semibold text-gray-900 mb-2">Color Legend</h4>
+                            <p class="text-xs text-gray-600 mb-3">Colors are normalized using mean and standard deviation for better differentiation between high and low probability tokens.</p>
                             <div class="flex items-center space-x-4">
                                 <div class="flex items-center">
                                     <div class="w-16 h-6 rounded" style="background: white; border: 1px solid #ccc;"></div>
-                                    <span class="ml-2 text-xs text-gray-600">Low (0%)</span>
+                                    <span class="ml-2 text-xs text-gray-600">Low Probability (Below Mean)</span>
                                 </div>
                                 <div class="flex items-center">
                                     <div class="w-16 h-6 rounded" style="background: rgb(255, 128, 128);"></div>
-                                    <span class="ml-2 text-xs text-gray-600">Medium (50%)</span>
+                                    <span class="ml-2 text-xs text-gray-600">Near Mean</span>
                                 </div>
                                 <div class="flex items-center">
                                     <div class="w-16 h-6 rounded" style="background: rgb(255, 0, 0);"></div>
-                                    <span class="ml-2 text-xs text-gray-600">High (100%)</span>
+                                    <span class="ml-2 text-xs text-gray-600">High Probability (Above Mean)</span>
                                 </div>
                             </div>
                         </div>
@@ -738,7 +747,7 @@
         </main>
     </div>
 
-    <script src="app.js?v=1.7"></script>
+    <script src="app.js?v=1.8"></script>
 </body>
 
 </html>
