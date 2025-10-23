@@ -165,7 +165,10 @@ async def get_prob_file(jid: str):
 @app.get("/jobs/{jid}/prob-plot")
 async def generate_prob_plot(jid: str, plot_type: str, sample_id: int | None = None, math_level: str | None = None):
     valid_plot_types = ("aggregate", "single", "path_aggregate", "path_single", "correct_aggregate", "incorrect_aggregate", 
-                       "level_single", "level_aggregate", "starting_tokens_by_level", "ending_tokens_by_level", "correct_vs_incorrect")
+                       "level_single", "level_aggregate", "correct_vs_incorrect",
+                       "first_token_prob", "last_token_prob", 
+                       "first_token_prob_correct", "first_token_prob_incorrect",
+                       "last_token_prob_correct", "last_token_prob_incorrect")
     if plot_type not in valid_plot_types:
         raise HTTPException(status_code=400, detail=f"plot_type must be one of: {', '.join(valid_plot_types)}")
     if jid not in job_db:
@@ -217,10 +220,18 @@ async def generate_prob_plot(jid: str, plot_type: str, sample_id: int | None = N
     elif plot_type == "level_aggregate":
         # For level_aggregate, we'll return multiple images as a zip file
         expected_png = output_dir / f"{dataset_name}_level_aggregate_{method_name}.zip"
-    elif plot_type == "starting_tokens_by_level":
-        expected_png = output_dir / f"{dataset_name}_starting_tokens_by_level_{method_name}.png"
-    elif plot_type == "ending_tokens_by_level":
-        expected_png = output_dir / f"{dataset_name}_ending_tokens_by_level_{method_name}.png"
+    elif plot_type == "first_token_prob":
+        expected_png = output_dir / f"{dataset_name}_first_token_prob_{method_name}.png"
+    elif plot_type == "first_token_prob_correct":
+        expected_png = output_dir / f"{dataset_name}_first_token_prob_correct_{method_name}.png"
+    elif plot_type == "first_token_prob_incorrect":
+        expected_png = output_dir / f"{dataset_name}_first_token_prob_incorrect_{method_name}.png"
+    elif plot_type == "last_token_prob":
+        expected_png = output_dir / f"{dataset_name}_last_token_prob_{method_name}.png"
+    elif plot_type == "last_token_prob_correct":
+        expected_png = output_dir / f"{dataset_name}_last_token_prob_correct_{method_name}.png"
+    elif plot_type == "last_token_prob_incorrect":
+        expected_png = output_dir / f"{dataset_name}_last_token_prob_incorrect_{method_name}.png"
     else:  # single
         if sample_id is None:
             raise HTTPException(status_code=400, detail="sample_id is required for single plot")
@@ -579,6 +590,116 @@ async def get_job_questions(job_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading questions: {str(e)}")
 
+@app.post("/jobs/{job_id}/generate-plot")
+async def generate_plot(job_id: str, plot_type: str, dataset_name: str, method_name: str):
+    """Generate a specific plot type for a job"""
+    if job_id not in job_db:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_info = job_db[job_id]
+    result_file = job_info.get("result_file")
+    
+    if not result_file or not Path(result_file).exists():
+        raise HTTPException(status_code=404, detail="Result file not found")
+    
+    try:
+        import subprocess
+        import os
+        
+        # Create output directory
+        output_dir = os.path.join(os.path.dirname(result_file), "prob_plots")
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Build command
+        cmd = [
+            "python3", "prob_plot.py",
+            result_file,
+            "--dataset_name", dataset_name,
+            "--method_name", method_name,
+            "--output_dir", output_dir,
+            "--plot_type", plot_type
+        ]
+        
+        # Run the plotting command
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd="/work/10757/cc123456/ls6/benchmark-reproducibility/mathevalUI/evaluation")
+        
+        if result.returncode == 0:
+            # Determine the output filename
+            if plot_type in ['first_token_prob_correct', 'first_token_prob_incorrect']:
+                filename = f"{dataset_name}_first_token_prob_{plot_type.split('_')[-1]}_{method_name}.png"
+            elif plot_type in ['last_token_prob_correct', 'last_token_prob_incorrect']:
+                filename = f"{dataset_name}_last_token_prob_{plot_type.split('_')[-1]}_{method_name}.png"
+            else:
+                filename = f"{dataset_name}_{plot_type}_{method_name}.png"
+            
+            plot_path = os.path.join(output_dir, filename)
+            
+            if os.path.exists(plot_path):
+                return {
+                    "success": True,
+                    "message": f"Plot generated successfully",
+                    "plot_path": plot_path,
+                    "filename": filename
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"Plot file not found: {plot_path}",
+                    "stdout": result.stdout,
+                    "stderr": result.stderr
+                }
+        else:
+            return {
+                "success": False,
+                "message": f"Plot generation failed",
+                "stdout": result.stdout,
+                "stderr": result.stderr
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating plot: {str(e)}")
+
+
+@app.get("/jobs/{job_id}/plot-image/{filename}")
+async def get_plot_image(job_id: str, filename: str):
+    """Serve generated plot images"""
+    if job_id not in job_db:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_info = job_db[job_id]
+    result_file = job_info.get("result_file")
+    
+    if not result_file:
+        raise HTTPException(status_code=404, detail="Result file not found")
+    
+    # Construct plot path
+    output_dir = os.path.join(os.path.dirname(result_file), "prob_plots")
+    plot_path = os.path.join(output_dir, filename)
+    
+    if not os.path.exists(plot_path):
+        raise HTTPException(status_code=404, detail="Plot file not found")
+    
+    # Security check - ensure the file is within allowed directories
+    config = path_manager.get_config()
+    allowed_dirs = [Path(config.output_dir), Path(config.logs_dir), Path(config.evaluation_dir)]
+    
+    is_allowed = False
+    for allowed_dir in allowed_dirs:
+        try:
+            Path(plot_path).relative_to(allowed_dir)
+            is_allowed = True
+            break
+        except ValueError:
+            continue
+    
+    if not is_allowed:
+        raise HTTPException(status_code=403, detail="Access denied to this file path")
+    
+    # Return the image file
+    from fastapi.responses import FileResponse
+    return FileResponse(plot_path, media_type="image/png")
+
+
 @app.get("/jobs/{job_id}/heatmap-data/{question_idx}", response_model=HeatmapDataResponse)
 async def get_heatmap_data(job_id: str, question_idx: int):
     """Get token-level probability data for heatmap visualization"""
@@ -780,14 +901,44 @@ async def get_heatmap_data(job_id: str, question_idx: int):
         chosen_token_ids = chosen_token_ids[:min_len] if chosen_token_ids else list(range(min_len))
         correct_token_ids = correct_token_ids[:min_len] if correct_token_ids else list(range(min_len))
         
+        # Normalize probabilities with mean and std for better color differentiation
+        # This maps probabilities to approximately -1 to 1 range
+        def normalize_probs(probs):
+            if not probs or len(probs) == 0:
+                return probs
+            import numpy as np
+            probs_array = np.array(probs)
+            mean = np.mean(probs_array)
+            std = np.std(probs_array)
+            if std > 0:
+                normalized = (probs_array - mean) / std
+                # Clamp to reasonable range for visualization
+                normalized = np.clip(normalized, -3, 3)
+                # Map to 0-1 range for color mapping
+                normalized = (normalized + 3) / 6  # Maps [-3, 3] to [0, 1]
+                return normalized.tolist()
+            else:
+                # If std is 0, all values are the same, return 0.5 (middle)
+                return [0.5] * len(probs)
+        
+        # Store original probabilities for display in tooltips
+        chosen_probs_original = list(chosen_probs)
+        correct_probs_original = list(correct_probs)
+        
+        # Normalize for color mapping
+        chosen_probs_normalized = normalize_probs(chosen_probs)
+        correct_probs_normalized = normalize_probs(correct_probs)
+        
         return HeatmapDataResponse(
             job_id=job_id,
             question_idx=question_idx,
             question_text=question_text,
             model_output=model_output,
             output_tokens=tokens,
-            chosen_probs=chosen_probs,
-            correct_probs=correct_probs,
+            chosen_probs=chosen_probs_normalized,
+            correct_probs=correct_probs_normalized,
+            chosen_probs_original=chosen_probs_original,
+            correct_probs_original=correct_probs_original,
             chosen_token_ids=chosen_token_ids,
             correct_token_ids=correct_token_ids,
             is_correct=is_correct,
