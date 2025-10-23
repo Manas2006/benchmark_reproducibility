@@ -737,9 +737,20 @@ async def get_heatmap_data(job_id: str, question_idx: int):
                         try:
                             # Decode the token ID to get the actual token
                             decoded_token = tokenizer.decode([token_id])
-                            # Clean up the token (remove extra spaces, special characters)
-                            decoded_token = decoded_token.strip()
-                            if not decoded_token:
+                            # For display purposes, convert whitespace to visible characters
+                            if decoded_token == '\n':
+                                decoded_token = '↵'
+                            elif decoded_token == ' ':
+                                decoded_token = '␣'
+                            elif decoded_token == '\t':
+                                decoded_token = '⇥'
+                            elif decoded_token == '\n\n':
+                                decoded_token = '↵↵'
+                            # Only replace truly empty tokens with token IDs
+                            elif decoded_token.strip() == '' and decoded_token:
+                                # This is whitespace-only, keep it as is
+                                pass
+                            elif not decoded_token:
                                 decoded_token = f"<{token_id}>"
                             tokens.append(decoded_token)
                         except Exception as e:
