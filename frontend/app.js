@@ -123,10 +123,6 @@ function showTab(tabName, event = null) {
                 console.error('Failed to create cot-analysis tab');
                 return;
             }
-        } else if (tabName === 'truncation-analysis') {
-            // Load jobs when switching to truncation analysis tab
-            loadTruncationJobs();
-            return;
         } else {
             return;
         }
@@ -154,6 +150,13 @@ function showTab(tabName, event = null) {
     // Load path config when settings tab is shown
     if (tabName === 'settings') {
         loadPathConfig();
+    }
+    
+    // Load jobs for specific tabs
+    if (tabName === 'truncation-analysis') {
+        loadTruncationJobs();
+    } else if (tabName === 'heatmap') {
+        loadHeatmapJobs();
     }
 }
 
@@ -3413,6 +3416,9 @@ async function loadHeatmapData() {
         renderHeatmap(data.output_tokens, data.chosen_probs, 'heatmap-chosen');
         renderHeatmap(data.output_tokens, data.correct_probs, 'heatmap-correct');
         
+        // Render probability plots
+        renderProbabilityPlots(data.output_tokens, data.chosen_probs, data.correct_probs);
+        
         // Show heatmap display
         document.getElementById('heatmap-loading').classList.add('hidden');
         document.getElementById('heatmap-display').classList.remove('hidden');
@@ -3466,6 +3472,172 @@ function getHeatmapColor(prob) {
     return `rgb(255, ${g}, ${b})`;
 }
 
+function renderProbabilityPlots(tokens, chosenProbs, correctProbs) {
+    // Show plots section
+    document.getElementById('heatmap-plots-section').classList.remove('hidden');
+    
+    // Plot A: Line chart showing probability over token positions
+    renderLineChart(tokens, chosenProbs, correctProbs);
+    
+    // Plot B: Bar chart comparing average probabilities
+    renderBarChart(chosenProbs, correctProbs);
+    
+    // Plot C: Confidence trend (moving average)
+    renderConfidenceTrend(chosenProbs, correctProbs);
+}
+
+function renderLineChart(tokens, chosenProbs, correctProbs) {
+    const ctx = document.getElementById('plot-a-canvas').getContext('2d');
+    
+    // Destroy existing chart if it exists
+    if (window.plotAChart) {
+        window.plotAChart.destroy();
+    }
+    
+    window.plotAChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: tokens.map((_, idx) => idx),
+            datasets: [
+                {
+                    label: 'Chosen Token Probability',
+                    data: chosenProbs,
+                    borderColor: 'rgb(59, 130, 246)',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    tension: 0.1
+                },
+                {
+                    label: 'Ground Truth Token Probability',
+                    data: correctProbs,
+                    borderColor: 'rgb(239, 68, 68)',
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    tension: 0.1
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { position: 'top' },
+                title: { display: true, text: 'Probability Distribution Across Token Positions' }
+            },
+            scales: {
+                y: { beginAtZero: true, max: 1, title: { display: true, text: 'Probability' } },
+                x: { title: { display: true, text: 'Token Position' } }
+            }
+        }
+    });
+}
+
+function renderBarChart(chosenProbs, correctProbs) {
+    const ctx = document.getElementById('plot-b-canvas').getContext('2d');
+    
+    if (window.plotBChart) {
+        window.plotBChart.destroy();
+    }
+    
+    const avgChosen = chosenProbs.reduce((a, b) => a + b, 0) / chosenProbs.length;
+    const avgCorrect = correctProbs.reduce((a, b) => a + b, 0) / correctProbs.length;
+    const minChosen = Math.min(...chosenProbs);
+    const maxChosen = Math.max(...chosenProbs);
+    const minCorrect = Math.min(...correctProbs);
+    const maxCorrect = Math.max(...correctProbs);
+    
+    window.plotBChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: ['Average', 'Minimum', 'Maximum'],
+            datasets: [
+                {
+                    label: 'Chosen Token',
+                    data: [avgChosen, minChosen, maxChosen],
+                    backgroundColor: 'rgba(59, 130, 246, 0.7)',
+                    borderColor: 'rgb(59, 130, 246)',
+                    borderWidth: 1
+                },
+                {
+                    label: 'Ground Truth Token',
+                    data: [avgCorrect, minCorrect, maxCorrect],
+                    backgroundColor: 'rgba(239, 68, 68, 0.7)',
+                    borderColor: 'rgb(239, 68, 68)',
+                    borderWidth: 1
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { position: 'top' },
+                title: { display: true, text: 'Probability Statistics Comparison' }
+            },
+            scales: {
+                y: { beginAtZero: true, max: 1, title: { display: true, text: 'Probability' } }
+            }
+        }
+    });
+}
+
+function renderConfidenceTrend(chosenProbs, correctProbs) {
+    const ctx = document.getElementById('plot-c-canvas').getContext('2d');
+    
+    if (window.plotCChart) {
+        window.plotCChart.destroy();
+    }
+    
+    // Calculate moving average with window size 10
+    const windowSize = 10;
+    const movingAvgChosen = calculateMovingAverage(chosenProbs, windowSize);
+    const movingAvgCorrect = calculateMovingAverage(correctProbs, windowSize);
+    
+    window.plotCChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: movingAvgChosen.map((_, idx) => idx),
+            datasets: [
+                {
+                    label: 'Chosen Token Confidence (Moving Avg)',
+                    data: movingAvgChosen,
+                    borderColor: 'rgb(59, 130, 246)',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                },
+                {
+                    label: 'Ground Truth Confidence (Moving Avg)',
+                    data: movingAvgCorrect,
+                    borderColor: 'rgb(239, 68, 68)',
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { position: 'top' },
+                title: { display: true, text: 'Confidence Trend (10-token Moving Average)' }
+            },
+            scales: {
+                y: { beginAtZero: true, max: 1, title: { display: true, text: 'Confidence' } },
+                x: { title: { display: true, text: 'Position' } }
+            }
+        }
+    });
+}
+
+function calculateMovingAverage(data, windowSize) {
+    const result = [];
+    for (let i = 0; i < data.length; i++) {
+        const start = Math.max(0, i - Math.floor(windowSize / 2));
+        const end = Math.min(data.length, i + Math.ceil(windowSize / 2));
+        const window = data.slice(start, end);
+        const avg = window.reduce((a, b) => a + b, 0) / window.length;
+        result.push(avg);
+    }
+    return result;
+}
+
 // Show/hide error messages
 function showHeatmapError(message) {
     const errorDiv = document.getElementById('heatmap-error');
@@ -3478,13 +3650,22 @@ function hideHeatmapError() {
     document.getElementById('heatmap-error').classList.add('hidden');
 }
 
+function togglePlot(plotId) {
+    const plot = document.getElementById(plotId);
+    const button = document.getElementById(`toggle-${plotId}`);
+    
+    if (plot.classList.contains('hidden')) {
+        plot.classList.remove('hidden');
+        button.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+        button.classList.add('bg-green-600', 'hover:bg-green-700');
+    } else {
+        plot.classList.add('hidden');
+        button.classList.remove('bg-green-600', 'hover:bg-green-700');
+        button.classList.add('bg-blue-600', 'hover:bg-blue-700');
+    }
+}
+
 // Initialize heatmap tab on load
 document.addEventListener('DOMContentLoaded', function() {
-    // Load jobs when heatmap tab is shown
-    const heatmapTab = document.querySelector('[onclick="showTab(\'heatmap\')"]');
-    if (heatmapTab) {
-        heatmapTab.addEventListener('click', function() {
-            loadHeatmapJobs();
-        });
-    }
+    // Jobs are now loaded automatically when tabs are switched in showTab function
 });

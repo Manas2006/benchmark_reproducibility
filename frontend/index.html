@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Qwen Math Evaluation UI</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         .tab-content {
             display: none;
@@ -547,6 +548,47 @@
                                     <div class="w-16 h-6 rounded" style="background: rgb(255, 0, 0);"></div>
                                     <span class="ml-2 text-xs text-gray-600">High (100%)</span>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Probability Plots Section -->
+                    <div id="heatmap-plots-section" class="hidden mt-6">
+                        <div class="bg-white border border-gray-200 rounded-lg p-4">
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="text-lg font-semibold text-gray-900">Probability Analysis Plots</h3>
+                                <div class="space-x-2">
+                                    <button id="toggle-plot-a" onclick="togglePlot('plot-a')" 
+                                        class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                                        Line Chart
+                                    </button>
+                                    <button id="toggle-plot-b" onclick="togglePlot('plot-b')" 
+                                        class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                                        Bar Chart
+                                    </button>
+                                    <button id="toggle-plot-c" onclick="togglePlot('plot-c')" 
+                                        class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                                        Confidence Trend
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <!-- Plot A: Probability Distribution Line Chart -->
+                            <div id="plot-a" class="hidden mb-4">
+                                <h4 class="text-md font-medium text-gray-800 mb-2">Token Position vs Probability</h4>
+                                <canvas id="plot-a-canvas" width="800" height="300"></canvas>
+                            </div>
+                            
+                            <!-- Plot B: Average Probability Bar Chart -->
+                            <div id="plot-b" class="hidden mb-4">
+                                <h4 class="text-md font-medium text-gray-800 mb-2">Average Probabilities Comparison</h4>
+                                <canvas id="plot-b-canvas" width="800" height="300"></canvas>
+                            </div>
+                            
+                            <!-- Plot C: Confidence Trend -->
+                            <div id="plot-c" class="hidden mb-4">
+                                <h4 class="text-md font-medium text-gray-800 mb-2">Model Confidence Over Generation</h4>
+                                <canvas id="plot-c-canvas" width="800" height="300"></canvas>
                             </div>
                         </div>
                     </div>
