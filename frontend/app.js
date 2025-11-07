@@ -1,6 +1,11 @@
 // Configuration
-const API_BASE = 'http://localhost:8000';
-const WS_BASE = 'ws://localhost:8000';
+// If config.js is loaded (via start.sh), it will define window.API_BASE and window.WS_BASE
+// Otherwise, fall back to default values
+window.API_BASE = window.API_BASE || 'http://localhost:8000';
+window.WS_BASE = window.WS_BASE || 'ws://localhost:8000';
+
+const API_BASE = window.API_BASE;
+const WS_BASE = window.WS_BASE;
 
 // Available options
 const AVAILABLE_MODELS = [
@@ -174,6 +179,7 @@ async function loadPathConfig() {
         document.getElementById('python_path').value = config.python_path || '';
         document.getElementById('conda_env_path').value = config.conda_env_path || '';
         document.getElementById('output_dir').value = config.output_dir || '';
+        document.getElementById('exports_dir').value = config.exports_dir || '';
         document.getElementById('logs_dir').value = config.logs_dir || '';
         document.getElementById('scripts_dir').value = config.scripts_dir || '';
         document.getElementById('job_db_path').value = config.job_db_path || '';
@@ -181,6 +187,7 @@ async function loadPathConfig() {
         document.getElementById('slurm_account').value = config.slurm_account || '';
         document.getElementById('slurm_wall_time').value = config.slurm_wall_time || '';
         document.getElementById('openai_api_key').value = config.openai_api_key || '';
+        document.getElementById('hf_token').value = config.hf_token || '';
 
         console.log('Path configuration loaded:', config);
     } catch (error) {
@@ -201,13 +208,15 @@ async function savePathConfig(event) {
             python_path: document.getElementById('python_path').value,
             conda_env_path: document.getElementById('conda_env_path').value,
             output_dir: document.getElementById('output_dir').value,
+            exports_dir: document.getElementById('exports_dir').value,
             logs_dir: document.getElementById('logs_dir').value,
             scripts_dir: document.getElementById('scripts_dir').value,
             job_db_path: document.getElementById('job_db_path').value,
             slurm_partition: document.getElementById('slurm_partition').value,
             slurm_account: document.getElementById('slurm_account').value,
             slurm_wall_time: document.getElementById('slurm_wall_time').value,
-            openai_api_key: document.getElementById('openai_api_key').value
+            openai_api_key: document.getElementById('openai_api_key').value,
+            hf_token: document.getElementById('hf_token').value
         };
 
         console.log('📤 Sending SLURM config:', {
@@ -1579,10 +1588,23 @@ document.addEventListener('DOMContentLoaded', function () {
             analyzeBtn.disabled = false;
             exportExcelBtn.disabled = false;
             exportJsonBtn.disabled = false;
+            
+            // Auto-load cached results if available
+            const cachedData = getCachedCoTData(this.value);
+            if (cachedData) {
+                console.log('Auto-loading cached CoT analysis for job:', this.value);
+                currentCoTData = cachedData;
+                showCoTResults(cachedData, true); // true indicates cached data
+            } else {
+                // Hide any previous results if no cache exists
+                hideCoTResults();
+                hideCoTError();
+            }
         } else {
             analyzeBtn.disabled = true;
-            exportExcelBtn.disabled = true;
-            exportJsonBtn.disabled = true;
+            exportExcelBtn.disabled = false; // Keep enabled if cached data exists
+            exportJsonBtn.disabled = false;  // Keep enabled if cached data exists
+            hideCoTResults();
         }
     });
 
@@ -2420,7 +2442,15 @@ function hideCoTError() {
 
 
 function hideCoTResults() {
-    document.getElementById('cot-analysis-results').classList.add('hidden');
+    const resultsDiv = document.getElementById('cot-analysis-results');
+    if (resultsDiv) {
+        resultsDiv.classList.add('hidden');
+        // Clear the results content to prevent stale data from showing
+        const summaryDiv = document.getElementById('cot-summary');
+        const samplesDiv = document.getElementById('sample-analysis');
+        if (summaryDiv) summaryDiv.innerHTML = '';
+        if (samplesDiv) samplesDiv.innerHTML = '';
+    }
 }
 
 // Function to create the CoT Analysis tab dynamically
@@ -2568,6 +2598,15 @@ function waitForElement(selector, timeout = 5000) {
 // OpenAI API Key functions
 function toggleOpenAIKeyVisibility() {
     const keyInput = document.getElementById('openai_api_key');
+    if (keyInput.type === 'password') {
+        keyInput.type = 'text';
+    } else {
+        keyInput.type = 'password';
+    }
+}
+
+function toggleHFTokenVisibility() {
+    const keyInput = document.getElementById('hf_token');
     if (keyInput.type === 'password') {
         keyInput.type = 'text';
     } else {
@@ -3363,6 +3402,11 @@ async function loadHeatmapData() {
     document.getElementById('heatmap-loading').classList.remove('hidden');
     document.getElementById('heatmap-display').classList.add('hidden');
     document.getElementById('heatmap-question-display').classList.add('hidden');
+    // Hide token info box when loading new data
+    const infoBox = document.getElementById('plot-c-token-info');
+    if (infoBox) {
+        infoBox.classList.add('hidden');
+    }
     hideHeatmapError();
     
     try {
@@ -3416,8 +3460,14 @@ async function loadHeatmapData() {
         renderHeatmap(data.output_tokens, data.chosen_probs, 'heatmap-chosen');
         renderHeatmap(data.output_tokens, data.correct_probs, 'heatmap-correct');
         
-        // Render probability plots
-        renderProbabilityPlots(data.output_tokens, data.chosen_probs, data.correct_probs);
+        // Render probability plots (pass original probabilities if available)
+        renderProbabilityPlots(
+            data.output_tokens, 
+            data.chosen_probs, 
+            data.correct_probs,
+            data.chosen_probs_original || data.chosen_probs,
+            data.correct_probs_original || data.correct_probs
+        );
         
         // Show heatmap display
         document.getElementById('heatmap-loading').classList.add('hidden');
@@ -3462,17 +3512,14 @@ function renderHeatmap(tokens, probs, containerId) {
 function getHeatmapColor(prob) {
     // Clamp probability between 0 and 1
     prob = Math.max(0, Math.min(1, prob));
-    
-    // Calculate RGB values for white-to-red gradient
-    // White = rgb(255, 255, 255) when prob = 0
-    // Red = rgb(255, 0, 0) when prob = 1
+    // Interpolate from white (low) to red (high)
+    const r = 255;
     const g = Math.round(255 * (1 - prob));
     const b = Math.round(255 * (1 - prob));
-    
-    return `rgb(255, ${g}, ${b})`;
+    return `rgb(${r}, ${g}, ${b})`;
 }
 
-function renderProbabilityPlots(tokens, chosenProbs, correctProbs) {
+function renderProbabilityPlots(tokens, chosenProbs, correctProbs, chosenProbsOriginal, correctProbsOriginal) {
     // Show plots section
     document.getElementById('heatmap-plots-section').classList.remove('hidden');
     
@@ -3483,7 +3530,7 @@ function renderProbabilityPlots(tokens, chosenProbs, correctProbs) {
     renderBarChart(chosenProbs, correctProbs);
     
     // Plot C: Confidence trend (moving average)
-    renderConfidenceTrend(chosenProbs, correctProbs);
+    renderConfidenceTrend(tokens, chosenProbs, correctProbs, chosenProbsOriginal, correctProbsOriginal);
 }
 
 function renderLineChart(tokens, chosenProbs, correctProbs) {
@@ -3577,7 +3624,7 @@ function renderBarChart(chosenProbs, correctProbs) {
     });
 }
 
-function renderConfidenceTrend(chosenProbs, correctProbs) {
+function renderConfidenceTrend(tokens, chosenProbs, correctProbs, chosenProbsOriginal, correctProbsOriginal) {
     const ctx = document.getElementById('plot-c-canvas').getContext('2d');
     
     if (window.plotCChart) {
@@ -3588,6 +3635,13 @@ function renderConfidenceTrend(chosenProbs, correctProbs) {
     const windowSize = 10;
     const movingAvgChosen = calculateMovingAverage(chosenProbs, windowSize);
     const movingAvgCorrect = calculateMovingAverage(correctProbs, windowSize);
+    
+    // Store data for click handler access
+    const chartData = {
+        tokens: tokens,
+        chosenProbsOriginal: chosenProbsOriginal,
+        correctProbsOriginal: correctProbsOriginal
+    };
     
     window.plotCChart = new Chart(ctx, {
         type: 'line',
@@ -3621,6 +3675,26 @@ function renderConfidenceTrend(chosenProbs, correctProbs) {
             scales: {
                 y: { beginAtZero: true, max: 1, title: { display: true, text: 'Confidence' } },
                 x: { title: { display: true, text: 'Position' } }
+            },
+            onClick: (event, activeElements) => {
+                let clickedIndex = null;
+                
+                // If clicking directly on a data point, use that index
+                if (activeElements.length > 0) {
+                    clickedIndex = activeElements[0].index;
+                } else {
+                    // If clicking on chart area, find the nearest data point
+                    const canvasPosition = Chart.helpers.getRelativePosition(event, window.plotCChart);
+                    const dataX = window.plotCChart.scales.x.getValueForPixel(canvasPosition.x);
+                    // Round to nearest integer index
+                    clickedIndex = Math.round(dataX);
+                    // Clamp to valid range
+                    clickedIndex = Math.max(0, Math.min(chartData.tokens.length - 1, clickedIndex));
+                }
+                
+                if (clickedIndex !== null && clickedIndex >= 0 && clickedIndex < chartData.tokens.length) {
+                    displayTokenWindowInfo(clickedIndex, chartData.tokens, chartData.chosenProbsOriginal, chartData.correctProbsOriginal);
+                }
             }
         }
     });
@@ -3636,6 +3710,100 @@ function calculateMovingAverage(data, windowSize) {
         result.push(avg);
     }
     return result;
+}
+
+function displayTokenWindowInfo(clickedIndex, tokens, chosenProbsOriginal, correctProbsOriginal) {
+    // Calculate window bounds: center position ± 5 tokens (window size 10)
+    const windowSize = 10;
+    const halfWindow = Math.floor(windowSize / 2);
+    const start = Math.max(0, clickedIndex - halfWindow);
+    const end = Math.min(tokens.length, clickedIndex + halfWindow + 1);
+    
+    // Get the info box elements
+    const infoBox = document.getElementById('plot-c-token-info');
+    const infoBody = document.getElementById('plot-c-token-info-body');
+    
+    if (!infoBox || !infoBody) {
+        console.error('Info box elements not found');
+        return;
+    }
+    
+    // Clear previous content
+    infoBody.innerHTML = '';
+    
+    // Update header to show clicked position
+    const header = infoBox.querySelector('h5');
+    if (header) {
+        header.textContent = `Token Details at Position ${clickedIndex} (Window: positions ${start} to ${end - 1})`;
+    }
+    
+    // Create rows for each token in the window
+    for (let i = start; i < end; i++) {
+        const row = document.createElement('tr');
+        
+        // Highlight the center token (clicked position)
+        if (i === clickedIndex) {
+            row.className = 'bg-blue-50 font-medium';
+        } else {
+            row.className = 'border-b border-gray-200';
+        }
+        
+        // Position column
+        const posCell = document.createElement('td');
+        posCell.className = 'px-3 py-2 text-gray-900';
+        posCell.textContent = i;
+        row.appendChild(posCell);
+        
+        // Token text column (escape HTML and handle special characters)
+        const tokenCell = document.createElement('td');
+        tokenCell.className = 'px-3 py-2 text-gray-900 font-mono';
+        const tokenText = tokens[i] || '';
+        // Escape HTML and handle whitespace characters
+        const escapedToken = tokenText
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;')
+            .replace(/\n/g, '↵')
+            .replace(/\t/g, '⇥')
+            .replace(/ /g, '␣');
+        tokenCell.innerHTML = escapedToken || '<span class="text-gray-400">(empty)</span>';
+        row.appendChild(tokenCell);
+        
+        // Chosen probability column
+        const chosenProbCell = document.createElement('td');
+        chosenProbCell.className = 'px-3 py-2 text-gray-700';
+        const chosenProb = chosenProbsOriginal && chosenProbsOriginal[i] !== undefined 
+            ? chosenProbsOriginal[i] 
+            : null;
+        if (chosenProb !== null) {
+            chosenProbCell.textContent = chosenProb.toFixed(6);
+        } else {
+            chosenProbCell.textContent = 'N/A';
+            chosenProbCell.className += ' text-gray-400';
+        }
+        row.appendChild(chosenProbCell);
+        
+        // Correct probability column
+        const correctProbCell = document.createElement('td');
+        correctProbCell.className = 'px-3 py-2 text-gray-700';
+        const correctProb = correctProbsOriginal && correctProbsOriginal[i] !== undefined 
+            ? correctProbsOriginal[i] 
+            : null;
+        if (correctProb !== null) {
+            correctProbCell.textContent = correctProb.toFixed(6);
+        } else {
+            correctProbCell.textContent = 'N/A';
+            correctProbCell.className += ' text-gray-400';
+        }
+        row.appendChild(correctProbCell);
+        
+        infoBody.appendChild(row);
+    }
+    
+    // Show the info box
+    infoBox.classList.remove('hidden');
 }
 
 // Show/hide error messages
@@ -3662,6 +3830,14 @@ function togglePlot(plotId) {
         plot.classList.add('hidden');
         button.classList.remove('bg-green-600', 'hover:bg-green-700');
         button.classList.add('bg-blue-600', 'hover:bg-blue-700');
+        
+        // Hide token info box when plot-c is hidden
+        if (plotId === 'plot-c') {
+            const infoBox = document.getElementById('plot-c-token-info');
+            if (infoBox) {
+                infoBox.classList.add('hidden');
+            }
+        }
     }
 }
 
