@@ -23,12 +23,14 @@ class PathConfig(BaseModel):
     
     # Output and logs
     output_dir: str = Field(description="Directory for evaluation results")
+    exports_dir: Optional[str] = Field(default="", description="Directory for Excel exports")
     logs_dir: str = Field(description="Directory for log files")
     scripts_dir: str = Field(description="Directory for SLURM scripts")
     job_db_path: str = Field(description="Path to job database file")
     
     # API configuration
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key for CoT Analysis LLM Judge")
+    hf_token: Optional[str] = Field(default="", description="Hugging Face token for accessing gated models")
     
     # SLURM configuration
     slurm_partition: str = Field(default="gpu-a100-dev", description="SLURM partition name")

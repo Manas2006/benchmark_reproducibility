@@ -168,21 +168,30 @@ async function loadPathConfig() {
 
         // Populate form fields with current config
         const config = data.current_config;
-        document.getElementById('workspace_dir').value = config.workspace_dir || '';
-        document.getElementById('evaluation_dir').value = config.evaluation_dir || '';
-        document.getElementById('backend_dir').value = config.backend_dir || '';
-        document.getElementById('python_path').value = config.python_path || '';
-        document.getElementById('conda_env_path').value = config.conda_env_path || '';
-        document.getElementById('output_dir').value = config.output_dir || '';
-        document.getElementById('exports_dir').value = config.exports_dir || '';
-        document.getElementById('logs_dir').value = config.logs_dir || '';
-        document.getElementById('scripts_dir').value = config.scripts_dir || '';
-        document.getElementById('job_db_path').value = config.job_db_path || '';
-        document.getElementById('slurm_partition').value = config.slurm_partition || '';
-        document.getElementById('slurm_account').value = config.slurm_account || '';
-        document.getElementById('slurm_wall_time').value = config.slurm_wall_time || '';
-        document.getElementById('openai_api_key').value = config.openai_api_key || '';
-        document.getElementById('hf_token').value = config.hf_token || '';
+        const setValue = (id, value) => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.value = value || '';
+            } else {
+                console.warn(`Element with id '${id}' not found in DOM`);
+            }
+        };
+        
+        setValue('workspace_dir', config.workspace_dir);
+        setValue('evaluation_dir', config.evaluation_dir);
+        setValue('backend_dir', config.backend_dir);
+        setValue('python_path', config.python_path);
+        setValue('conda_env_path', config.conda_env_path);
+        setValue('output_dir', config.output_dir);
+        setValue('exports_dir', config.exports_dir);
+        setValue('logs_dir', config.logs_dir);
+        setValue('scripts_dir', config.scripts_dir);
+        setValue('job_db_path', config.job_db_path);
+        setValue('slurm_partition', config.slurm_partition);
+        setValue('slurm_account', config.slurm_account);
+        setValue('slurm_wall_time', config.slurm_wall_time);
+        setValue('openai_api_key', config.openai_api_key);
+        setValue('hf_token', config.hf_token);
 
         console.log('Path configuration loaded:', config);
     } catch (error) {
