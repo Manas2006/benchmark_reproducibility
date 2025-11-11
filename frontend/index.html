@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Qwen Math Evaluation UI</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         .tab-content {
             display: none;
@@ -542,19 +543,79 @@
                         <!-- Legend -->
                         <div class="mt-6 bg-gray-50 border border-gray-200 rounded-lg p-4">
                             <h4 class="text-sm font-semibold text-gray-900 mb-2">Color Legend</h4>
-                            <p class="text-xs text-gray-600 mb-3">Colors are normalized using mean and standard deviation for better differentiation between high and low probability tokens.</p>
+                            <p class="text-xs text-gray-600 mb-3">Colors are normalized per-heatmap using min–max: white = low confidence, red = high confidence.</p>
                             <div class="flex items-center space-x-4">
                                 <div class="flex items-center">
-                                    <div class="w-16 h-6 rounded" style="background: white; border: 1px solid #ccc;"></div>
-                                    <span class="ml-2 text-xs text-gray-600">Low Probability (Below Mean)</span>
+                                    <div class="w-16 h-6 rounded" style="background: rgb(255,255,255); border: 1px solid #ccc;"></div>
+                                    <span class="ml-2 text-xs text-gray-600">Low Confidence (White)</span>
                                 </div>
                                 <div class="flex items-center">
-                                    <div class="w-16 h-6 rounded" style="background: rgb(255, 128, 128);"></div>
-                                    <span class="ml-2 text-xs text-gray-600">Near Mean</span>
+                                    <div class="w-16 h-6 rounded" style="background: linear-gradient(to right, rgb(255,255,255), rgb(255,0,0)); border: 1px solid #ccc;"></div>
+                                    <span class="ml-2 text-xs text-gray-600">Gradient</span>
                                 </div>
                                 <div class="flex items-center">
-                                    <div class="w-16 h-6 rounded" style="background: rgb(255, 0, 0);"></div>
-                                    <span class="ml-2 text-xs text-gray-600">High Probability (Above Mean)</span>
+                                    <div class="w-16 h-6 rounded" style="background: rgb(255,0,0);"></div>
+                                    <span class="ml-2 text-xs text-gray-600">High Confidence (Red)</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Probability Plots Section -->
+                    <div id="heatmap-plots-section" class="hidden mt-6">
+                        <div class="bg-white border border-gray-200 rounded-lg p-4">
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="text-lg font-semibold text-gray-900">Probability Analysis Plots</h3>
+                                <div class="space-x-2">
+                                    <button id="toggle-plot-a" onclick="togglePlot('plot-a')" 
+                                        class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                                        Line Chart
+                                    </button>
+                                    <button id="toggle-plot-b" onclick="togglePlot('plot-b')" 
+                                        class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                                        Bar Chart
+                                    </button>
+                                    <button id="toggle-plot-c" onclick="togglePlot('plot-c')" 
+                                        class="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700">
+                                        Confidence Trend
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <!-- Plot A: Probability Distribution Line Chart -->
+                            <div id="plot-a" class="hidden mb-4">
+                                <h4 class="text-md font-medium text-gray-800 mb-2">Token Position vs Probability</h4>
+                                <canvas id="plot-a-canvas" width="800" height="300"></canvas>
+                            </div>
+                            
+                            <!-- Plot B: Average Probability Bar Chart -->
+                            <div id="plot-b" class="hidden mb-4">
+                                <h4 class="text-md font-medium text-gray-800 mb-2">Average Probabilities Comparison</h4>
+                                <canvas id="plot-b-canvas" width="800" height="300"></canvas>
+                            </div>
+                            
+                            <!-- Plot C: Confidence Trend -->
+                            <div id="plot-c" class="hidden mb-4">
+                                <h4 class="text-md font-medium text-gray-800 mb-2">Model Confidence Over Generation</h4>
+                                <canvas id="plot-c-canvas" width="800" height="300"></canvas>
+                                <!-- Token Details Info Box -->
+                                <div id="plot-c-token-info" class="hidden mt-4 bg-gray-50 border border-gray-200 rounded-lg p-4">
+                                    <h5 class="text-sm font-semibold text-gray-900 mb-3">Token Details (Click on chart to view)</h5>
+                                    <div class="overflow-x-auto">
+                                        <table class="min-w-full text-xs">
+                                            <thead>
+                                                <tr class="bg-gray-100">
+                                                    <th class="px-3 py-2 text-left font-medium text-gray-700">Position</th>
+                                                    <th class="px-3 py-2 text-left font-medium text-gray-700">Token</th>
+                                                    <th class="px-3 py-2 text-left font-medium text-gray-700">Chosen Prob</th>
+                                                    <th class="px-3 py-2 text-left font-medium text-gray-700">Correct Prob</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="plot-c-token-info-body" class="bg-white">
+                                                <!-- Token rows will be inserted here -->
+                                            </tbody>
+                                        </table>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -652,6 +713,14 @@
                             </div>
 
                             <div>
+                                <label class="block text-sm font-medium text-gray-700">Exports Directory</label>
+                                <input type="text" id="exports_dir"
+                                    class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                    placeholder="/path/to/exports">
+                                <p class="text-xs text-gray-500 mt-1">Directory for Excel exports</p>
+                            </div>
+
+                            <div>
                                 <label class="block text-sm font-medium text-gray-700">Logs Directory</label>
                                 <input type="text" id="logs_dir"
                                     class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
@@ -696,6 +765,20 @@
                                         </button>
                                         <button type="button" onclick="toggleOpenAIKeyVisibility()"
                                             class="ml-2 px-3 py-1 bg-gray-600 text-white text-sm rounded hover:bg-gray-700">
+                                            Show/Hide
+                                        </button>
+                                    </div>
+                                </div>
+                                
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700">Hugging Face Token</label>
+                                    <input type="password" id="hf_token"
+                                        class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2"
+                                        placeholder="hf_...">
+                                    <p class="text-xs text-gray-500 mt-1">Required for accessing gated models on HuggingFace</p>
+                                    <div class="mt-2">
+                                        <button type="button" onclick="toggleHFTokenVisibility()"
+                                            class="px-3 py-1 bg-gray-600 text-white text-sm rounded hover:bg-gray-700">
                                             Show/Hide
                                         </button>
                                     </div>
@@ -747,6 +830,8 @@
         </main>
     </div>
 
+    <!-- Load dynamic config first (if it exists) -->
+    <script src="config.js"></script>
     <script src="app.js?v=1.8"></script>
 </body>
 
