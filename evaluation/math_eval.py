@@ -31,6 +31,7 @@ from python_executor import PythonExecutor
 from model_utils import load_hf_lm_and_tokenizer, generate_completions
 from prob_recorder import BatchProbabilityRecorder
 from run_truncation_analysis_with_logs import run_truncation_analysis_over_samples_with_logs as run_truncation_analysis_over_samples
+from extract_answer_confidence import extract_answer_confidence
 
 # --- NEW: helpers for subprocess Pass-1
 import tempfile, subprocess
@@ -667,8 +668,8 @@ def parse_args():
     # Single switch for full distribution (path vectors)
     parser.add_argument("--enable_path_vectors", action="store_true",
                         help="Store full per-step token distributions to an .npz file (one run/job per file).")
-    parser.add_argument("--max_path_steps", type=int, default=50,
-                        help="Maximum steps to record for path vectors (to limit memory)")
+    parser.add_argument("--max_path_steps", type=int, default=0,
+                        help="Maximum steps to record for path vectors (0 or negative = unlimited, to limit memory)")
     parser.add_argument("--run_truncation_analysis_after_eval", action="store_true",
                         help="Run CoT truncation analysis immediately after evaluation")
     # Together API integration
@@ -1422,8 +1423,39 @@ def main(llm, tokenizer, data_name, args):
                 elif sample.get("gt_cot"):
                     # Use gt_cot as expert CoT if available but no probability calculated, set to None
                     sample["expert_cot_probability"] = None
+                
+                # Compute and add answer_confidence for ECE calculation
+                # This is computed once during evaluation when we have the tokenizer
+                if tokenizer is not None:
+                    try:
+                        answer_details = extract_answer_confidence(sample, tokenizer, data_name, return_details=True)
+                        if answer_details:
+                            sample["answer_confidence"] = answer_details["confidence"]
+                            # Also store answer token IDs for debugging/verification
+                            sample["answer_token_ids"] = answer_details["answer_token_ids"]
+                            sample["answer_token_indices"] = answer_details["answer_token_indices"]
+                            sample["answer_text"] = answer_details["answer_text"]
+                        else:
+                            sample["answer_confidence"] = None
+                            sample["answer_token_ids"] = None
+                            sample["answer_token_indices"] = None
+                            sample["answer_text"] = None
+                    except Exception as e:
+                        # If extraction fails, set to None (non-fatal)
+                        sample["answer_confidence"] = None
+                        sample["answer_token_ids"] = None
+                        sample["answer_token_indices"] = None
+                        sample["answer_text"] = None
+                        if i < 3:  # Only print first few errors to avoid spam
+                            print(f"Warning: Could not extract answer confidence for sample {i}: {e}")
+                else:
+                    sample["answer_confidence"] = None
+                    sample["answer_token_ids"] = None
+                    sample["answer_token_indices"] = None
+                    sample["answer_text"] = None
             else:
                 print(f"Warning: HF results missing for output index {output_index}")
+                sample["answer_confidence"] = None
         all_samples.append(sample)
 
     # add processed samples
@@ -1512,6 +1544,16 @@ def main(llm, tokenizer, data_name, args):
                 # Preserve expert CoT probability if it exists
                 if "expert_cot_probability" in rec:
                     entry["expert_cot_probability"] = rec["expert_cot_probability"]
+                
+                # Preserve answer_confidence and related fields if they exist (for ECE calculation)
+                if "answer_confidence" in rec:
+                    entry["answer_confidence"] = rec["answer_confidence"]
+                if "answer_token_ids" in rec:
+                    entry["answer_token_ids"] = rec["answer_token_ids"]
+                if "answer_token_indices" in rec:
+                    entry["answer_token_indices"] = rec["answer_token_indices"]
+                if "answer_text" in rec:
+                    entry["answer_text"] = rec["answer_text"]
                 prob_records.append(entry)
             # Write as JSONL
             with open(prob_only_file, "w") as f:

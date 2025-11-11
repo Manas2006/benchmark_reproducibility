@@ -9,9 +9,9 @@ if [ ! -f "backend/app/main.py" ]; then
 fi
 
 # Start backend
-echo "📡 Starting backend server on http://localhost:8001..."
+echo "📡 Starting backend server on http://localhost:8002..."
 cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8001 &
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8002 &
 BACKEND_PID=$!
 cd ..
 
@@ -27,7 +27,7 @@ cd ..
 
 echo ""
 echo "✅ Qwen Math Evaluation UI is running!"
-echo "   Backend:  http://localhost:8001"
+echo "   Backend:  http://localhost:8002"
 echo "   Frontend: http://localhost:3000"
 echo ""
 echo "Press Ctrl+C to stop both servers"

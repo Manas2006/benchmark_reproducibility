@@ -241,7 +241,7 @@ class MathEvalRunner:
             # Add path vectors flags if enabled
             if getattr(req, 'enable_path_vectors', False):
                 cli.append("--enable_path_vectors")
-                max_path_steps = getattr(req, 'max_path_steps', 50)
+                max_path_steps = getattr(req, 'max_path_steps', 0)
                 cli.extend(["--max_path_steps", str(max_path_steps)])
         
         # Add eval_method parameter

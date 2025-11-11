@@ -52,7 +52,7 @@ class EvalRequest(BaseModel):
     # Probability tracking
     enable_prob_tracking: bool = Field(default=False, description="Track probabilities of target answer tokens (requires vLLM)")
     enable_path_vectors: bool = Field(default=False, description="Enable Path of Distributions vectors (high memory usage)")
-    max_path_steps: int = Field(default=50, description="Maximum steps to record for path vectors")
+    max_path_steps: int = Field(default=0, description="Maximum steps to record for path vectors (0 or negative = unlimited)")
     # Together API options
     use_together_api: bool = Field(default=False, description="Use Together API instead of local models")
     together_api_key: Optional[str] = Field(default=None, description="Together API key (if not in env)")

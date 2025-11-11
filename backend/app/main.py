@@ -250,6 +250,13 @@ async def generate_prob_plot(jid: str, plot_type: str, sample_id: int | None = N
         cmd.extend(["--sample_id", str(sample_id)])
     elif plot_type == "level_single":
         cmd.extend(["--math_level", str(math_level)])
+    
+    # Add model_name and data_name for ECE calculation (especially for correct_vs_incorrect)
+    # This enables automatic ECE calculation when tokenizer is available
+    if model_name and model_name != "model":
+        cmd.extend(["--model_name", str(model_name)])
+    # Use dataset_name as data_name for answer extraction
+    cmd.extend(["--data_name", str(dataset_name)])
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=eval_dir)
@@ -610,6 +617,18 @@ async def generate_plot(job_id: str, plot_type: str, dataset_name: str, method_n
         output_dir = os.path.join(os.path.dirname(result_file), "prob_plots")
         os.makedirs(output_dir, exist_ok=True)
         
+        # Get model name from job info for ECE calculation
+        model_name = job_info.get("request", {}).get("model", None)
+        
+        # Clean up model name (remove URLs, keep HuggingFace format like "org/model")
+        if model_name:
+            if model_name.startswith('https://huggingface.co/'):
+                model_name = model_name.replace('https://huggingface.co/', '')
+            elif model_name.startswith('http://huggingface.co/'):
+                model_name = model_name.replace('http://huggingface.co/', '')
+            # Keep the full model identifier (e.g., "Qwen/Qwen2.5-Math-7B-Instruct")
+            # Don't split - AutoTokenizer needs the full path
+        
         # Build command
         cmd = [
             "python3", "prob_plot.py",
@@ -619,6 +638,15 @@ async def generate_plot(job_id: str, plot_type: str, dataset_name: str, method_n
             "--output_dir", output_dir,
             "--plot_type", plot_type
         ]
+        
+        # Add model_name and data_name for ECE calculation (especially for correct_vs_incorrect)
+        if model_name and model_name != "model" and model_name.strip():
+            cmd.extend(["--model_name", str(model_name)])
+            print(f"Adding model_name for ECE calculation: {model_name}")
+        else:
+            print(f"Warning: No valid model_name found. ECE calculation will be skipped.")
+            print(f"  model_name from job_info: {job_info.get('request', {}).get('model', None)}")
+        cmd.extend(["--data_name", str(dataset_name)])
         
         # Run the plotting command
         result = subprocess.run(cmd, capture_output=True, text=True, cwd="/work/10757/cc123456/ls6/benchmark-reproducibility/mathevalUI/evaluation")
@@ -846,18 +874,44 @@ async def get_heatmap_data(job_id: str, question_idx: int):
         if chosen_token_ids and len(chosen_token_ids) > 0:
             # We have actual token IDs from the model
             # Decode them using the model's tokenizer
-            try:
-                from transformers import AutoTokenizer
-                # Load the tokenizer for the model used in evaluation
-                # From the path, it looks like it used Qwen2.5-Math-1.5B
-                tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Math-1.5B")
-                
-                tokens = []
+            tokens = []
+            tokenizer = None
+            
+            # Try to get model name from job info
+            model_name = job_info.get("request", {}).get("model", None)
+            if model_name:
+                # Clean up model name (remove URLs, keep HuggingFace format like "org/model")
+                if model_name.startswith('https://huggingface.co/'):
+                    model_name = model_name.replace('https://huggingface.co/', '')
+                elif model_name.startswith('http://huggingface.co/'):
+                    model_name = model_name.replace('http://huggingface.co/', '')
+                # Keep the full model identifier (e.g., "Qwen/Qwen2.5-Math-1.5B")
+                # Don't split - AutoTokenizer needs the full path
+            
+            # Try to load tokenizer (optional - doesn't require GPU, but needs internet/cache)
+            if model_name:
+                try:
+                    from transformers import AutoTokenizer
+                    # Try loading tokenizer - this runs on CPU, no GPU needed
+                    # But it may fail if no internet access or model not cached
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        model_name, 
+                        trust_remote_code=True,
+                        local_files_only=False  # Allow download if not cached
+                    )
+                except Exception as e:
+                    # Tokenizer loading failed - this is OK, we'll use fallback
+                    print(f"Info: Could not load tokenizer for {model_name}: {e}")
+                    print("   Using fallback token representation (no tokenizer needed)")
+                    tokenizer = None
+            
+            # Decode tokens if tokenizer is available
+            if tokenizer:
                 for token_id in chosen_token_ids:
                     if token_id is not None:
                         try:
                             # Decode the token ID to get the actual token
-                            decoded_token = tokenizer.decode([token_id])
+                            decoded_token = tokenizer.decode([token_id], skip_special_tokens=True)
                             # Clean up the token (remove extra spaces, special characters)
                             decoded_token = decoded_token.strip()
                             if not decoded_token:
@@ -868,10 +922,9 @@ async def get_heatmap_data(job_id: str, question_idx: int):
                             tokens.append(f"<{token_id}>")
                     else:
                         tokens.append("<unknown>")
-            except Exception as e:
-                # If tokenizer loading fails, fallback to simple representation
-                print(f"Warning: Could not load tokenizer: {e}")
-                tokens = []
+            else:
+                # Fallback: Use simple token ID representation (no tokenizer needed)
+                # This works fine for visualization - shows token_123 instead of actual text
                 for token_id in chosen_token_ids:
                     if token_id is not None:
                         tokens.append(f"token_{token_id}")

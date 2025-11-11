@@ -1,6 +1,6 @@
 // Configuration
-const API_BASE = 'http://localhost:8001';
-const WS_BASE = 'ws://localhost:8001';
+const API_BASE = 'http://localhost:8002';
+const WS_BASE = 'ws://localhost:8002';
 
 // Available options
 const AVAILABLE_MODELS = [
@@ -327,7 +327,7 @@ function addModelConfig() {
         prompt_type: 'custom',
         enable_prob_tracking: false,
         enable_path_vectors: false,
-        max_path_steps: '50',
+        max_path_steps: '0',
         prob_plot_type: 'aggregate',
         prob_plot_sample_id: ''
     };
@@ -526,8 +526,8 @@ function renderModelConfigs() {
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700">Max Path Steps</label>
-                    <input type="number" min="1" max="1000" onchange="updateModelConfig(${config.id}, 'max_path_steps', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" value="${config.max_path_steps}">
-                    <p class="text-xs text-gray-500 mt-1">Maximum number of steps to record for path vectors.</p>
+                    <input type="number" onchange="updateModelConfig(${config.id}, 'max_path_steps', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" value="${config.max_path_steps}" placeholder="0 for unlimited">
+                    <p class="text-xs text-gray-500 mt-1">Maximum number of steps to record for path vectors. Use 0 or negative for unlimited (high memory usage).</p>
                 </div>
                 ` : ''}
                 
@@ -716,7 +716,7 @@ async function submitEvaluation() {
                                                 max_tokens: parseInt(max_token),
                                                 enable_prob_tracking: !!config.enable_prob_tracking,
                                                 enable_path_vectors: !!config.enable_path_vectors,
-                                                max_path_steps: parseInt(config.max_path_steps || '50')
+                                                max_path_steps: parseInt(config.max_path_steps || '0')
                                             };
                                             allJobs.push(requestData);
                                         });
