@@ -10,12 +10,15 @@ import time
 from pathlib import Path
 import pandas as pd
 
-from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse, CoTAnalysisResponseV2, OpenAITestRequest, OpenAITestResponse, QuestionPreview, HeatmapDataResponse
-from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data
-from .schemas import EvalRequest, JobStatus, PathConfig, PathConfigResponse, CoTAnalysisResponse, TruncationAnalysisRequest, TruncationAnalysisResponse
+from .schemas import (
+    EvalRequest, JobStatus, PathConfig, PathConfigResponse, 
+    CoTAnalysisResponse, CoTAnalysisResponseV2, OpenAITestRequest, 
+    OpenAITestResponse, QuestionPreview, HeatmapDataResponse,
+    PromptPreviewRequest, PromptPreviewResponse,
+    TruncationAnalysisRequest, TruncationAnalysisResponse
+)
 from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data, save_job_db
 from .path_manager import path_manager
-from .cot_analyzer import CoTAnalyzer
 import subprocess
 import shlex
 import requests
@@ -48,13 +51,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Get workspace directory from path_manager for relative paths
+_workspace_dir = Path(path_manager.get_config().workspace_dir)
+_frontend_dir = _workspace_dir / "frontend"
+
 # Mount static files for frontend
-app.mount("/static", StaticFiles(directory="../frontend"), name="static")
+app.mount("/static", StaticFiles(directory=str(_frontend_dir)), name="static")
 
 @app.get("/")
 async def root():
     """Serve the main frontend page"""
-    return FileResponse("../frontend/index.html")
+    return FileResponse(str(_frontend_dir / "index.html"))
 
 @app.get("/debug/html")
 async def debug_html():
@@ -84,8 +91,16 @@ async def get_path_config():
 @app.post("/config/paths")
 async def update_path_config(config: PathConfig):
     """Update path configuration"""
-    path_manager.update_config(config)
-    return {"message": "Path configuration updated successfully", "config": config}
+    try:
+        path_manager.update_config(config)
+        updated_config = path_manager.get_config()
+        print(f"Config updated: slurm_partition={updated_config.slurm_partition}, wall_time={updated_config.slurm_wall_time}")
+        return {"message": "Path configuration updated successfully", "config": updated_config}
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"Configuration update error: {error_details}")
+        raise HTTPException(status_code=422, detail=f"Failed to update configuration: {str(e)}")
 
 @app.post("/config/paths/reset")
 async def reset_path_config():
@@ -648,8 +663,9 @@ async def generate_plot(job_id: str, plot_type: str, dataset_name: str, method_n
             print(f"  model_name from job_info: {job_info.get('request', {}).get('model', None)}")
         cmd.extend(["--data_name", str(dataset_name)])
         
-        # Run the plotting command
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd="/work/10757/cc123456/ls6/benchmark-reproducibility/mathevalUI/evaluation")
+        # Run the plotting command in the evaluation directory
+        eval_dir = path_manager.get_config().evaluation_dir
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=eval_dir)
         
         if result.returncode == 0:
             # Determine the output filename
@@ -954,31 +970,22 @@ async def get_heatmap_data(job_id: str, question_idx: int):
         chosen_token_ids = chosen_token_ids[:min_len] if chosen_token_ids else list(range(min_len))
         correct_token_ids = correct_token_ids[:min_len] if correct_token_ids else list(range(min_len))
         
-        # Normalize probabilities with mean and std for better color differentiation
-        # This maps probabilities to approximately -1 to 1 range
+        # Normalize probabilities per-array using min-max to [0,1]
         def normalize_probs(probs):
             if not probs or len(probs) == 0:
                 return probs
-            import numpy as np
-            probs_array = np.array(probs)
-            mean = np.mean(probs_array)
-            std = np.std(probs_array)
-            if std > 0:
-                normalized = (probs_array - mean) / std
-                # Clamp to reasonable range for visualization
-                normalized = np.clip(normalized, -3, 3)
-                # Map to 0-1 range for color mapping
-                normalized = (normalized + 3) / 6  # Maps [-3, 3] to [0, 1]
-                return normalized.tolist()
-            else:
-                # If std is 0, all values are the same, return 0.5 (middle)
+            lo = min(probs)
+            hi = max(probs)
+            if hi <= lo:
+                # All values equal; return mid intensity
                 return [0.5] * len(probs)
+            return [(p - lo) / (hi - lo) for p in probs]
         
         # Store original probabilities for display in tooltips
         chosen_probs_original = list(chosen_probs)
         correct_probs_original = list(correct_probs)
         
-        # Normalize for color mapping
+        # Normalize for color mapping (per-heatmap)
         chosen_probs_normalized = normalize_probs(chosen_probs)
         correct_probs_normalized = normalize_probs(correct_probs)
         
@@ -1004,372 +1011,233 @@ async def get_heatmap_data(job_id: str, question_idx: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting heatmap data: {str(e)}")
 
-def export_results_to_excel(job_id: str):
-    """Export evaluation results to Excel file"""
+def export_cot_analysis_to_excel(job_id: str, analysis_data: dict) -> str:
+    """Export CoT analysis results to Excel file using Pillars v2 data"""
     try:
-        if job_id not in job_db:
-            raise HTTPException(status_code=404, detail="Job not found")
-        
-        job_info = job_db[job_id]
-        result_file = job_info.get("result_file")
-        
-        if not result_file:
-            raise HTTPException(status_code=404, detail="No result file found for this job")
-        
-        # Convert result file path to Path object
-        result_path = Path(result_file)
-        
-        # Security check
         config = path_manager.get_config()
-        allowed_dirs = [Path(config.output_dir), Path(config.logs_dir), Path(config.evaluation_dir)]
+        exports_dir = Path(config.exports_dir)
         
-        is_allowed = False
-        for allowed_dir in allowed_dirs:
-            try:
-                result_path.relative_to(allowed_dir)
-                is_allowed = True
-                break
-            except ValueError:
-                continue
+        # Extract model name and dataset from job_db
+        job_info = job_db.get(job_id, {})
+        result_file = job_info.get("result_file", "")
         
-        if not is_allowed:
-            raise HTTPException(status_code=403, detail="Access denied to this file path")
-        
-        # Load the JSON results (JSON Lines format)
-        if not result_path.exists():
-            raise HTTPException(status_code=404, detail="Result file not found")
-        
-        data = []
-        with open(result_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line:  # Skip empty lines
-                    data.append(json.loads(line))
-        
-        if len(data) == 0:
-            raise HTTPException(status_code=400, detail="Invalid result file format or empty file")
-        
-        # Initialize CoT analyzer for metrics calculation
-        config = path_manager.get_config()
-        analyzer = CoTAnalyzer(openai_api_key=config.openai_api_key)
-        
-        # Extract model name and configuration from result file path
         model_name = "Unknown"
-        model_config = "Unknown"
+        dataset = "unknown"
+        
         if result_file:
-            # Extract model name from path like: .../Qwen2.5-Math-1.5B/gsm8k/test_auto-cot_-1_seed0_t0.0_s0_e-1_...
             path_parts = Path(result_file).parts
             for part in path_parts:
-                if any(model in part.lower() for model in ['qwen', 'gpt', 'claude', 'llama', 'mistral', 'gemini']):
+                if any(model in part.lower() for model in ['qwen', 'gpt', 'claude', 'llama', 'mistral', 'gemini', 'mathstral']):
                     model_name = part
-                    break
-            
-            # Extract configuration from filename
-            filename = Path(result_file).stem
-            if 't0.0' in filename:
-                model_config = "Temperature: 0.0"
-            elif 't0.1' in filename:
-                model_config = "Temperature: 0.1"
-            elif 't0.7' in filename:
-                model_config = "Temperature: 0.7"
-            elif 't1.0' in filename:
-                model_config = "Temperature: 1.0"
-            
-            # Extract other config details
-            config_parts = []
-            if 'seed0' in filename:
-                config_parts.append("Seed: 0")
-            if 'auto-cot' in filename:
-                config_parts.append("Auto-CoT: Enabled")
-            if config_parts:
-                model_config += f", {', '.join(config_parts)}"
-
-        # Build DataFrame with all available columns + CoT metrics
-        df_data = []
-        all_cot_metrics = []  # Store metrics for summary calculation
+                if part in ['gsm8k', 'math', 'mmlu', 'humaneval']:
+                    dataset = part
         
-        for rec in data:
-            # Handle list fields by converting to string
-            code_list = rec.get('code', [])
-            pred_list = rec.get('pred', [])
-            score_list = rec.get('score', [])
-            
-            # Calculate CoT metrics for this answer
-            # Use the model's actual output (code field) + predicted answer, not the formatted answer field
-            model_reasoning = rec.get('code', [''])
-            model_reasoning_text = model_reasoning[0] if model_reasoning else ""
-            predicted_answer = rec.get('pred', [''])
-            predicted_answer_text = predicted_answer[0] if predicted_answer else ""
-            
-            # Construct the full model output for CoT analysis
-            full_model_output = f"{model_reasoning_text}\n#### {predicted_answer_text}"
-            
-            gt = rec.get('gt', '')
-            cot_metrics = analyzer.analyze_answer(full_model_output, gt)
-            all_cot_metrics.append(cot_metrics)
-            
-            # Build row data with original columns + CoT metrics
-            # Construct the prompt if it's missing but we have the question
-            prompt_text = rec.get('prompt', '')
-            if not prompt_text and rec.get('question'):
-                # Reconstruct the basic CoT prompt format
-                prompt_text = f"Question: {rec.get('question', '')}\nAnswer:"
-            
-            # Generate GPT prompt for this sample (if we have the CoT analysis)
-            gpt_prompt = ""
-            try:
-                # Try to get CoT analysis for this sample to extract the GPT prompt
-                cot_response = requests.get(f'http://localhost:8001/jobs/{job_id}/cot-analysis')
-                if cot_response.status_code == 200:
-                    cot_data = cot_response.json()
-                    sample_idx = rec.get('idx', 0)
-                    if sample_idx < len(cot_data.get('per_sample', [])):
-                        sample_data = cot_data['per_sample'][sample_idx]
-                        # Extract the GPT prompt from the judge_raw or build it
-                        if 'judge_raw' in sample_data:
-                            # If we have judge data, we can reconstruct the prompt
-                            problem = sample_data.get('problem', '')
-                            model_output = sample_data.get('model_output', '')
-                            gold = sample_data.get('gold', '')
-                            flags = sample_data.get('flags', [])
-                            evidence = sample_data.get('evidence', {})
-                            
-                            # Build a simplified version of the GPT prompt
-                            gpt_prompt = f"""Problem: {problem}
-
-Model Reasoning: {model_output}
-
-Gold Answer: {gold}
-
-Flags: {flags}
-
-Evidence: {evidence}"""
-            except:
-                gpt_prompt = "GPT prompt not available"
-
-            row_data = {
-                'Index': rec.get('idx', ''),
-                'Model_Name': model_name,
-                'Model_Configuration': model_config,
-                'GPT_Prompt': gpt_prompt,
-                'Prompt': prompt_text,
-                'Model Code Output': '\n'.join(str(item) for item in code_list if item is not None),
-                'Prediction': '\n'.join(str(item) for item in pred_list if item is not None),
-                'Ground Truth': rec.get('gt', ''),
-                'Score': '\n'.join(str(item) for item in score_list if item is not None),
-                
-                # CoT Analysis Metrics - CQS Components
-                'CQS_Final_Answer_Correct': round(cot_metrics.final_answer_correctness, 3),
-                'CQS_Arithmetic_Accuracy': round(cot_metrics.arithmetic_accuracy, 3),
-                'CQS_Logical_Structure': round(cot_metrics.logical_structure_score, 3),
-                'CQS_Consistency_Complete': round(cot_metrics.consistency_completeness, 3),
-                'CQS_Formatting_Notation': round(cot_metrics.formatting_notation, 3),
-                'CQS_Overall_Score': round(cot_metrics.cqs_score, 3),
-                
-                # Basic CoT Metrics
-                'CoT_Reasoning_Steps': cot_metrics.reasoning_steps,
-                'CoT_Total_Characters': cot_metrics.total_chars,
-                'CoT_Avg_Words_Per_Step': round(cot_metrics.avg_words_per_step, 2),
-                'CoT_Arithmetic_Expressions': cot_metrics.arithmetic_expressions,
-                
-                # Legacy Boolean Metrics
-                'CoT_Has_Clear_Structure': cot_metrics.has_clear_structure,
-                'CoT_Has_Final_Answer': cot_metrics.has_final_answer,
-                'CoT_Uses_Calculations': cot_metrics.uses_intermediate_calculations,
-                'CoT_Shows_Work': cot_metrics.shows_work_explicitly,
-                'CoT_Logical_Sequence': cot_metrics.follows_logical_sequence,
-                'CoT_Error_Patterns': ', '.join(cot_metrics.error_patterns) if cot_metrics.error_patterns else '',
-                'CoT_Confidence_Score': round(cot_metrics.confidence_score, 3)
-            }
-            
-            df_data.append(row_data)
+        # Create filename
+        filename = f"{model_name}_{dataset}_{job_id}_cot_analysis.xlsx"
+        excel_path = exports_dir / filename
         
-        df = pd.DataFrame(df_data)
-        
-        # Calculate summary statistics for CoT metrics
-        if all_cot_metrics:
-            total_samples = len(all_cot_metrics)
-            # Basic metrics
-            avg_reasoning_steps = sum(m.reasoning_steps for m in all_cot_metrics) / total_samples
-            avg_total_chars = sum(m.total_chars for m in all_cot_metrics) / total_samples
-            avg_words_per_step = sum(m.avg_words_per_step for m in all_cot_metrics) / total_samples
-            
-            # CQS Component Averages
-            avg_final_answer_correct = sum(m.final_answer_correctness for m in all_cot_metrics) / total_samples
-            avg_arithmetic_acc = sum(m.arithmetic_accuracy for m in all_cot_metrics) / total_samples
-            avg_logical_structure = sum(m.logical_structure_score for m in all_cot_metrics) / total_samples
-            avg_consistency_complete = sum(m.consistency_completeness for m in all_cot_metrics) / total_samples
-            avg_formatting_notation = sum(m.formatting_notation for m in all_cot_metrics) / total_samples
-            avg_cqs_score = sum(m.cqs_score for m in all_cot_metrics) / total_samples
-            
-            # Legacy metrics
-            avg_confidence = sum(m.confidence_score for m in all_cot_metrics) / total_samples
-            
-            # Pattern counts
-            clear_structure_count = sum(1 for m in all_cot_metrics if m.has_clear_structure)
-            final_answer_count = sum(1 for m in all_cot_metrics if m.has_final_answer)
-            uses_calc_count = sum(1 for m in all_cot_metrics if m.uses_intermediate_calculations)
-            shows_work_count = sum(1 for m in all_cot_metrics if m.shows_work_explicitly)
-            logical_seq_count = sum(1 for m in all_cot_metrics if m.follows_logical_sequence)
-            
-            # Error pattern frequency
-            error_patterns = {}
-            for m in all_cot_metrics:
-                for error in m.error_patterns:
-                    error_patterns[error] = error_patterns.get(error, 0) + 1
-        
-        # Create Excel file path
-        excel_path = result_path.parent / f"{result_path.stem}_results.xlsx"
-        
-        # Write to Excel with multiple sheets
+        # Create workbook with pandas and openpyxl
         with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-            # Sheet 1: Detailed results with per-row CoT metrics
-            df.to_excel(writer, index=False, sheet_name='Detailed Results')
-            
-            # Sheet 2: Model Information
-            model_info_data = [
-                ['Model Information', ''],
-                ['', ''],
-                ['Model Name', model_name],
-                ['Model Configuration', model_config],
-                ['Total Samples', len(data)],
-                ['Result File', result_file],
-                ['Export Date', pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')],
-                ['', ''],
-                ['Evaluation Settings', ''],
-                ['CoT Analysis', 'Enabled'],
-                ['GPT Judge Mode', 'ALWAYS'],
-                ['Flag Detection', 'Automated'],
-                ['Scoring Method', 'Hybrid (Rule-based + LLM)']
+            # 1. Summary Sheet
+            summary_data = [
+                ['CoT Analysis Summary'],
+                [''],
+                ['Job ID', analysis_data.get('job_id', 'N/A')],
+                ['Analysis Method', analysis_data.get('analysis_method', 'N/A')],
+                ['Timestamp', analysis_data.get('timestamp', 'N/A')],
+                ['Total Samples', analysis_data.get('summary', {}).get('total_samples', 0)],
+                [''],
+                ['Overall Scores'],
+                ['Overall Score', analysis_data.get('summary', {}).get('avg_overall', 0)],
+                ['Faithfulness', analysis_data.get('summary', {}).get('avg_faithfulness', 0)],
+                ['Utility', analysis_data.get('summary', {}).get('avg_utility', 0)],
+                ['Coherence', analysis_data.get('summary', {}).get('avg_coherence', 0)],
+                ['Factuality', analysis_data.get('summary', {}).get('avg_factuality', 0)],
+                [''],
+                ['Flag Statistics'],
+                ['Total Flags', analysis_data.get('summary', {}).get('total_flags', 0)],
+                ['Faithfulness Flags', analysis_data.get('summary', {}).get('flags_by_pillar', {}).get('faithfulness', 0)],
+                ['Utility Flags', analysis_data.get('summary', {}).get('flags_by_pillar', {}).get('utility', 0)],
+                ['Coherence Flags', analysis_data.get('summary', {}).get('flags_by_pillar', {}).get('coherence', 0)],
+                ['Factuality Flags', analysis_data.get('summary', {}).get('flags_by_pillar', {}).get('factuality', 0)],
+                [''],
+                ['Judge Statistics'],
+                ['Judge Call Rate', f"{analysis_data.get('summary', {}).get('judge_call_rate', 0) * 100:.1f}%"],
+                ['Budget Used', f"{analysis_data.get('summary', {}).get('judge_budget_used', 0)}/{analysis_data.get('summary', {}).get('judge_budget_total', 0)}"]
             ]
             
-            model_info_df = pd.DataFrame(model_info_data, columns=['Setting', 'Value'])
-            model_info_df.to_excel(writer, index=False, sheet_name='Model Info')
+            summary_df = pd.DataFrame(summary_data, columns=['Metric', 'Value'])
+            summary_df.to_excel(writer, index=False, sheet_name='Summary')
             
-            # Sheet 3: CoT Analysis Summary
-            if all_cot_metrics:
-                summary_data = [
-                    ['CoT Quality Score (CQS) Analysis', ''],
-                    ['', ''],
-                    ['=== OVERALL METRICS ===', ''],
-                    ['Total Samples', total_samples],
-                    ['Average CQS Score', round(avg_cqs_score, 3)],
-                    ['', ''],
-                    ['=== CQS COMPONENT SCORES ===', ''],
-                    ['Final Answer Correctness (30%)', round(avg_final_answer_correct, 3)],
-                    ['Arithmetic Accuracy (25%)', round(avg_arithmetic_acc, 3)],
-                    ['Logical Structure (20%)', round(avg_logical_structure, 3)],
-                    ['Consistency & Completeness (15%)', round(avg_consistency_complete, 3)],
-                    ['Formatting & Notation (10%)', round(avg_formatting_notation, 3)],
-                    ['', ''],
-                    ['=== BASIC METRICS ===', ''],
-                    ['Average Reasoning Steps', round(avg_reasoning_steps, 2)],
-                    ['Average Character Count', round(avg_total_chars, 2)],
-                    ['Average Words per Step', round(avg_words_per_step, 2)],
-                    ['Average Confidence Score', round(avg_confidence, 3)],
-                    ['', ''],
-                    ['=== PATTERN ANALYSIS ===', ''],
-                    ['Samples with Clear Structure', f"{clear_structure_count} ({clear_structure_count/total_samples*100:.1f}%)"],
-                    ['Samples with Final Answer', f"{final_answer_count} ({final_answer_count/total_samples*100:.1f}%)"],
-                    ['Samples Using Calculations', f"{uses_calc_count} ({uses_calc_count/total_samples*100:.1f}%)"],
-                    ['Samples Showing Work', f"{shows_work_count} ({shows_work_count/total_samples*100:.1f}%)"],
-                    ['Samples with Logical Sequence', f"{logical_seq_count} ({logical_seq_count/total_samples*100:.1f}%)"],
-                    ['', ''],
-                    ['=== ERROR PATTERNS ===', '']
-                ]
+            # 2. Detailed Analysis Sheet
+            detailed_data = []
+            detailed_data.append([
+                'Sample #', 'Problem', 'Model Output', 'Final Answer Correct',
+                'Overall Score', 'Faithfulness', 'Utility', 'Coherence', 'Factuality',
+                'Flag Count', 'Flags', 'Evidence Summary', 'Judge Scores', 'Arithmetic Errors'
+            ])
+            
+            per_sample = analysis_data.get('per_sample', [])
+            for idx, sample in enumerate(per_sample):
+                flags = sample.get('flags', [])
+                flag_descriptions = [f"{f.get('pillar', 'Unknown')}: {f.get('issue', 'Unknown')}" for f in flags]
+                arith_errors = sample.get('evidence', {}).get('arith_bad_examples', [])
                 
-                # Add error patterns to summary
-                for error, count in error_patterns.items():
-                    summary_data.append([f"  {error}", f"{count} ({count/total_samples*100:.1f}%)"])
-                
-                summary_df = pd.DataFrame(summary_data, columns=['Metric', 'Value'])
-                summary_df.to_excel(writer, index=False, sheet_name='CoT Summary')
+                detailed_data.append([
+                    idx + 1,
+                    (sample.get('problem', 'N/A')[:1000]),
+                    (sample.get('model_output', 'N/A')[:2000]),
+                    'Yes' if sample.get('evidence', {}).get('final_correct', False) else 'No',
+                    sample.get('scores', {}).get('overall', 0),
+                    sample.get('scores', {}).get('faithfulness', 0),
+                    sample.get('scores', {}).get('utility', 0),
+                    sample.get('scores', {}).get('coherence', 0),
+                    sample.get('scores', {}).get('factuality', 0),
+                    len(flags),
+                    '; '.join(flag_descriptions) or 'None',
+                    f"Final: {'Correct' if sample.get('evidence', {}).get('final_correct', False) else 'Incorrect'}, Intermediate OK: {sample.get('evidence', {}).get('intermediate_ok_rate', 0):.2f}",
+                    json.dumps(sample.get('judge_raw', {}))[:500] if sample.get('judge_raw') else 'N/A',
+                    len(arith_errors) if arith_errors else 0
+                ])
             
-            # Get the workbook and worksheets for formatting
-            workbook = writer.book
-            results_worksheet = writer.sheets['Detailed Results']
+            detailed_df = pd.DataFrame(detailed_data[1:], columns=detailed_data[0])
+            detailed_df.to_excel(writer, index=False, sheet_name='Detailed Analysis')
             
-            # Create fill styles for conditional formatting
-            from openpyxl.styles import PatternFill, Font
-            green_fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
-            red_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
-            blue_fill = PatternFill(start_color='D4E6F1', end_color='D4E6F1', fill_type='solid')
-            yellow_fill = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
+            # 3. Flag Summary Sheet
+            flag_counts = {}
+            for sample in per_sample:
+                for flag in sample.get('flags', []):
+                    key = f"{flag.get('pillar', 'Unknown')}: {flag.get('issue', 'Unknown')}"
+                    flag_counts[key] = flag_counts.get(key, 0) + 1
             
-            # Find important columns for conditional formatting
-            score_col = None
-            clarity_col = None
-            confidence_col = None
+            flag_data = [['Pillar', 'Issue Type', 'Count']]
+            for key, count in sorted(flag_counts.items()):
+                pillar, issue = key.split(': ', 1)
+                flag_data.append([pillar, issue, count])
             
-            for col_idx, col_name in enumerate(df.columns, 1):
-                if col_name == 'Score':
-                    score_col = col_idx
-                elif col_name == 'CoT_Clarity_Score':
-                    clarity_col = col_idx
-                elif col_name == 'CoT_Confidence_Score':
-                    confidence_col = col_idx
+            flag_df = pd.DataFrame(flag_data[1:], columns=flag_data[0])
+            flag_df.to_excel(writer, index=False, sheet_name='Flag Summary')
             
-            # Apply conditional formatting to multiple columns
-            for row_idx in range(2, len(df) + 2):  # Start from row 2 (after header)
-                # Score column (green/red for true/false)
-                if score_col:
-                    cell = results_worksheet.cell(row=row_idx, column=score_col)
-                    if cell.value and 'true' in str(cell.value).lower():
-                        cell.fill = green_fill
-                    elif cell.value and 'false' in str(cell.value).lower():
-                        cell.fill = red_fill
-                
-                # Clarity score column (blue gradient based on score)
-                if clarity_col:
-                    cell = results_worksheet.cell(row=row_idx, column=clarity_col)
-                    if cell.value and isinstance(cell.value, (int, float)):
-                        if cell.value >= 0.8:
-                            cell.fill = blue_fill
-                        elif cell.value <= 0.5:
-                            cell.fill = yellow_fill
-                
-                # Confidence score column (similar to clarity)
-                if confidence_col:
-                    cell = results_worksheet.cell(row=row_idx, column=confidence_col)
-                    if cell.value and isinstance(cell.value, (int, float)):
-                        if cell.value >= 0.8:
-                            cell.fill = blue_fill
-                        elif cell.value <= 0.5:
-                            cell.fill = yellow_fill
-            
-            # Format the summary sheet if it exists
-            if all_cot_metrics and 'CoT Summary' in writer.sheets:
-                summary_worksheet = writer.sheets['CoT Summary']
-                
-                # Make the title bold
-                title_cell = summary_worksheet.cell(row=1, column=1)
-                title_cell.font = Font(bold=True, size=14)
-                
-                # Make section headers bold
-                for row_idx in range(1, len(summary_data) + 1):
-                    cell = summary_worksheet.cell(row=row_idx, column=1)
-                    if cell.value in ['Pattern Analysis', 'Error Patterns']:
-                        cell.font = Font(bold=True)
+            # 4. Raw Data Sheet
+            raw_data = [['Raw JSON Data'], [json.dumps(analysis_data, indent=2)]]
+            raw_df = pd.DataFrame(raw_data)
+            raw_df.to_excel(writer, index=False, sheet_name='Raw Data')
         
+        print(f"✅ Excel export created: {excel_path}")
         return str(excel_path)
         
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error exporting to Excel: {str(e)}")
+        print(f"❌ Error creating Excel export: {e}")
+        raise
+
+def export_results_to_excel(job_id: str, job_info: dict) -> str:
+    """Export job results to Excel file"""
+    try:
+        config = path_manager.get_config()
+        exports_dir = Path(config.exports_dir)
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        
+        result_file = job_info.get("result_file", "")
+        if not result_file or not Path(result_file).exists():
+            raise HTTPException(status_code=404, detail="No results available. This job may not have completed successfully or was cancelled.")
+        
+        # Load the result file
+        try:
+            with open(result_file, 'r') as f:
+                results = [json.loads(line) for line in f if line.strip()]
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error reading result file: {str(e)}")
+        
+        if not results:
+            raise HTTPException(status_code=404, detail="Result file is empty")
+        
+        # Get model and dataset info
+        model_name = job_info.get("request", {}).get("model", "Unknown")
+        dataset = job_info.get("request", {}).get("dataset", "unknown")
+        
+        # Sanitize model name for filename (remove slashes and special chars)
+        safe_model_name = model_name.replace("/", "_").replace("\\", "_")
+        
+        # Create filename
+        filename = f"{safe_model_name}_{dataset}_{job_id}_results.xlsx"
+        excel_path = exports_dir / filename
+        
+        # Create workbook with pandas
+        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+            # Summary sheet
+            summary_data = [
+                ['Job Summary'],
+                [''],
+                ['Job ID', job_id],
+                ['Model', model_name],
+                ['Dataset', dataset],
+                ['Status', job_info.get("status", "N/A")],
+                ['Total Samples', len(results)],
+                [''],
+                ['Metrics'],
+            ]
+            
+            # Calculate accuracy
+            correct = sum(1 for r in results if r.get('score', [False])[0])
+            accuracy = (correct / len(results) * 100) if results else 0
+            summary_data.append(['Accuracy', f"{accuracy:.2f}%"])
+            summary_data.append(['Correct', correct])
+            summary_data.append(['Incorrect', len(results) - correct])
+            
+            summary_df = pd.DataFrame(summary_data, columns=['Metric', 'Value'])
+            summary_df.to_excel(writer, index=False, sheet_name='Summary')
+            
+            # Results sheet
+            results_data = []
+            for idx, result in enumerate(results):
+                results_data.append({
+                    'Sample #': idx + 1,
+                    'Question': result.get('question', 'N/A')[:1000],
+                    'Ground Truth': result.get('gt', 'N/A'),
+                    'Prediction': result.get('pred', ['N/A'])[0] if result.get('pred') else 'N/A',
+                    'Correct': 'Yes' if result.get('score', [False])[0] else 'No',
+                    'Answer': (result.get('answer', 'N/A')[:2000] if isinstance(result.get('answer'), str) else str(result.get('answer', 'N/A'))[:2000]),
+                })
+            
+            results_df = pd.DataFrame(results_data)
+            results_df.to_excel(writer, index=False, sheet_name='Results')
+        
+        print(f"✅ Excel export created: {excel_path}")
+        return str(excel_path)
+        
+    except Exception as e:
+        print(f"❌ Error creating Excel export: {e}")
+        raise
 
 @app.get('/jobs/{job_id}/export')
 async def export_job_excel(job_id: str):
     """Export job results to Excel file"""
     try:
-        excel_path = export_results_to_excel(job_id)
-        excel_file = Path(excel_path)
+        # Check if Excel export path exists in job_db
+        job_info = job_db.get(job_id, {})
         
-        return FileResponse(
-            path=str(excel_file),
-            filename=excel_file.name,
-            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
+        if not job_info:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        excel_export_path = job_info.get("excel_export_path")
+        
+        if excel_export_path and Path(excel_export_path).exists():
+            # Return pre-generated Excel file (from CoT analysis)
+            excel_file = Path(excel_export_path)
+            return FileResponse(
+                path=str(excel_file),
+                filename=excel_file.name,
+                media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+        else:
+            # Generate Excel file on the fly
+            excel_path = export_results_to_excel(job_id, job_info)
+            excel_file = Path(excel_path)
+            return FileResponse(
+                path=str(excel_file),
+                filename=excel_file.name,
+                media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
         
     except HTTPException:
         raise
@@ -1636,6 +1504,38 @@ async def get_cot_analysis(job_id: str):
             print(f"🚩 Total flags found: {sum(flag_counts.values())}")
         print()
         
+        # Save CoT analysis results to file
+        try:
+            job_info = job_db.get(job_id, {})
+            result_file = job_info.get("result_file")
+            if result_file:
+                # Determine the output directory from result_file path
+                result_path = Path(result_file)
+                output_dir = result_path.parent
+                cot_analysis_file = output_dir / f"cot_analysis_{job_id}.json"
+                
+                # Save the analysis result
+                with open(cot_analysis_file, 'w') as f:
+                    json.dump(analysis_result, f, indent=2)
+                
+                print(f"💾 CoT analysis saved to: {cot_analysis_file}")
+        except Exception as e:
+            print(f"⚠️ Warning: Could not save CoT analysis to file: {e}")
+        
+        # Generate Excel export
+        try:
+            excel_path = export_cot_analysis_to_excel(job_id, analysis_result)
+            
+            # Store Excel path in job_db
+            job_info = job_db.get(job_id, {})
+            job_info["excel_export_path"] = excel_path
+            job_db[job_id] = job_info
+            save_job_db()
+            
+            print(f"📊 Excel export saved to: {excel_path}")
+        except Exception as e:
+            print(f"⚠️ Warning: Could not generate Excel export: {e}")
+        
         return analysis_result
         
     except HTTPException:
@@ -1835,6 +1735,16 @@ async def run_truncation_analysis(job_id: str, request: TruncationAnalysisReques
             for arg in cmd:
                 escaped_cli.append(shlex.quote(str(arg)))
             
+            # Build conda activation section if conda_env_path is configured
+            conda_activation = ""
+            if config.conda_env_path:
+                conda_activation = f"""# Activate conda environment
+source {config.conda_env_path}/etc/profile.d/conda.sh
+conda activate qwen-eval
+"""
+            else:
+                conda_activation = "# Note: No conda environment configured. Using system Python.\n"
+            
             script_content = f"""#!/bin/bash
 cd {eval_dir}
 
@@ -1845,10 +1755,7 @@ export MKL_THREADING_LAYER=GNU
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
-# Activate conda environment
-source {config.conda_env_path}/etc/profile.d/conda.sh
-conda activate qwen-eval
-
+{conda_activation}
 # Run the truncation analysis
 {' '.join(escaped_cli)}
 """
@@ -1985,4 +1892,124 @@ async def get_truncation_plot(job_id: str, plot_type: str = "correct"):
     if not is_allowed:
         raise HTTPException(status_code=403, detail="Access denied to this file path")
     
-    return FileResponse(path=str(latest_plot), filename=latest_plot.name, media_type='image/png') 
+    return FileResponse(path=str(latest_plot), filename=latest_plot.name, media_type='image/png')
+
+@app.post("/prompt/preview", response_model=PromptPreviewResponse)
+async def get_prompt_preview(request: PromptPreviewRequest):
+    """Get the full prompt preview for a given prompt type and sample question"""
+    try:
+        # Import evaluation code
+        import sys
+        config = path_manager.get_config()
+        evaluation_dir = Path(config.evaluation_dir)
+        
+        # Add evaluation directory to path
+        if str(evaluation_dir) not in sys.path:
+            sys.path.insert(0, str(evaluation_dir))
+        
+        # Import evaluation utilities
+        from utils import construct_prompt
+        from examples import get_examples
+        
+        # Create a mock args object with the prompt type
+        class MockArgs:
+            def __init__(self, prompt_type, custom_prompt, num_shots):
+                self.prompt_type = prompt_type
+                self.prompt = custom_prompt if custom_prompt else None
+                self.num_shots = num_shots
+                self.adapt_few_shot = False
+        
+        # Use the original prompt_type for args (not the mapped one)
+        args = MockArgs(request.prompt_type, request.custom_prompt, request.num_shots)
+        
+        # Create a mock example with the sample question
+        example = {
+            "question": request.sample_question,
+            "gt_ans": "42"  # Dummy answer for construction
+        }
+        
+        # Map dataset names (similar to load_prompt logic)
+        # Handle comma-separated datasets by using the first one
+        data_name = request.dataset.split(',')[0].strip() if ',' in request.dataset else request.dataset.strip()
+        if data_name in ["gsm_hard", "svamp", "tabmwp", "asdiv", "mawps"]:
+            data_name = "gsm8k"
+        elif data_name in ["math_oai", "hungarian_exam", "math-oai", "aime24", "amc23"]:
+            data_name = "math"
+        elif data_name in ["sat_math"]:
+            data_name = "mmlu_stem"
+        elif data_name in ["gaokao2024_I", "gaokao2024_II", "gaokao_math_qa", "gaokao2024_mix", "cn_middle_school"]:
+            data_name = "gaokao"
+        
+        # Handle prompt type mapping (similar to construct_prompt logic)
+        prompt_type = request.prompt_type
+        if prompt_type == "platypus_fs":
+            prompt_type_for_load = "cot"  # Use cot examples for platypus_fs
+        elif prompt_type == "tool-integrated":
+            prompt_type_for_load = "tora"  # Use tora examples for tool-integrated
+        else:
+            prompt_type_for_load = prompt_type
+        
+        # Construct the prompt
+        try:
+            # Import evaluation utilities
+            from examples import get_examples
+            EXAMPLES = get_examples()
+            
+            # Check if dataset has examples available (use base dataset name)
+            # The load_prompt function maps datasets to base names, so we just need to ensure
+            # the base dataset exists after mapping
+            if data_name not in EXAMPLES:
+                # Default to gsm8k if dataset not found (most common dataset)
+                if "gsm8k" in EXAMPLES:
+                    data_name = "gsm8k"
+                elif "math" in EXAMPLES:
+                    data_name = "math"
+                else:
+                    # Get available base datasets (exclude prompt-specific ones like "gsm8k-pal")
+                    available_datasets = [d for d in EXAMPLES.keys() 
+                                        if d in ['gsm8k', 'math', 'mmlu_stem', 'gaokao', 'carp_en', 'minerva_math', 'aqua', 'sat_math', 'mmlu_mathematics', 'mmlu_physics', 'mmlu_chemistry', 'mmlu_biology', 'mmlu_computer']]
+                    if available_datasets:
+                        data_name = available_datasets[0]
+                    else:
+                        raise ValueError(f"Dataset '{request.dataset}' not found in EXAMPLES and no fallback available.")
+            
+            # Check if prompt type exists in PROMPT_TEMPLATES (for non-custom prompts)
+            from utils import PROMPT_TEMPLATES
+            if request.prompt_type != "custom" and request.prompt_type not in PROMPT_TEMPLATES:
+                available_types = ', '.join(sorted(PROMPT_TEMPLATES.keys()))
+                raise ValueError(f"Prompt type '{request.prompt_type}' not found in PROMPT_TEMPLATES. Available types: {available_types}")
+            
+            # Construct the prompt using the evaluation code
+            # This will handle all the formatting, few-shot examples, and special cases
+            full_prompt = construct_prompt(example, data_name, args)
+            
+        except KeyError as e:
+            # Handle missing key errors (e.g., dataset not in EXAMPLES)
+            from utils import PROMPT_TEMPLATES
+            try:
+                from examples import get_examples
+                EXAMPLES = get_examples()
+                available_datasets = [d for d in EXAMPLES.keys() 
+                                    if d in ['gsm8k', 'math', 'mmlu_stem', 'gaokao', 'carp_en', 'minerva_math', 'aqua', 'sat_math']]
+            except:
+                available_datasets = ['gsm8k', 'math']  # Fallback
+            
+            available_types = ', '.join(sorted(PROMPT_TEMPLATES.keys())) if 'PROMPT_TEMPLATES' in locals() else 'Unknown'
+            full_prompt = f"Error: {str(e)}\n\nAvailable datasets: {', '.join(available_datasets)}\nAvailable prompt types: {available_types}\nPrompt type requested: {request.prompt_type}\nDataset mapped to: {data_name}\nSample question: {request.sample_question}"
+        except ValueError as e:
+            # Handle value errors (e.g., invalid prompt type or dataset)
+            full_prompt = f"Error: {str(e)}\n\nPrompt type: {request.prompt_type}\nDataset: {data_name}\nSample question: {request.sample_question}"
+        except Exception as e:
+            # If construction fails, return a detailed error message
+            import traceback
+            error_details = traceback.format_exc()
+            full_prompt = f"Error constructing prompt: {str(e)}\n\nPrompt type: {request.prompt_type}\nDataset: {data_name}\nSample question: {request.sample_question}\n\nTraceback:\n{error_details}"
+        
+        return PromptPreviewResponse(
+            sample_question=request.sample_question,
+            full_prompt=full_prompt,
+            prompt_type=request.prompt_type
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating prompt preview: {str(e)}") 

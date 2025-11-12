@@ -11,7 +11,7 @@ def generate_completion(model, prompt, max_tokens, logprobs, output_dir, task_na
     
     # If not in environment, try to load from .env file
     if not api_key:
-        env_file = os.path.join(os.path.dirname(__file__), ".env")
+        env_file = os.path.join(os.path.dirname(__file__), "..", ".env")
         if os.path.exists(env_file):
             try:
                 with open(env_file, 'r') as f:
@@ -72,10 +72,14 @@ def main():
     parser.add_argument("--prompt", type=str, default="2+3=?")
     parser.add_argument("--max_tokens", type=int, default=1024)
     parser.add_argument("--logprobs", type=int, default=5)
-    parser.add_argument("--output_dir", type=str, default="evaluation/outputs/togetherai_api")
+    parser.add_argument("--output_dir", type=str, default="outputs/togetherai_api")
     parser.add_argument("--task_name", type=str, default="")
     parser.add_argument("--temperature", type=int, default=0)
     args = parser.parse_args()
+
+    # If output_dir is relative, make it relative to evaluation directory
+    if not os.path.isabs(args.output_dir):
+        args.output_dir = os.path.join(os.path.dirname(__file__), args.output_dir)
 
     generate_completion(args.model, args.prompt, args.max_tokens, args.logprobs, args.output_dir, args.task_name, args.temperature)
 
@@ -84,5 +88,6 @@ if __name__ == "__main__":
 
 
 """
-python togetherapi.py --prompt "Find the largest possible real part of \\[(75+117i)z+\\frac{96+144i}{z}\\]where $z$ is a complex number with $|z|=4$." --max_tokens 4096 --logprobs 0 --task_name aime24 --temperature 0
+python evaluation/togetherapi.py --prompt "Find the largest possible real part of \\[(75+117i)z+\\frac{96+144i}{z}\\]where $z$ is a complex number with $|z|=4$." --max_tokens 4096 --logprobs 0 --task_name aime24 --temperature 0
 """
+

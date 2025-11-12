@@ -24,13 +24,15 @@ class PathManager:
         evaluation_dir = str(Path(workspace_dir) / "evaluation")
         
         # Try to detect Python path
-        python_path = sys.executable if 'sys' in globals() else "/usr/bin/python3"
+        python_path = sys.executable if hasattr(sys, 'executable') else "/usr/bin/python3"
         
-        # Try to detect conda environment
-        conda_env = os.environ.get('CONDA_PREFIX', '/work/10757/manasp123/ls6/miniconda3')
+        # Try to detect conda environment - use CONDA_PREFIX if available, otherwise None
+        # Users can configure this through the path_config.json file
+        conda_env = os.environ.get('CONDA_PREFIX', None)
         
         # Default output directories - Fix path construction issues
         output_dir = str(Path(workspace_dir) / "evaluation" / "outputs")
+        exports_dir = str(Path(workspace_dir) / "evaluation" / "exports")
         logs_dir = str(Path(backend_dir) / "logs")
         scripts_dir = str(Path(backend_dir) / "scripts")
         job_db_path = str(Path(backend_dir) / "job_db.json")
@@ -50,10 +52,12 @@ class PathManager:
             python_path=python_path,
             conda_env_path=conda_env,
             output_dir=output_dir,
+            exports_dir=exports_dir,
             logs_dir=logs_dir,
             scripts_dir=scripts_dir,
             job_db_path=job_db_path,
-            openai_api_key=None  # Will be set by user through settings
+            openai_api_key=None,  # Will be set by user through settings
+            hf_token=None  # Will be set by user through settings
         )
     
     def _load_config(self):
@@ -72,6 +76,10 @@ class PathManager:
             else:
                 self._config = self._get_default_config()
                 self._save_config()
+            
+            # Ensure exports directory exists
+            if self._config.exports_dir:
+                os.makedirs(self._config.exports_dir, exist_ok=True)
         except Exception as e:
             print(f"Warning: Could not load path config: {e}")
             self._config = self._get_default_config()
@@ -88,6 +96,10 @@ class PathManager:
     def get_config(self) -> PathConfig:
         """Get current path configuration"""
         return self._config
+    
+    def reload_config(self):
+        """Reload configuration from file"""
+        self._load_config()
     
     def update_config(self, new_config: PathConfig):
         """Update path configuration"""
@@ -128,8 +140,8 @@ class PathManager:
         if not os.path.exists(math_eval_path):
             errors.append(f"math_eval.py not found in {config.evaluation_dir}")
         
-        # Check if conda environment exists
-        if not os.path.exists(config.conda_env_path):
+        # Check if conda environment exists (only if configured)
+        if config.conda_env_path and not os.path.exists(config.conda_env_path):
             warnings.append(f"conda_env_path: {config.conda_env_path} does not exist")
         
         return {

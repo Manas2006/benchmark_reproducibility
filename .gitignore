@@ -148,4 +148,13 @@ __pycache__/
 
 # 临时文件
 *.tmp
-*.temp 
+*.temp
+
+# Additional cleanup
+backend.log
+*.log
+.pytest_cache/
+*.pytest_cache
+
+# Auto-generated frontend configuration
+frontend/config.js

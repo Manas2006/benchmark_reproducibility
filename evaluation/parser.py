@@ -497,8 +497,15 @@ def extract_theoremqa_answer(pred: str, answer_flag: bool = True):
 
 
 def extract_answer(pred_str, data_name, use_last_number=True):
+    # Treat HuggingFace datasets like math if they're not specifically handled
+    is_hf_math = "huggingface.co/datasets" in data_name and data_name not in ["mmlu_stem", "sat_math", "aqua", "gaokao2023"]
+    if is_hf_math:
+        effective_data_name = "math"
+    else:
+        effective_data_name = data_name
+    
     pred_str = pred_str.replace("\u043a\u0438", "")
-    if data_name in ["mmlu_stem", "sat_math", "aqua", "gaokao2023"]:
+    if effective_data_name in ["mmlu_stem", "sat_math", "aqua", "gaokao2023"]:
         # TODO check multiple choice
         return choice_answer_clean(pred_str)
 
@@ -547,8 +554,8 @@ def extract_answer(pred_str, data_name, use_last_number=True):
 
     # choice answer
     if (
-        data_name in ["sat_math", "aqua"]
-        or "mmlu" in data_name
+        effective_data_name in ["sat_math", "aqua"]
+        or "mmlu" in effective_data_name
     ):
         tmp = re.findall(r"\b(A|B|C|D|E)\b", pred.upper())
         if tmp:
@@ -565,7 +572,7 @@ def extract_answer(pred_str, data_name, use_last_number=True):
         pred = pred[:-1]
     if pred != "" and pred[-1] == "/":
         pred = pred[:-1]
-    pred = strip_string(pred, skip_unit=data_name in ["carp_en", "minerva_math"])
+    pred = strip_string(pred, skip_unit=effective_data_name in ["carp_en", "minerva_math"])
     return pred
 
 
@@ -574,7 +581,7 @@ STRIP_EXCEPTIONS = ["carp_en", "minerva_math"]
 
 def parse_ground_truth(example: Dict[str, Any], data_name):
     if "gt_cot" in example and "gt" in example:
-        if data_name in ["math"]:
+        if data_name in ["math"] or "huggingface.co/datasets" in data_name:
             gt_ans = extract_answer(example["gt_cot"], data_name)
         elif data_name in STRIP_EXCEPTIONS:
             gt_ans = example["gt"]
@@ -583,7 +590,9 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         return example["gt_cot"], gt_ans
 
     # parse ground truth
-    if data_name in ["math", "minerva_math"]:
+    # Check if this is a HuggingFace MATH-style dataset (has 'solution' and 'answer' fields)
+    is_math_style = "huggingface.co/datasets" in data_name and "solution" in example
+    if data_name in ["math", "math500", "minerva_math"] or is_math_style:
         gt_cot = example["solution"]
         gt_ans = extract_answer(gt_cot, data_name)
     elif data_name == "gsm8k":

@@ -24,7 +24,7 @@ Add a lightweight web UI to tweak hyper-parameters (temp/top-p/k, model, dataset
 
 ## Directory Structure
 ```
-qwen-eval-ui/
+reasoning-models-eval/
 ├── evaluation/           # Original Qwen2.5-Math repo (unchanged)
 │   ├── math_eval.py     # Main evaluation script
 │   └── ...
@@ -47,8 +47,8 @@ qwen-eval-ui/
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/QwenLM/Qwen2.5-Math qwen-eval-ui
-cd qwen-eval-ui
+git clone https://github.com/QwenLM/Qwen2.5-Math reasoning-models-eval
+cd reasoning-models-eval
 ```
 
 ### 2. Create a conda environment (in /work for disk space)

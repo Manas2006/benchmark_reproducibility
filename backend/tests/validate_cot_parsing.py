@@ -6,6 +6,10 @@ Tests the parsing against the example fixture
 
 import json
 import os
+import sys
+
+# Add parent directory to path to allow imports from backend
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 def parse_cot_from_raw(raw_answer):
     """Parse CoT structure from raw model answer"""
@@ -53,10 +57,15 @@ def parse_cot_from_raw(raw_answer):
 def test_cot_parsing():
     """Test CoT parsing with the example fixture"""
     
-    # Load the example fixture
-    fixture_path = "test_fixtures/cot_example.json"
+    # Load the example fixture (relative to backend/tests)
+    fixture_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "cot_example.json")
+    # Also try relative to project root
+    if not os.path.exists(fixture_path):
+        fixture_path = os.path.join(os.path.dirname(__file__), "..", "..", "test_fixtures", "cot_example.json")
+    
     if not os.path.exists(fixture_path):
         print(f"❌ Fixture not found: {fixture_path}")
+        print("Please create test_fixtures/cot_example.json with test data")
         return False
     
     with open(fixture_path, 'r') as f:
@@ -103,4 +112,5 @@ def test_cot_parsing():
 
 if __name__ == "__main__":
     success = test_cot_parsing()
-    exit(0 if success else 1) 
+    exit(0 if success else 1)
+

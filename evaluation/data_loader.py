@@ -7,17 +7,54 @@ from utils import load_jsonl, lower_keys
 
 
 def load_data(data_name, split, data_dir="./data"):
-    data_file = f"{data_dir}/{data_name}/{split}.jsonl"
+    # Check if data_name is a HuggingFace dataset URL and extract identifier
+    hf_dataset_identifier = None
+    data_name_sanitized = None
+    if "huggingface.co/datasets/" in data_name:
+        # Extract dataset identifier from URL
+        # Format: https://huggingface.co/datasets/org/dataset_name
+        parts = data_name.split("huggingface.co/datasets/")[-1].split("/")
+        if len(parts) >= 2:
+            dataset_org = parts[0]
+            dataset_name = parts[1]
+            hf_dataset_identifier = f"{dataset_org}/{dataset_name}"
+            # Create a sanitized directory name from the URL
+            data_name_sanitized = data_name.replace("https://", "").replace("http://", "").replace("/", "_")
+    
+    # Use sanitized name if it's a URL, otherwise use original data_name
+    data_name_dir = data_name_sanitized if hf_dataset_identifier else data_name
+    data_file = f"{data_dir}/{data_name_dir}/{split}.jsonl"
+    
     if os.path.exists(data_file):
         examples = list(load_jsonl(data_file))
     else:
-        if data_name == "math":
+        # Check if data_name is a HuggingFace dataset URL
+        if hf_dataset_identifier:
+                
+                # Try to load the dataset with the specified split
+                try:
+                    dataset = load_dataset(hf_dataset_identifier, split=split)
+                except Exception as e:
+                    # If the split doesn't exist, try loading without split and use the first available
+                    print(f"Warning: Could not load split '{split}' from {hf_dataset_identifier}: {e}")
+                    print(f"Attempting to load the dataset without specifying split...")
+                    dataset = load_dataset(hf_dataset_identifier)
+                    # Use the first available split
+                    if len(dataset.keys()) > 0:
+                        first_split = list(dataset.keys())[0]
+                        dataset = dataset[first_split]
+                        print(f"Using split '{first_split}' instead")
+                    else:
+                        raise Exception(f"No splits available in dataset {hf_dataset_identifier}")
+        elif data_name == "math":
             dataset = load_dataset(
                 "competition_math",
                 split=split,
                 name="main",
                 cache_dir=f"{data_dir}/temp",
             )
+        elif data_name == "math500":
+            dataset = load_dataset("HuggingFaceH4/MATH-500", split=split)
         elif data_name == "gsm8k":
             dataset = load_dataset(data_name, split=split)
         elif data_name == "svamp":
@@ -73,7 +110,7 @@ def load_data(data_name, split, data_dir="./data"):
         examples = list(dataset)
         examples = [lower_keys(example) for example in examples]
         dataset = Dataset.from_list(examples)
-        os.makedirs(f"{data_dir}/{data_name}", exist_ok=True)
+        os.makedirs(f"{data_dir}/{data_name_dir}", exist_ok=True)
         dataset.to_json(data_file)
 
     # add 'idx' in the first column

@@ -155,12 +155,16 @@ def plot_cot_probabilities(filepath, output_filename="cot_detailed_analysis_plot
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot CoT probabilities from a JSONL file.")
-    parser.add_argument("filepath", nargs='?', default="/work/10757/cc123456/ls6/benchmark-reproducibility/mathevalUI/evaluation/outputs/DeepSeek-R1-Distill-Qwen-7B/gsm8k/truncation_analysis/truncation_plots/gsm8k_truncation_detailed_logs_DeepSeek-R1-Distill-Qwen-7B_trunc_1368e9aa-7b4d-4dbf-89e3-ca7926e88871_1758576024_20250922_171524.jsonl",
-                        help="Path to the JSONL data file. Defaults to 'sample_data.jsonl'.")
-    parser.add_argument("--output", default="cot_probability_plot_deepseek-r1-distill-qwen-7b_gsm8k.png",
-                        help="Filename for the saved plot. Defaults to 'evaluation/outputs/cot_probability_plot.png'.")
+    parser.add_argument("filepath", nargs='?', default=None,
+                        help="Path to the JSONL data file (required).")
+    parser.add_argument("--output", default="cot_probability_plot.png",
+                        help="Filename for the saved plot. Defaults to 'cot_probability_plot.png'.")
     
     args = parser.parse_args()
-
+    
+    if args.filepath is None:
+        parser.error("filepath argument is required")
+    
     print(f"Attempting to plot data from '{args.filepath}'...")
     plot_cot_probabilities(args.filepath, args.output)
+

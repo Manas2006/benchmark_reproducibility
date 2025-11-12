@@ -19,18 +19,18 @@ class PathConfig(BaseModel):
     
     # Python and environment
     python_path: str = Field(description="Path to Python executable")
-    conda_env_path: str = Field(description="Path to conda environment")
+    conda_env_path: Optional[str] = Field(default=None, description="Path to conda environment (optional)")
     
     # Output and logs
     output_dir: str = Field(description="Directory for evaluation results")
-    exports_dir: Optional[str] = Field(default="", description="Directory for Excel exports")
+    exports_dir: str = Field(description="Directory for Excel exports")
     logs_dir: str = Field(description="Directory for log files")
     scripts_dir: str = Field(description="Directory for SLURM scripts")
     job_db_path: str = Field(description="Path to job database file")
     
     # API configuration
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key for CoT Analysis LLM Judge")
-    hf_token: Optional[str] = Field(default="", description="Hugging Face token for accessing gated models")
+    hf_token: Optional[str] = Field(default=None, description="Hugging Face token for accessing gated models")
     
     # SLURM configuration
     slurm_partition: str = Field(default="gpu-a100-dev", description="SLURM partition name")
@@ -293,4 +293,18 @@ class HeatmapDataResponse(BaseModel):
     correct_token_ids: List[int] = Field(description="Token IDs of correct answer tokens")
     is_correct: bool = Field(description="Whether the model got the correct answer")
     predicted_answer: Optional[str] = Field(default=None, description="Model's predicted answer")
-    ground_truth: Optional[str] = Field(default=None, description="Ground truth answer") 
+    ground_truth: Optional[str] = Field(default=None, description="Ground truth answer")
+
+class PromptPreviewRequest(BaseModel):
+    """Request for prompt preview"""
+    prompt_type: str
+    custom_prompt: Optional[str] = None
+    dataset: str = "gsm8k"
+    sample_question: str = "Janet sells 16 - 3 + 4 = 17 duck eggs a day. She makes 3 + 4 = 7 duck eggs every 2 days. How many duck eggs does she make every day?"
+    num_shots: int = 5
+
+class PromptPreviewResponse(BaseModel):
+    """Response for prompt preview"""
+    sample_question: str
+    full_prompt: str
+    prompt_type: str 

@@ -310,6 +310,7 @@ class MathEvalRunner:
         
         # Build CLI args with job_id to avoid overwrites
         cli, result_file, prob_file = self._build_cli_args(req, uuid_jid)
+        
         if req.backend == Backend.local:
             local_job_id = get_next_local_job_id()
             out_file = os.path.join(path_config.logs_dir, f"qwen-math-{local_job_id}.out")
@@ -319,6 +320,11 @@ class MathEvalRunner:
                 api_key = getattr(req, 'together_api_key', None)
                 if api_key:
                     env['TOGETHER_API_KEY'] = api_key
+            # Add Hugging Face token if available from environment
+            if 'HF_TOKEN' in os.environ:
+                env['HF_TOKEN'] = os.environ['HF_TOKEN']
+            if 'HUGGINGFACE_HUB_TOKEN' in os.environ:
+                env['HUGGINGFACE_HUB_TOKEN'] = os.environ['HUGGINGFACE_HUB_TOKEN']
             proc = subprocess.Popen(
                 cli,
                 stdout=open(out_file, 'w'),
@@ -370,6 +376,22 @@ class MathEvalRunner:
             
             # Define newline for f-string usage
             newline = '\n'
+            # Check for HF token - first from path_config, then from environment
+            hf_token = path_config.hf_token or os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_HUB_TOKEN', '')
+            hf_token_export = ''
+            if hf_token:
+                hf_token_export = f'export HF_TOKEN={shlex.quote(hf_token)}{newline}export HUGGINGFACE_HUB_TOKEN={shlex.quote(hf_token)}{newline}'
+            
+            # Build conda activation section if conda_env_path is configured
+            conda_activation = ""
+            if path_config.conda_env_path:
+                conda_activation = f"""# Activate conda environment
+source {path_config.conda_env_path}/etc/profile.d/conda.sh
+conda activate math_eval
+"""
+            else:
+                conda_activation = "# Note: No conda environment configured. Using system Python.\n"
+            
             script_content = f"""#!/bin/bash
 cd {self.evaluation_dir}
 
@@ -380,10 +402,7 @@ export MKL_THREADING_LAYER=GNU
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
-# Activate conda environment
-source {path_config.conda_env_path}/etc/profile.d/conda.sh
-conda activate qwen-eval
-{('export TOGETHER_API_KEY=' + shlex.quote(req.together_api_key) + newline) if getattr(req, 'use_together_api', False) and getattr(req, 'together_api_key', None) else ''}
+{conda_activation}{hf_token_export}{('export TOGETHER_API_KEY=' + shlex.quote(req.together_api_key) + newline) if getattr(req, 'use_together_api', False) and getattr(req, 'together_api_key', None) else ''}
 {' '.join(escaped_cli)}
 """
             try:
@@ -397,6 +416,11 @@ conda activate qwen-eval
                 print(f"Script parent is_dir: {script_path.parent.is_dir()}")
                 raise
             if req.backend == Backend.slurm:
+                # Add HF token to sbatch environment as well
+                sbatch_env = f"#SBATCH --export=ALL"
+                if hf_token:
+                    sbatch_env += f"\n#SBATCH --export=ALL,HF_TOKEN={shlex.quote(hf_token)},HUGGINGFACE_HUB_TOKEN={shlex.quote(hf_token)}"
+                
                 sbatch_content = f"""#!/bin/bash
 #SBATCH -J qwen-math-{uuid_jid}   # Job name
 #SBATCH -o {out_file_pattern}      # Name of stdout output file (uses %j)
@@ -407,8 +431,7 @@ conda activate qwen-eval
 #SBATCH -t {path_config.slurm_wall_time}              # Run time (hh:mm:ss)
 #SBATCH --mail-type=all         # Send email at begin and end of job
 #SBATCH -A {path_config.slurm_account}             # Project/Allocation name
-
-
+{sbatch_env}
 
 # Fix MKL threading conflict
 export MKL_THREADING_LAYER=GNU

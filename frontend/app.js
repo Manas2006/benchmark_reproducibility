@@ -98,8 +98,8 @@ function showTab(tabName, event = null) {
 
     // Remove active class from all tab buttons
     document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.classList.remove('bg-blue-600', 'text-white');
-        btn.classList.add('text-gray-500', 'hover:text-gray-700');
+        btn.classList.remove('bg-blue-600', 'text-white', 'active');
+        btn.classList.add('text-gray-600', 'hover:text-gray-800', 'hover:bg-gray-100');
     });
 
     // Show selected tab
@@ -129,10 +129,13 @@ function showTab(tabName, event = null) {
     }
 
     // Highlight selected tab button
-    if (event && event.target) {
-        event.target.classList.remove('text-gray-500', 'hover:text-gray-700');
-        event.target.classList.add('bg-blue-600', 'text-white');
-    }
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        const onClickAttr = btn.getAttribute('onclick');
+        if (onClickAttr && onClickAttr.includes(`'${tabName}'`)) {
+            btn.classList.remove('text-gray-600', 'hover:text-gray-800', 'hover:bg-gray-100');
+            btn.classList.add('bg-blue-600', 'text-white', 'active');
+        }
+    });
 
     // Start/stop job list auto-refresh
     if (tabName === 'jobs') {
@@ -375,8 +378,14 @@ function updatePromptField(configId) {
     if (config.prompt_type === 'custom') {
         // Show custom prompt field
         promptField.style.display = 'block';
-        promptField.querySelector('label').textContent = 'Custom Prompt Template';
-        promptField.querySelector('textarea').placeholder = 'Enter your custom prompt template here... Use {question} to insert the math problem. Example: \'Solve this math problem step by step: {question}\'';
+        const label = promptField.querySelector('label') || promptField.querySelector('.flex.items-center.justify-between').querySelector('label');
+        if (label) {
+            label.textContent = 'Custom Prompt Template';
+        }
+        const textarea = promptField.querySelector('textarea');
+        if (textarea) {
+            textarea.placeholder = 'Enter your custom prompt template here... Use {question} to insert the math problem. Example: \'Solve this math problem step by step: {question}\'';
+        }
     } else {
         // Hide custom prompt field for standard prompt types
         promptField.style.display = 'none';
@@ -388,6 +397,156 @@ function updatePromptField(configId) {
         }
     }
 }
+
+// Prompt preview functions
+async function getPromptPreview(configId) {
+    const config = modelConfigs.find(c => c.id === configId);
+    if (!config) {
+        return { sampleQuestion: '', promptText: 'Configuration not found.', error: true };
+    }
+
+    // Sample question for demonstration
+    const sampleQuestion = "Janet sells 16 - 3 + 4 = 17 duck eggs a day. She makes 3 + 4 = 7 duck eggs every 2 days. How many duck eggs does she make every day?";
+    
+    // Get dataset from config (use first dataset if multiple)
+    const datasets = (config.dataset || 'gsm8k').split('\n').filter(d => d.trim());
+    const dataset = datasets.length > 0 ? datasets[0].split(',')[0].trim() : 'gsm8k';
+    
+    try {
+        // Call backend endpoint to get the actual prompt
+        const response = await fetch(`${API_BASE}/prompt/preview`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                prompt_type: config.prompt_type || 'custom',
+                custom_prompt: config.prompt_type === 'custom' ? (config.prompt || '') : null,
+                dataset: dataset,
+                sample_question: sampleQuestion,
+                num_shots: 5  // Show 5 few-shot examples in preview
+            })
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            let errorMessage = `Failed to fetch prompt preview: ${response.statusText}`;
+            try {
+                const errorData = JSON.parse(errorText);
+                if (errorData.detail) {
+                    errorMessage = errorData.detail;
+                }
+            } catch (e) {
+                // If response is not JSON, use the text directly
+                if (errorText) {
+                    errorMessage = errorText;
+                }
+            }
+            throw new Error(errorMessage);
+        }
+
+        const data = await response.json();
+        return {
+            sampleQuestion: data.sample_question || sampleQuestion,
+            promptText: data.full_prompt || '',
+            promptType: data.prompt_type || config.prompt_type,
+            error: false
+        };
+    } catch (error) {
+        console.error('Error fetching prompt preview:', error);
+        
+        // Fallback: show basic prompt for custom prompts
+        if (config.prompt_type === 'custom') {
+            const customPrompt = config.prompt || '';
+            if (customPrompt.trim()) {
+                return {
+                    sampleQuestion: sampleQuestion,
+                    promptText: customPrompt.replace(/{question}/g, sampleQuestion),
+                    promptType: 'custom',
+                    error: false
+                };
+            } else {
+                return {
+                    sampleQuestion: sampleQuestion,
+                    promptText: 'Please enter a custom prompt template first.',
+                    promptType: 'custom',
+                    error: true
+                };
+            }
+        }
+        
+        // Fallback for standard prompts
+        return {
+            sampleQuestion: sampleQuestion,
+            promptText: `Error fetching prompt preview: ${error.message}\n\nPrompt type: ${config.prompt_type}\n\nNote: The backend is constructing the full prompt with few-shot examples. Please ensure the backend is running and the evaluation directory is properly configured.`,
+            promptType: config.prompt_type,
+            error: true
+        };
+    }
+}
+
+async function showPromptPreview(configId) {
+    const modal = document.getElementById('prompt-preview-modal');
+    const sampleQuestionEl = document.getElementById('prompt-preview-sample-question');
+    const promptCodeEl = document.getElementById('prompt-preview-code-content');
+
+    if (!modal || !sampleQuestionEl || !promptCodeEl) {
+        console.error('Prompt preview modal elements not found');
+        return;
+    }
+
+    // Show modal with loading state
+    modal.classList.remove('hidden');
+    sampleQuestionEl.textContent = 'Loading...';
+    promptCodeEl.textContent = 'Fetching prompt preview from backend...';
+    document.body.style.overflow = 'hidden';
+
+    try {
+        // Fetch the actual prompt from backend
+        const preview = await getPromptPreview(configId);
+        
+        // Update modal content
+        sampleQuestionEl.textContent = preview.sampleQuestion;
+        promptCodeEl.textContent = preview.promptText;
+        
+        // Reset styling
+        promptCodeEl.style.color = '';
+        promptCodeEl.style.backgroundColor = '';
+        
+        // Add error styling if there was an error
+        if (preview.error) {
+            promptCodeEl.style.color = '#fca5a5'; // Light red for errors
+            promptCodeEl.style.backgroundColor = '#7f1d1d'; // Dark red background for errors
+        } else {
+            // Ensure proper styling for code display
+            promptCodeEl.style.color = '#e2e8f0'; // Default light gray
+            promptCodeEl.style.backgroundColor = '#1e293b'; // Default dark background
+        }
+    } catch (error) {
+        console.error('Error showing prompt preview:', error);
+        sampleQuestionEl.textContent = 'Error loading preview';
+        promptCodeEl.textContent = `Failed to load prompt preview: ${error.message}\n\nPlease ensure:\n1. The backend is running\n2. The evaluation directory is properly configured\n3. The prompt type is valid`;
+        promptCodeEl.style.color = '#fca5a5';
+        promptCodeEl.style.backgroundColor = '#7f1d1d';
+    }
+}
+
+function hidePromptPreview() {
+    const modal = document.getElementById('prompt-preview-modal');
+    if (modal) {
+        modal.classList.add('hidden');
+        // Restore body scroll
+        document.body.style.overflow = '';
+    }
+}
+
+// Close modal on Escape key
+document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape') {
+        hidePromptPreview();
+        hideCachedResults();
+    }
+});
 
 function handleModelSelection(configId, selectedValue) {
     const urlInput = document.getElementById(`url-input-${configId}`);
@@ -466,11 +625,11 @@ function renderModelConfigs() {
 
     modelConfigs.forEach(config => {
         const configDiv = document.createElement('div');
-        configDiv.className = 'border border-gray-200 rounded-lg p-4 mb-4';
+        configDiv.className = 'border border-gray-300 rounded-xl p-6 mb-6 bg-white shadow-sm hover:shadow-md transition-shadow duration-200';
         configDiv.innerHTML = `
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="text-lg font-medium">Model Configuration</h3>
-                <button onclick="removeModelConfig(${config.id})" class="text-red-600 hover:text-red-800">
+            <div class="flex justify-between items-center mb-6">
+                <h3 class="text-lg font-bold text-gray-900">Model Configuration</h3>
+                <button onclick="removeModelConfig(${config.id})" class="px-3 py-1.5 text-sm font-medium text-red-600 hover:text-red-800 bg-red-50 hover:bg-red-100 rounded-lg transition-all duration-200">
                     Remove
                 </button>
             </div>
@@ -478,50 +637,50 @@ function renderModelConfigs() {
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 ${config.inference_mode !== 'together_api' ? `
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Model (or Hugging Face URL)</label>
-                    <select onchange="updateModelConfig(${config.id}, 'model', this.value); handleModelSelection(${config.id}, this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Model (or Hugging Face URL)</label>
+                    <select onchange="updateModelConfig(${config.id}, 'model', this.value); handleModelSelection(${config.id}, this.value)" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200">
                         ${AVAILABLE_MODELS.map(model => `<option value="${model}" ${config.model === model ? 'selected' : ''}>${model}</option>`).join('')}
                     </select>
                     <div id="url-input-${config.id}" class="mt-2 ${config.model === 'Link from Hugging Face' ? '' : 'hidden'}">
                         <input type="text" onchange="updateModelConfig(${config.id}, 'customModel', this.value)" 
                                placeholder="Enter Hugging Face URL (e.g., https://huggingface.co/openai/gpt-oss-20b)" 
-                               class="block w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
-                               value="${config.customModel}">
-                        <p class="text-xs text-gray-500 mt-1">The model name will be automatically extracted from the URL.</p>
+                               class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
+                               value="${config.customModel || ''}">
+                        <p class="text-xs text-gray-500 mt-2">The model name will be automatically extracted from the URL.</p>
                     </div>
                 </div>
                 ` : ''}
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Inference</label>
-                    <select onchange="updateModelConfig(${config.id}, 'inference_mode', this.value); renderModelConfigs()" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Inference</label>
+                    <select onchange="updateModelConfig(${config.id}, 'inference_mode', this.value); renderModelConfigs()" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200">
                         ${INFERENCE_MODES.map(m => `<option value="${m}" ${config.inference_mode === m ? 'selected' : ''}>${m}</option>`).join('')}
                     </select>
                 </div>
 
                 ${config.inference_mode === 'together_api' ? `
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Together API Model</label>
-                    <select onchange="updateModelConfig(${config.id}, 'together_model', this.value); handleTogetherModelSelection(${config.id}, this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Together API Model</label>
+                    <select onchange="updateModelConfig(${config.id}, 'together_model', this.value); handleTogetherModelSelection(${config.id}, this.value)" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200">
                         ${TOGETHER_API_MODELS.map(model => `<option value="${model}" ${config.together_model === model ? 'selected' : ''}>${model}</option>`).join('')}
                     </select>
                     <div id="together-custom-input-${config.id}" class="mt-2 ${config.together_model === 'Custom Together Model' ? '' : 'hidden'}">
                         <input type="text" onchange="updateModelConfig(${config.id}, 'together_custom_model', this.value)" 
                                placeholder="Enter custom Together model name" 
-                               class="block w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                               class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200"
                                value="${config.together_custom_model}">
-                        <p class="text-xs text-gray-500 mt-1">Enter the exact model name as it appears in Together AI.</p>
+                        <p class="text-xs text-gray-500 mt-2">Enter the exact model name as it appears in Together AI.</p>
                     </div>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Together API Key</label>
-                    <input type="password" onchange="updateModelConfig(${config.id}, 'together_api_key', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" placeholder="TOGETHER_API_KEY" value="${config.together_api_key}">
-                    <p class="text-xs text-gray-500 mt-1">If empty, backend will use TOGETHER_API_KEY from environment.</p>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Together API Key</label>
+                    <input type="password" onchange="updateModelConfig(${config.id}, 'together_api_key', this.value)" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" placeholder="TOGETHER_API_KEY" value="${config.together_api_key}">
+                    <p class="text-xs text-gray-500 mt-2">If empty, backend will use TOGETHER_API_KEY from environment.</p>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Logprobs (0-5)</label>
-                    <input type="number" min="0" max="5" onchange="updateModelConfig(${config.id}, 'together_logprobs', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" value="${config.together_logprobs}">
-                    <p class="text-xs text-gray-500 mt-1">If 0, logprobs will not be requested.</p>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Logprobs (0-5)</label>
+                    <input type="number" min="0" max="5" onchange="updateModelConfig(${config.id}, 'together_logprobs', this.value)" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" value="${config.together_logprobs}">
+                    <p class="text-xs text-gray-500 mt-2">If 0, logprobs will not be requested.</p>
                 </div>
                 ` : ''}
                 
@@ -531,92 +690,98 @@ function renderModelConfigs() {
                         <input type="checkbox" ${config.enable_prob_tracking ? 'checked' : ''} onchange="updateModelConfig(${config.id}, 'enable_prob_tracking', this.checked)" class="form-checkbox h-5 w-5 text-blue-600">
                         <span class="ml-2 text-sm text-gray-700">Enable probability tracking (requires vLLM)</span>
                     </label>
-                    <p class="text-xs text-gray-500 mt-1">If enabled, vLLM will be used and probabilities will be recorded to a separate JSONL.</p>
+                    <p class="text-xs text-gray-500 mt-2">If enabled, vLLM will be used and probabilities will be recorded to a separate JSONL.</p>
                 </div>
                 <div>
                     <label class="inline-flex items-center mt-4">
                         <input type="checkbox" ${config.enable_path_vectors ? 'checked' : ''} onchange="updateModelConfig(${config.id}, 'enable_path_vectors', this.checked)" class="form-checkbox h-5 w-5 text-purple-600">
                         <span class="ml-2 text-sm text-gray-700">Enable path vectors (high memory usage)</span>
                     </label>
-                    <p class="text-xs text-gray-500 mt-1">Records full probability distributions for Path of Distributions visualization. Requires probability tracking.</p>
+                    <p class="text-xs text-gray-500 mt-2">Records full probability distributions for Path of Distributions visualization. Requires probability tracking.</p>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Max Path Steps</label>
-                    <input type="number" onchange="updateModelConfig(${config.id}, 'max_path_steps', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" value="${config.max_path_steps}" placeholder="0 for unlimited">
-                    <p class="text-xs text-gray-500 mt-1">Maximum number of steps to record for path vectors. Use 0 or negative for unlimited (high memory usage).</p>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Max Path Steps</label>
+                    <input type="number" min="1" max="1000" onchange="updateModelConfig(${config.id}, 'max_path_steps', this.value)" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" value="${config.max_path_steps}">
+                    <p class="text-xs text-gray-500 mt-2">Maximum number of steps to record for path vectors.</p>
                 </div>
                 ` : ''}
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Dataset (one per line)</label>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Dataset (one per line)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'dataset', this.value)" 
-                              class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
+                              class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" 
                               rows="3" placeholder="gsm8k&#10;math&#10;gsm8k,math">${config.dataset}</textarea>
-                    <p class="text-xs text-gray-500 mt-1">
+                    <p class="text-xs text-gray-500 mt-2">
                         Enter one dataset per line. You can use a built-in name (e.g., <code>gsm8k</code>, <code>math</code>) or a Hugging Face dataset link (e.g., <code>https://huggingface.co/datasets/username/datasetname</code>).
                     </p>
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Backend</label>
-                    <select onchange="updateModelConfig(${config.id}, 'backend', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Backend</label>
+                    <select onchange="updateModelConfig(${config.id}, 'backend', this.value)" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200">
                         ${BACKEND_OPTIONS.map(backend => `<option value="${backend}" ${config.backend === backend ? 'selected' : ''}>${backend}</option>`).join('')}
                     </select>
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Temperature (one per line)</label>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Temperature (one per line)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'temperature', this.value)" 
-                              class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
+                              class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" 
                               rows="3" placeholder="0.0&#10;0.1&#10;0.5">${config.temperature}</textarea>
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Top P (one per line)</label>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Top P (one per line)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'top_p', this.value)" 
-                              class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
+                              class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" 
                               rows="3" placeholder="1.0&#10;0.9&#10;0.8">${config.top_p}</textarea>
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Top K (one per line)</label>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Top K (one per line)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'top_k', this.value)" 
-                              class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
+                              class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" 
                               rows="3" placeholder="0&#10;10&#10;50">${config.top_k}</textarea>
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Seed (one per line)</label>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Seed (one per line)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'seed', this.value)" 
-                              class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
+                              class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" 
                               rows="3" placeholder="42&#10;123&#10;456">${config.seed}</textarea>
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Eval Method</label>
-                    <select onchange="updateModelConfig(${config.id}, 'eval_method', this.value)" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Eval Method</label>
+                    <select onchange="updateModelConfig(${config.id}, 'eval_method', this.value)" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200">
                         ${EVAL_METHODS.map(method => `<option value="${method}" ${config.eval_method === method ? 'selected' : ''}>${method}</option>`).join('')}
                     </select>
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">K for Pass@K (one per line)</label>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">K for Pass@K (one per line)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'k', this.value)" 
-                              class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
+                              class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" 
                               rows="3" placeholder="1&#10;2&#10;5">${config.k}</textarea>
-                    <p class="text-xs text-gray-500 mt-1">Number of attempts per question for pass@k evaluation</p>
+                    <p class="text-xs text-gray-500 mt-2">Number of attempts per question for pass@k evaluation</p>
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Max Tokens (one per line)</label>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Max Tokens (one per line)</label>
                     <textarea onchange="updateModelConfig(${config.id}, 'max_tokens', this.value)" 
-                              class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" 
+                              class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" 
                               rows="3" placeholder="2048\n4096">${config.max_tokens}</textarea>
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Prompt Type</label>
-                    <select onchange="updateModelConfig(${config.id}, 'prompt_type', this.value); updatePromptField(${config.id})" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                    <div class="flex items-center justify-between mb-2">
+                        <label class="block text-sm font-semibold text-gray-700 mb-2">Prompt Type</label>
+                        <button type="button" onclick="showPromptPreview(${config.id})" 
+                            class="px-3 py-1 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 rounded-lg border border-blue-200 transition-all duration-200">
+                            👁️ Preview Prompt
+                        </button>
+                    </div>
+                    <select onchange="updateModelConfig(${config.id}, 'prompt_type', this.value); updatePromptField(${config.id})" class="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                         <option value="custom" ${config.prompt_type === 'custom' ? 'selected' : ''}>Custom Prompt</option>
                         <option value="cot" ${config.prompt_type === 'cot' ? 'selected' : ''}>Chain of Thought (CoT)</option>
                         <option value="auto-cot" ${config.prompt_type === 'auto-cot' ? 'selected' : ''}>Auto Chain of Thought (Auto-CoT)</option>
@@ -631,14 +796,20 @@ function renderModelConfigs() {
                 </div>
                 
                 <div class="md:col-span-2 lg:col-span-3" id="prompt-field-${config.id}">
-                    <label class="block text-sm font-medium text-gray-700">Custom Prompt Template</label>
+                    <div class="flex items-center justify-between mb-2">
+                        <label class="block text-sm font-semibold text-gray-700 mb-2">Custom Prompt Template</label>
+                        <button type="button" onclick="showPromptPreview(${config.id})" 
+                            class="px-3 py-1 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 rounded-lg border border-blue-200 transition-all duration-200">
+                            👁️ Preview Prompt
+                        </button>
+                    </div>
                     <textarea onchange="updateModelConfig(${config.id}, 'prompt', this.value)" 
-                              class="mt-1 block w-full border border-blue-300 rounded-md px-3 py-2 bg-blue-50" 
+                              class="mt-1 block w-full border border-blue-300 rounded-lg px-3 py-2.5 bg-blue-50 focus:ring-2 focus:ring-blue-500 focus:border-blue-500" 
                               rows="6" placeholder="Enter your custom prompt template here... Use {question} to insert the math problem. Example: 'Solve this math problem step by step: {question}'">${config.prompt}</textarea>
-                    <p class="text-xs text-blue-600 mt-1 font-medium">
+                    <p class="text-xs text-blue-600 mt-2 font-medium">
                         ⚡ Use {question} to insert the math problem. Example: "Solve this math problem step by step: {question}"
                     </p>
-                    <p class="text-xs text-gray-500 mt-1">
+                    <p class="text-xs text-gray-500 mt-2">
                         💡 Standard prompt types (CoT, PAL, etc.) use pre-built templates with few-shot examples. Custom prompts give you full control over the prompt format.
                     </p>
                 </div>
@@ -1377,8 +1548,8 @@ async function openProbPlotModal(jobId) {
     const mathLevelControlsHTML = isMathDataset ? `
         <div id="math-level-controls" class="hidden">
             <div id="level-single-controls" class="hidden">
-                <label class="block text-sm font-medium text-gray-700">Select Level</label>
-                <select id="math-level-select" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                <label class="block text-sm font-semibold text-gray-700 mb-2">Select Level</label>
+                <select id="math-level-select" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200">
                     <option value="1">Level 1</option>
                     <option value="2">Level 2</option>
                     <option value="3">Level 3</option>
@@ -1407,8 +1578,8 @@ async function openProbPlotModal(jobId) {
             </div>
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-700">Plot Type</label>
-                    <select id="prob-plot-type" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2">
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Plot Type</label>
+                    <select id="prob-plot-type" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200">
                         <option value="aggregate" selected>Aggregate (All Samples)</option>
                         <option value="correct_aggregate">Aggregate (Correct Answers Only)</option>
                         <option value="incorrect_aggregate">Aggregate (Incorrect Answers Only)</option>
@@ -1420,8 +1591,8 @@ async function openProbPlotModal(jobId) {
                     </select>
                 </div>
                 <div id="prob-sample-id-field" class="hidden">
-                    <label class="block text-sm font-medium text-gray-700">Sample ID (idx)</label>
-                    <input id="prob-sample-id" type="number" class="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2" placeholder="Enter sample idx">
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">Sample ID (idx)</label>
+                    <input id="prob-sample-id" type="number" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" placeholder="Enter sample idx">
                 </div>
                 ${mathLevelControlsHTML}
                 <div class="flex justify-end gap-2">

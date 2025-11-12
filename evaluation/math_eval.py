@@ -619,7 +619,17 @@ def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], samplin
         
         print(f"🚀 Starting vLLM subprocess with max_model_len={final_max_model_len}, gpu_memory_utilization={gpu_memory_utilization}")
         # Spawn child. It will exit and release all VRAM.
-        subprocess.run([sys.executable, "pass1_child_vllm.py", in_path, out_path], check=True)
+        # Pass environment variables, but filter out invalid HF tokens
+        env = os.environ.copy()
+        # Only pass HF tokens if they look valid (not placeholder values)
+        for token_var in ['HF_TOKEN', 'HUGGINGFACE_HUB_TOKEN']:
+            if token_var in env:
+                token = env[token_var]
+                if not token or token.startswith('your_token') or len(token) < 10:
+                    # Remove invalid tokens
+                    env.pop(token_var, None)
+                    print(f"⚠️ Filtered out invalid {token_var}")
+        subprocess.run([sys.executable, "pass1_child_vllm.py", in_path, out_path], check=True, env=env)
         print("✅ vLLM subprocess completed successfully")
         
         with open(out_path, "r", encoding="utf-8") as f:
