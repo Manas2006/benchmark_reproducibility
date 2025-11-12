@@ -158,3 +158,5 @@ backend.log
 
 # Auto-generated frontend configuration
 frontend/config.js
+# NFS temporary files
+.nfs*
