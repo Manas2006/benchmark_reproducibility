@@ -169,37 +169,44 @@ def analyze_score_distribution(scores: list) -> Dict[str, Any]:
 
 def fuse_with_judge(rule: Dict[str, float], judge: Dict[str, Any], evidence: Dict[str, Any]) -> Dict[str, float]:
     """
-    Merge rule-based scores with LLM judge scores.
+    Get final scores using LLM judge scores exclusively when available, otherwise rule-based scores.
     
-    When GPT judge is available, use its scores directly (converted from 1-5 to 0.0-1.0).
-    Only fall back to rule-based scores when judge is unavailable.
+    IMPORTANT: When LLM judge is available, ONLY judge scores are used. Rule-based scores
+    are completely ignored and not combined with judge scores.
     
     Args:
-        rule: Rule-based scores from rule_scores() (0.0-1.0)
+        rule: Rule-based scores from rule_scores() (0.0-1.0) - only used if judge unavailable
         judge: Judge scores from Judge.score() (1-5 or None)
-        evidence: Evidence dictionary from PillarsEvaluator.analyze()
+        evidence: Evidence dictionary from PillarsEvaluator.analyze() (unused, kept for compatibility)
         
     Returns:
-        Fused scores dictionary with 0.0-1.0 values
+        Final scores dictionary with 0.0-1.0 values (from judge if available, otherwise from rules)
     """
     from .judge import Judge
     
     # Validate and normalize judge scores
     judge_normalized = Judge.validate_and_normalize_judge(judge)
     
+    # Check if any judge scores are available
+    has_judge_scores = any(judge_normalized.get(pillar) is not None 
+                          for pillar in ["faithfulness", "utility", "coherence", "factuality"])
+    
     fused = {}
     
-    for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
-        rule_score = rule.get(f"{pillar}_rule", 0.0)
-        judge_score = judge_normalized.get(pillar)
-        
-        if judge_score is None:
-            # No judge score available, use rule score only
-            fused[pillar] = rule_score
-        else:
-            # GPT judge is available - use its score directly
-            # Convert from 1-5 scale to 0.0-1.0 scale
-            fused[pillar] = max(0.0, min(1.0, (judge_score - 1) / 4.0))
+    if has_judge_scores:
+        # LLM judge is available - use ONLY judge scores (ignore rule scores completely)
+        for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
+            judge_score = judge_normalized.get(pillar)
+            if judge_score is not None:
+                # Convert from 1-5 scale to 0.0-1.0 scale
+                fused[pillar] = max(0.0, min(1.0, (judge_score - 1) / 4.0))
+            else:
+                # Judge didn't provide score for this pillar, use rule score as fallback
+                fused[pillar] = rule.get(f"{pillar}_rule", 0.0)
+    else:
+        # No judge scores available - use rule-based scores exclusively
+        for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
+            fused[pillar] = rule.get(f"{pillar}_rule", 0.0)
     
     # Compute overall score as average of pillar scores
     fused["overall"] = sum(fused[pillar] for pillar in ["faithfulness", "utility", "coherence", "factuality"]) / 4.0

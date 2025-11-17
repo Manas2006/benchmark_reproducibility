@@ -296,16 +296,31 @@ class PillarsEvaluator:
             "arith_bad_examples": []  # Placeholder
         }
         
-        # Step 8: Compute rule-based scores
-        rule_scores_dict = rule_scores(evidence)
-        
-        # Step 9: Get judge scores if judge is available
+        # Step 8: Get judge scores if judge is available
         judge_scores = {"faithfulness": None, "utility": None, "coherence": None, "factuality": None}
+        judge_available = False
         if self.judge is not None:
             flags_summary = flags.summarize_for_prompt()
             judge_scores = self.judge.score(problem, cot_text, gold or "", flags_summary, evidence)
+            # Check if judge actually returned any scores (might be None if judge skipped in SMART mode)
+            judge_available = any(judge_scores.get(pillar) is not None 
+                                 for pillar in ["faithfulness", "utility", "coherence", "factuality"])
         
-        # Step 10: Fuse rule and judge scores
+        # Step 9: Compute rule-based scores (only if judge is not available or didn't return scores)
+        # If judge is available and returned scores, we use judge scores exclusively
+        if not judge_available:
+            # No judge scores available, compute rule-based scores as fallback
+            rule_scores_dict = rule_scores(evidence)
+        else:
+            # Judge is available and returned scores - initialize empty rule scores (won't be used)
+            rule_scores_dict = {
+                "faithfulness_rule": 0.0,
+                "utility_rule": 0.0,
+                "coherence_rule": 0.0,
+                "factuality_rule": 0.0
+            }
+        
+        # Step 10: Get final scores (use judge scores exclusively if available, otherwise rule scores)
         fused_scores = fuse_with_judge(rule_scores_dict, judge_scores, evidence)
         
         return flags, evidence, rule_scores_dict, judge_scores, fused_scores
