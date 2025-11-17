@@ -163,6 +163,10 @@ class MathEvalRunner:
         self.scripts_dir = Path(self.config.scripts_dir)
         # Create scripts directory and its parent directories if they don't exist
         self.scripts_dir.mkdir(parents=True, exist_ok=True)
+        # Cache for job status to avoid redundant post-processing checks
+        # Format: {job_id: (status_dict, timestamp)}
+        self._job_status_cache: Dict[str, tuple] = {}
+        self._cache_ttl = 5.0  # Cache TTL in seconds (5 seconds)
         
     def _build_cli_args(self, req: EvalRequest, job_id: str = None) -> list[str]:
         """Build command line arguments for math_eval.py"""
@@ -580,14 +584,27 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
             if result.returncode == 0:
                 # Update job info with processed file path
                 job_db[jid]["processed_file"] = str(processed_file)
+                # Clear any previous failure tracking
+                job_db[jid].pop("post_processing_failed", None)
+                job_db[jid].pop("post_processing_failure_time", None)
                 save_job_db()
                 print(f"Post-processing completed for job {jid}")
                 return True
             else:
+                # Track the failure
+                job_db[jid]["post_processing_failed"] = True
+                job_db[jid]["post_processing_failure_time"] = time.time()
+                job_db[jid]["post_processing_error"] = result.stderr[:500]  # Store first 500 chars
+                save_job_db()
                 print(f"Post-processing failed for job {jid}: {result.stderr}")
                 return False
                 
         except Exception as e:
+            # Track the failure
+            job_db[jid]["post_processing_failed"] = True
+            job_db[jid]["post_processing_failure_time"] = time.time()
+            job_db[jid]["post_processing_error"] = str(e)[:500]  # Store first 500 chars
+            save_job_db()
             print(f"Error running post-processing for job {jid}: {str(e)}")
             return False
     
@@ -604,7 +621,14 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
             # Check if post-processing has already been done
             if "processed_file" in job_info:
                 return
-                
+            
+            # Check if post-processing previously failed (don't retry immediately)
+            if job_info.get("post_processing_failed", False):
+                failure_time = job_info.get("post_processing_failure_time", 0)
+                # Only retry if it's been more than 5 minutes since last failure
+                if time.time() - failure_time < 300:
+                    return  # Skip retry for now
+            
             # Get result file and model name
             result_file = job_info.get("result_file")
             if not result_file or not Path(result_file).exists():
@@ -634,6 +658,22 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
         """Get the status of a running or completed job"""
         if jid not in job_db:
             return {"status": "NOT_FOUND", "message": "Job not found"}
+        
+        # Check cache first (only for completed jobs to avoid redundant post-processing checks)
+        current_time = time.time()
+        if jid in self._job_status_cache:
+            cached_status, cache_time = self._job_status_cache[jid]
+            if current_time - cache_time < self._cache_ttl:
+                # Return cached status, but still check post-processing if needed
+                job_info = job_db[jid]
+                if cached_status.get("status") == JobStatus.DONE:
+                    # Only check post-processing once per cache period
+                    if "post_processing_checked" not in job_info or \
+                       (current_time - job_info.get("post_processing_checked", 0)) > self._cache_ttl:
+                        self._check_and_run_post_processing(jid, job_info)
+                        job_info["post_processing_checked"] = current_time
+                        save_job_db()
+                return cached_status
         
         job_info = job_db[jid]
         original_status = job_info.get("status")
@@ -672,19 +712,8 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                         error_file = Path(job_info.get("err_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.err"))
                         result_file = Path(job_info.get("result_file", ""))
                         
-                        # Check error file first for failure indicators
-                        if error_file.exists():
-                            with open(error_file, 'r') as f:
-                                error_content = f.read()
-                                if is_real_error(error_content):
-                                    job_info["status"] = JobStatus.ERROR
-                                    job_info["error"] = f"Job failed with errors. Check error log for details."
-                                    # Save updated status to file
-                                    if original_status != job_info["status"]:
-                                        save_job_db()
-                                    return job_info
-                        
-                        # Check if result file exists and is non-empty
+                        # Check if result file exists and is non-empty FIRST
+                        # If result file exists, job completed successfully regardless of error log
                         if result_file.exists() and result_file.stat().st_size > 0:
                             job_info["status"] = JobStatus.DONE
                             job_info.pop("error", None)
@@ -696,6 +725,20 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                             job_info.pop("error", None)
                             # Check if this job needs post-processing
                             self._check_and_run_post_processing(jid, job_info)
+                        # Only check error file if result/output files don't exist
+                        elif error_file.exists():
+                            with open(error_file, 'r') as f:
+                                error_content = f.read()
+                                if is_real_error(error_content):
+                                    job_info["status"] = JobStatus.ERROR
+                                    job_info["error"] = f"Job failed with errors. Check error log for details."
+                                    # Save updated status to file
+                                    if original_status != job_info["status"]:
+                                        save_job_db()
+                                    return job_info
+                            # Error file exists but no real errors found, but no result file either
+                            job_info["status"] = JobStatus.ERROR
+                            job_info["error"] = f"Job completed but output/result files missing or empty"
                         else:
                             job_info["status"] = JobStatus.ERROR
                             job_info["error"] = f"Job completed but output/result files missing or empty"
@@ -706,19 +749,8 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     error_file = Path(job_info.get("err_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.err"))
                     result_file = Path(job_info.get("result_file", ""))
                     
-                    # Check error file first for failure indicators
-                    if error_file.exists():
-                        with open(error_file, 'r') as f:
-                            error_content = f.read()
-                            if is_real_error(error_content):
-                                job_info["status"] = JobStatus.ERROR
-                                job_info["error"] = f"Job failed with errors. Check error log for details."
-                                # Save updated status to file
-                                if original_status != job_info["status"]:
-                                    save_job_db()
-                                return job_info
-                    
-                    # If result file exists and is non-empty, mark as DONE
+                    # Check if result file exists and is non-empty FIRST
+                    # If result file exists, job completed successfully regardless of error log
                     if result_file.exists() and result_file.stat().st_size > 0:
                         job_info["status"] = JobStatus.DONE
                         job_info.pop("error", None)
@@ -730,6 +762,20 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                         job_info.pop("error", None)
                         # Check if this job needs post-processing
                         self._check_and_run_post_processing(jid, job_info)
+                    # Only check error file if result/output files don't exist
+                    elif error_file.exists():
+                        with open(error_file, 'r') as f:
+                            error_content = f.read()
+                            if is_real_error(error_content):
+                                job_info["status"] = JobStatus.ERROR
+                                job_info["error"] = f"Job failed with errors. Check error log for details."
+                                # Save updated status to file
+                                if original_status != job_info["status"]:
+                                    save_job_db()
+                                return job_info
+                        # Error file exists but no real errors found, but no result file either
+                        job_info["status"] = JobStatus.ERROR
+                        job_info["error"] = f"Failed to check SLURM status: {result.stderr}"
                     else:
                         job_info["status"] = JobStatus.ERROR
                         job_info["error"] = f"Failed to check SLURM status: {result.stderr}"
@@ -740,6 +786,12 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
         # Save updated status to file if it changed
         if original_status != job_info.get("status"):
             save_job_db()
+        
+        # Cache the status result
+        status_result = job_info.copy()
+        status_result.pop("proc", None)
+        status_result.pop("cli", None)
+        self._job_status_cache[jid] = (status_result, current_time)
         
         return job_info
     
@@ -785,6 +837,11 @@ def cancel_job(jid: str) -> bool:
 
 def delete_job(jid: str) -> bool:
     return runner.delete_job(jid)
+
+def reload_job_db():
+    """Reload job database from disk"""
+    load_job_db()
+    return len(job_db)
 
 def get_job_raw_data(job_id: str) -> dict:
     """Extract raw answer data from job results for CoT analysis"""

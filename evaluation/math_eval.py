@@ -31,7 +31,11 @@ from python_executor import PythonExecutor
 from model_utils import load_hf_lm_and_tokenizer, generate_completions
 from prob_recorder import BatchProbabilityRecorder
 from run_truncation_analysis_with_logs import run_truncation_analysis_over_samples_with_logs as run_truncation_analysis_over_samples
-from extract_answer_confidence import extract_answer_confidence
+try:
+    # Optional import for answer confidence calculation (ECE)
+    from extract_answer_confidence import extract_answer_confidence
+except ImportError:
+    extract_answer_confidence = None
 
 # --- NEW: helpers for subprocess Pass-1
 import tempfile, subprocess
@@ -1378,18 +1382,46 @@ def main(llm, tokenizer, data_name, args):
             for j in range(len(preds)):
                 # Try to extract answer from the response
                 response_text = code[j]
-                # Look for patterns like "Therefore, the final answer is: \boxed{ANSWER}"
                 import re
+                
+                # Look for patterns like "Therefore, the final answer is: \boxed{ANSWER}"
                 boxed_match = re.search(r'\\boxed\{([^}]+)\}', response_text)
                 if boxed_match:
-                    preds[j] = boxed_match.group(1)
+                    preds[j] = boxed_match.group(1).strip()
                 else:
-                    # If no boxed format, just use the last line or the whole response
-                    lines = response_text.strip().split('\n')
-                    if lines:
-                        preds[j] = lines[-1].strip()
+                    # Look for framebox
+                    framebox_match = re.search(r'\\framebox\{([^}]+)\}', response_text)
+                    if framebox_match:
+                        preds[j] = framebox_match.group(1).strip()
                     else:
-                        preds[j] = response_text.strip()
+                        # Try to extract number from patterns like "Final answer: 145 bananas" or "answer is 145"
+                        # Look for patterns like "Final answer: NUMBER" or "answer is NUMBER" or "answer: NUMBER"
+                        answer_patterns = [
+                            r'(?:final\s+answer|answer|result)[\s:]+([0-9]+(?:\.[0-9]+)?)',
+                            r'####\s*([0-9]+(?:\.[0-9]+)?)',
+                            r'([0-9]+(?:\.[0-9]+)?)\s*(?:bananas?|pounds?|dollars?|pages?|minutes?|hours?|days?|etc\.?)',
+                        ]
+                        extracted_number = None
+                        for pattern in answer_patterns:
+                            match = re.search(pattern, response_text, re.IGNORECASE)
+                            if match:
+                                extracted_number = match.group(1)
+                                break
+                        
+                        if extracted_number:
+                            preds[j] = extracted_number
+                        else:
+                            # If no pattern found, try to extract the last number in the text
+                            numbers = re.findall(r'([0-9]+(?:\.[0-9]+)?)', response_text)
+                            if numbers:
+                                preds[j] = numbers[-1]  # Use the last number found
+                            else:
+                                # Fallback: use the last line or whole response
+                                lines = response_text.strip().split('\n')
+                                if lines:
+                                    preds[j] = lines[-1].strip()
+                                else:
+                                    preds[j] = response_text.strip()
         else:
             # For standard prompts, use the original logic
             for j in range(len(preds)):
@@ -1436,7 +1468,7 @@ def main(llm, tokenizer, data_name, args):
                 
                 # Compute and add answer_confidence for ECE calculation
                 # This is computed once during evaluation when we have the tokenizer
-                if tokenizer is not None:
+                if tokenizer is not None and extract_answer_confidence is not None:
                     try:
                         answer_details = extract_answer_confidence(sample, tokenizer, data_name, return_details=True)
                         if answer_details:
@@ -1457,8 +1489,9 @@ def main(llm, tokenizer, data_name, args):
                         sample["answer_token_indices"] = None
                         sample["answer_text"] = None
                         if i < 3:  # Only print first few errors to avoid spam
-                            print(f"Warning: Could not extract answer confidence for sample {i}: {e}")
+                            print(f"Warning: Failed to extract answer confidence: {e}")
                 else:
+                    # extract_answer_confidence module not available
                     sample["answer_confidence"] = None
                     sample["answer_token_ids"] = None
                     sample["answer_token_indices"] = None

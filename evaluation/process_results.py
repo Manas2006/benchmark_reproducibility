@@ -10,6 +10,7 @@ import argparse
 import json
 import torch
 import math
+import re
 from pathlib import Path
 from typing import List, Dict, Any
 from transformers import AutoTokenizer
@@ -41,6 +42,27 @@ def calculate_entropy(logprobs_dict: Dict[int, float]) -> float:
     entropy = -torch.sum(probs_tensor * log_probs).item()
     
     return entropy
+
+
+def normalize_model_name(model_name_or_path: str) -> str:
+    """Normalize model name by extracting repo ID from URLs.
+    
+    Converts:
+    - https://huggingface.co/microsoft/Phi-4-reasoning -> microsoft/Phi-4-reasoning
+    - http://huggingface.co/microsoft/Phi-4-reasoning -> microsoft/Phi-4-reasoning
+    - microsoft/Phi-4-reasoning -> microsoft/Phi-4-reasoning (unchanged)
+    """
+    if not model_name_or_path:
+        return model_name_or_path
+    
+    # Pattern to match HuggingFace URLs
+    hf_url_pattern = r'https?://(?:www\.)?huggingface\.co/([^/\s]+/[^/\s]+)'
+    match = re.search(hf_url_pattern, model_name_or_path)
+    if match:
+        return match.group(1)
+    
+    # If it's already a repo ID format, return as-is
+    return model_name_or_path
 
 
 def calculate_chosen_token_prob(logprobs_dict: Dict[int, float], chosen_token_id: int) -> float:
@@ -169,9 +191,10 @@ def main():
     else:
         output_path = input_path.parent / f"{input_path.stem}_processed{input_path.suffix}"
     
-    # Load tokenizer
-    print(f"Loading tokenizer from {args.model_name_or_path}...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+    # Normalize model name (extract repo ID from URLs if needed)
+    normalized_model_name = normalize_model_name(args.model_name_or_path)
+    print(f"Loading tokenizer from {normalized_model_name} (original: {args.model_name_or_path})...")
+    tokenizer = AutoTokenizer.from_pretrained(normalized_model_name, trust_remote_code=True)
     
     # Process the input file
     print(f"Processing {input_path}...")

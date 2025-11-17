@@ -1,6 +1,99 @@
-// Configuration
-const API_BASE = 'http://localhost:8002';
-const WS_BASE = 'ws://localhost:8002';
+// Configuration - dynamically detect available backend server
+// Tries multiple ports to find an available backend
+let API_BASE = null;
+let WS_BASE = null;
+
+// Common backend ports to try (in order of preference)
+const BACKEND_PORTS = [8000, 8001, 8002, 8003, 8004, 8005];
+
+// Check if a backend is available on a given port
+async function checkBackendHealth(protocol, hostname, port) {
+    const url = `${protocol}//${hostname}:${port}/health`;
+    try {
+        const response = await fetch(url, {
+            method: 'GET',
+            signal: AbortSignal.timeout(2000) // 2 second timeout
+        });
+        return response.ok;
+    } catch (error) {
+        return false;
+    }
+}
+
+// Dynamically detect available backend
+async function detectBackend() {
+    // First, check if config.js has a hardcoded API_BASE (for backwards compatibility)
+    if (window.API_BASE) {
+        console.log(`[Config] Using API_BASE from config.js: ${window.API_BASE}`);
+        API_BASE = window.API_BASE;
+        WS_BASE = API_BASE.replace(/^http/, 'ws');
+        return API_BASE;
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+    const hostname = window.location.hostname;
+
+    console.log(`[Config] Auto-detecting backend server...`);
+    
+    // Try each port in order
+    for (const port of BACKEND_PORTS) {
+        const url = `${protocol}//${hostname}:${port}`;
+        console.log(`[Config] Trying backend at ${url}...`);
+        
+        const isAvailable = await checkBackendHealth(protocol, hostname, port);
+        
+        if (isAvailable) {
+            API_BASE = url;
+            WS_BASE = API_BASE.replace(/^http/, 'ws');
+            console.log(`[Config] ✅ Backend detected at ${API_BASE}`);
+            return API_BASE;
+        } else {
+            console.log(`[Config] ❌ Backend not available at ${url}`);
+        }
+    }
+    
+    // Fallback: use port 8000 if nothing found (for backwards compatibility)
+    console.warn(`[Config] ⚠️ No backend detected, falling back to port 8000`);
+    API_BASE = `${protocol}//${hostname}:8000`;
+    WS_BASE = API_BASE.replace(/^http/, 'ws');
+    return API_BASE;
+}
+
+// Promise that resolves when API_BASE is ready
+let apiBaseReady = null;
+
+// Initialize API_BASE (will be set asynchronously)
+apiBaseReady = detectBackend().then(() => {
+    console.log(`[Config] Final API_BASE: ${API_BASE}, WS_BASE: ${WS_BASE}`);
+    return API_BASE;
+});
+
+// Helper function to get API_BASE, waiting if necessary
+async function getApiBase() {
+    if (API_BASE) {
+        return API_BASE;
+    }
+    // Wait for detection to complete
+    await apiBaseReady;
+    return API_BASE;
+}
+
+// Helper function to get WS_BASE, waiting if necessary
+async function getWsBase() {
+    if (WS_BASE) {
+        return WS_BASE;
+    }
+    // Wait for detection to complete
+    await apiBaseReady;
+    return WS_BASE;
+}
+
+// Wrapper for fetch that automatically uses the detected API_BASE
+async function apiFetch(endpoint, options = {}) {
+    const apiBase = await getApiBase();
+    const url = endpoint.startsWith('http') ? endpoint : `${apiBase}${endpoint}`;
+    return fetch(url, options);
+}
 
 // Available options
 const AVAILABLE_MODELS = [
@@ -84,7 +177,6 @@ const TOGETHER_API_MODELS = [
 // Global state
 let modelConfigs = [];
 let currentWebSocket = null;
-let jobListInterval = null;
 let structuredViewMode = true; // true for structured view, false for raw view
 
 // Tab management
@@ -137,17 +229,10 @@ function showTab(tabName, event = null) {
         }
     });
 
-    // Start/stop job list auto-refresh
+    // Refresh job list when switching to jobs tab (no auto-refresh)
     if (tabName === 'jobs') {
-        if (!jobListInterval) {
-            refreshJobs();
-            jobListInterval = setInterval(refreshJobs, 5000);
-        }
-    } else {
-        if (jobListInterval) {
-            clearInterval(jobListInterval);
-            jobListInterval = null;
-        }
+        console.log('Switching to jobs tab, refreshing job list');
+        refreshJobs();
     }
 
     // Load path config when settings tab is shown
@@ -166,7 +251,7 @@ function showTab(tabName, event = null) {
 // Path configuration functions
 async function loadPathConfig() {
     try {
-        const response = await fetch(`${API_BASE}/config/paths`);
+        const response = await apiFetch('/config/paths');
         const data = await response.json();
 
         // Populate form fields with current config
@@ -232,7 +317,7 @@ async function savePathConfig(event) {
             wall_time: config.slurm_wall_time
         });
 
-        const response = await fetch(`${API_BASE}/config/paths`, {
+        const response = await apiFetch('/config/paths', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -258,7 +343,7 @@ async function savePathConfig(event) {
 
 async function validatePaths() {
     try {
-        const response = await fetch(`${API_BASE}/config/paths/validate`);
+        const response = await apiFetch('/config/paths/validate');
         const data = await response.json();
 
         const resultDiv = document.getElementById('path-validation-result');
@@ -303,7 +388,7 @@ async function resetPathConfig() {
     }
 
     try {
-        const response = await fetch(`${API_BASE}/config/paths/reset`, {
+        const response = await apiFetch('/config/paths/reset', {
             method: 'POST'
         });
 
@@ -414,7 +499,7 @@ async function getPromptPreview(configId) {
     
     try {
         // Call backend endpoint to get the actual prompt
-        const response = await fetch(`${API_BASE}/prompt/preview`, {
+        const response = await apiFetch('/prompt/preview', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -792,6 +877,7 @@ function renderModelConfigs() {
                         <option value="self-instruct" ${config.prompt_type === 'self-instruct' ? 'selected' : ''}>Self Instruct</option>
                         <option value="wizard_zs" ${config.prompt_type === 'wizard_zs' ? 'selected' : ''}>Wizard Zero Shot</option>
                         <option value="platypus_fs" ${config.prompt_type === 'platypus_fs' ? 'selected' : ''}>Platypus Few Shot</option>
+                        <option value="aime" ${config.prompt_type === 'aime' ? 'selected' : ''}>AIME (American Invitational Mathematics Examination)</option>
                     </select>
                 </div>
                 
@@ -918,7 +1004,7 @@ async function submitEvaluation() {
 
         // Submit all jobs
         const promises = allJobs.map(jobData =>
-            fetch(`${API_BASE}/jobs`, {
+            apiFetch('/jobs', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1021,7 +1107,7 @@ function renderJobList(jobs) {
 async function deleteJob(jobId) {
     if (!confirm('Are you sure you want to delete this job?')) return;
     try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}`, { method: 'DELETE' });
+        const response = await apiFetch(`/jobs/${jobId}`, { method: 'DELETE' });
         const data = await response.json();
         if (data.deleted) {
             refreshJobs();
@@ -1036,7 +1122,7 @@ async function deleteJob(jobId) {
 async function clearAllJobs() {
     try {
         // First get all jobs
-        const response = await fetch(`${API_BASE}/jobs`);
+        const response = await apiFetch('/jobs');
         const data = await response.json();
         const jobs = data.jobs || [];
 
@@ -1051,7 +1137,7 @@ async function clearAllJobs() {
 
         // Delete all jobs in parallel
         const deletePromises = jobs.map(job =>
-            fetch(`${API_BASE}/jobs/${job.job_id}`, { method: 'DELETE' })
+            apiFetch(`/jobs/${job.job_id}`, { method: 'DELETE' })
         );
 
         // Show progress
@@ -1117,7 +1203,7 @@ function renderMonitorControls(jobId) {
 async function cancelJob(jobId) {
     if (!confirm('Are you sure you want to cancel this job?')) return;
     try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/cancel`, { method: 'POST' });
+        const response = await apiFetch(`/jobs/${jobId}/cancel`, { method: 'POST' });
         const data = await response.json();
         if (data.cancelled) {
             alert('Job cancelled.');
@@ -1137,7 +1223,7 @@ function monitorJob(jobId) {
     startMonitoring();
 }
 
-function startMonitoring() {
+async function startMonitoring() {
     const jobId = document.getElementById('monitor-job-id').value;
     if (!jobId) {
         alert('Please enter a job ID');
@@ -1153,7 +1239,8 @@ function startMonitoring() {
     logOutput.innerHTML = 'Connecting...\n';
 
     // Connect to WebSocket
-    currentWebSocket = new WebSocket(`${WS_BASE}/stream/${jobId}`);
+    const wsBase = await getWsBase();
+    currentWebSocket = new WebSocket(`${wsBase}/stream/${jobId}`);
 
     currentWebSocket.onopen = function () {
         logOutput.innerHTML += 'Connected to job stream\n';
@@ -1204,6 +1291,8 @@ function startMonitoring() {
                 } else if (data.status) {
                     logOutput.innerHTML += `[STATUS] Job changed to: ${data.status} (Return Code: ${data.return_code || 'N/A'})\n`;
                     logOutput.scrollTop = logOutput.scrollHeight;
+                    // Refresh job list when job status changes
+                    refreshJobs();
                 }
             } else {
                 // Raw view mode - show everything as plain text
@@ -1219,6 +1308,8 @@ function startMonitoring() {
                     logOutput.innerHTML += `<span style='color: #ff3333;'>[ERROR]</span> ${escapeHtml(data.error)}\n`;
                 } else if (data.status) {
                     logOutput.innerHTML += `[STATUS] Job changed to: ${data.status} (Return Code: ${data.return_code || 'N/A'})\n`;
+                    // Refresh job list when job status changes
+                    refreshJobs();
                 } else if (data.monitor_prompt || data.monitor_epoch) {
                     // Show structured data as JSON in raw mode
                     logOutput.innerHTML += `<span style='color: #FFD700;'>[MONITOR]</span> ${escapeHtml(JSON.stringify(data, null, 2))}\n`;
@@ -1262,12 +1353,32 @@ function escapeHtml(text) {
 
 async function refreshJobs() {
     try {
-        const response = await fetch(`${API_BASE}/jobs`);
+        const apiBase = await getApiBase();
+        console.log(`[refreshJobs] Fetching jobs from ${apiBase}/jobs`);
+        const response = await apiFetch('/jobs');
+        console.log(`[refreshJobs] Response status: ${response.status} ${response.statusText}`);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
         const data = await response.json();
+        console.log(`[refreshJobs] Response data:`, data);
         const jobs = data.jobs || [];
+        console.log(`[refreshJobs] Refreshed jobs list: ${jobs.length} jobs found`);
+        if (jobs.length > 0) {
+            console.log(`[refreshJobs] Job IDs:`, jobs.map(j => j.job_id || j.slurm_jid || 'unknown'));
+        }
         renderJobList(jobs);
     } catch (error) {
-        document.getElementById('jobs-list').innerHTML = '<p class="text-red-500">Error loading jobs</p>';
+        console.error('[refreshJobs] Error refreshing jobs:', error);
+        console.error('[refreshJobs] Error details:', {
+            message: error.message,
+            stack: error.stack,
+            name: error.name
+        });
+        const jobsList = document.getElementById('jobs-list');
+        if (jobsList) {
+            jobsList.innerHTML = `<p class="text-red-500">Error loading jobs: ${error.message}</p>`;
+        }
     }
 }
 
@@ -1278,7 +1389,7 @@ async function showMetricsModal(jobId, title = 'Metrics') {
         // First, get job configuration information
         let jobConfig = null;
         try {
-            const jobResponse = await fetch(`${API_BASE}/jobs/${jobId}`);
+            const jobResponse = await apiFetch(`/jobs/${jobId}`);
             if (jobResponse.ok) {
                 jobConfig = await jobResponse.json();
                 console.log('Job configuration loaded:', jobConfig);
@@ -1290,7 +1401,8 @@ async function showMetricsModal(jobId, title = 'Metrics') {
         }
 
         // Then get metrics
-        const url = `${API_BASE}/metrics/${jobId}`;
+        const apiBase = await getApiBase();
+        const url = `${apiBase}/metrics/${jobId}`;
         console.log(`Fetching metrics from: ${url}`);
         const response = await fetch(url);
         if (!response.ok) {
@@ -1425,7 +1537,8 @@ function parseCoTFromAnswer(answer) {
 async function showResultModal(resultFilePath, title = 'Results') {
     try {
         console.log(`Loading result file: ${resultFilePath}`);
-        const url = `${API_BASE}/file?path=${encodeURIComponent(resultFilePath)}`;
+        const apiBase = await getApiBase();
+        const url = `${apiBase}/file?path=${encodeURIComponent(resultFilePath)}`;
         console.log(`Fetching file from: ${url}`);
         const response = await fetch(url);
         if (!response.ok) {
@@ -1523,7 +1636,7 @@ async function openProbPlotModal(jobId) {
     // First, get job info to check if dataset is math
     let isMathDataset = false;
     try {
-        const jobResponse = await fetch(`${API_BASE}/jobs/${jobId}`);
+        const jobResponse = await apiFetch(`/jobs/${jobId}`);
         if (jobResponse.ok) {
             const jobInfo = await jobResponse.json();
             const dataset = jobInfo.request?.dataset || '';
@@ -1652,7 +1765,8 @@ async function openProbPlotModal(jobId) {
         const imgContainer = modal.querySelector('#prob-plot-output');
         imgContainer.innerHTML = 'Generating plot...';
         try {
-            const url = `${API_BASE}/jobs/${jobId}/prob-plot?${params.toString()}`;
+            const apiBase = await getApiBase();
+            const url = `${apiBase}/jobs/${jobId}/prob-plot?${params.toString()}`;
             const resp = await fetch(url);
             if (!resp.ok) {
                 const err = await resp.text();
@@ -1694,7 +1808,7 @@ async function openProbPlotModal(jobId) {
 
 async function exportToExcel(jobId) {
     try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/export`);
+        const response = await apiFetch(`/jobs/${jobId}/export`);
         if (!response.ok) {
             let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
             if (response.status === 404) {
@@ -1733,7 +1847,12 @@ async function exportToExcel(jobId) {
 }
 
 // Initialize
-document.addEventListener('DOMContentLoaded', function () {
+document.addEventListener('DOMContentLoaded', async function () {
+    // Wait for backend detection to complete
+    console.log('[Init] Waiting for backend detection...');
+    await apiBaseReady;
+    console.log('[Init] Backend ready, initializing UI...');
+    
     // Add initial model config
     addModelConfig();
 
@@ -1745,9 +1864,10 @@ document.addEventListener('DOMContentLoaded', function () {
     controlsDiv.id = 'monitor-controls';
     controlsDiv.className = 'mb-2 flex justify-end';
     monitorTab.insertBefore(controlsDiv, monitorTab.children[1]);
-    // Start auto-refresh if jobs tab is active on load
+    // Refresh jobs if jobs tab is active on load (no auto-refresh)
     if (document.getElementById('jobs').classList.contains('active')) {
-        jobListInterval = setInterval(refreshJobs, 5000);
+        console.log('Jobs tab is active on load, refreshing job list');
+        refreshJobs();
     }
 
     // Add form submit handler for path configuration
@@ -1793,7 +1913,7 @@ let currentCoTData = null; // Store current analysis data
 
 async function loadCoTJobs() {
     try {
-        const response = await fetch(`${API_BASE}/jobs`);
+        const response = await apiFetch('/jobs');
         const data = await response.json();
         const jobs = data.jobs || [];
 
@@ -1868,7 +1988,7 @@ async function runCoTAnalysis() {
 
 
         // Call the backend CoT analysis endpoint
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/cot-analysis`);
+        const response = await apiFetch(`/jobs/${jobId}/cot-analysis`);
 
         if (!response.ok) {
             const errorData = await response.json();
@@ -2798,7 +2918,7 @@ async function saveConfiguration() {
             openai_api_key: apiKey
         };
         
-        const response = await fetch(`${API_BASE}/config`, {
+        const response = await apiFetch('/config', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -2834,7 +2954,7 @@ async function testOpenAIKey() {
         testButton.disabled = true;
 
         // Test the API key by calling the backend
-        const response = await fetch(`${API_BASE}/config/test-openai-key`, {
+        const response = await apiFetch('/config/test-openai-key', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -2870,7 +2990,7 @@ let currentTruncationAnalysis = null;
 
 async function loadTruncationJobs() {
     try {
-        const response = await fetch(`${API_BASE}/jobs`);
+        const response = await apiFetch('/jobs');
         const data = await response.json();
 
         const select = document.getElementById('truncation-job-select');
@@ -2950,7 +3070,7 @@ async function runTruncationAnalysis() {
 
         console.log('Starting truncation analysis:', request);
 
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/truncation-analysis`, {
+        const response = await apiFetch(`/jobs/${jobId}/truncation-analysis`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -3037,7 +3157,7 @@ function displayTruncationResults(result) {
     resultsDiv.classList.remove('hidden');
 }
 
-function showTruncationPlot(plotType) {
+async function showTruncationPlot(plotType) {
     if (!currentTruncationAnalysis) {
         showTruncationError('No analysis results available');
         return;
@@ -3051,7 +3171,8 @@ function showTruncationPlot(plotType) {
 
     // Create image element
     const img = document.createElement('img');
-    img.src = `${API_BASE}/jobs/${jobId}/truncation-analysis/plot?plot_type=${plotType}`;
+    const apiBase = await getApiBase();
+    img.src = `${apiBase}/jobs/${jobId}/truncation-analysis/plot?plot_type=${plotType}`;
     img.alt = `${plotType} samples confidence curve`;
     img.className = 'max-w-full h-auto mx-auto rounded-lg shadow-lg';
 
@@ -3065,15 +3186,16 @@ function showTruncationPlot(plotType) {
     };
 }
 
-function downloadTruncationData() {
+async function downloadTruncationData() {
     if (!currentTruncationAnalysis || !currentTruncationAnalysis.raw_curves_path) {
         showTruncationError('No raw data available for download');
         return;
     }
 
     // Create a temporary link to download the file
+    const apiBase = await getApiBase();
     const link = document.createElement('a');
-    link.href = `${API_BASE}/file?path=${encodeURIComponent(currentTruncationAnalysis.raw_curves_path)}`;
+    link.href = `${apiBase}/file?path=${encodeURIComponent(currentTruncationAnalysis.raw_curves_path)}`;
     link.download = `truncation_curves_${currentTruncationAnalysis.job_id}.json`;
     document.body.appendChild(link);
     link.click();
@@ -3493,7 +3615,7 @@ document.addEventListener('click', function(event) {
 // Load jobs that have probability tracking enabled
 async function loadHeatmapJobs() {
     try {
-        const response = await fetch(`${API_BASE}/jobs`);
+        const response = await apiFetch('/jobs');
         const data = await response.json();
         
         const jobSelect = document.getElementById('heatmap-job-select');
@@ -3536,7 +3658,7 @@ async function loadHeatmapQuestions() {
     }
     
     try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/questions`);
+        const response = await apiFetch(`/jobs/${jobId}/questions`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${await response.text()}`);
         }
@@ -3585,7 +3707,7 @@ async function loadHeatmapData() {
     hideHeatmapError();
     
     try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/heatmap-data/${questionIdx}`);
+        const response = await apiFetch(`/jobs/${jobId}/heatmap-data/${questionIdx}`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${await response.text()}`);
         }

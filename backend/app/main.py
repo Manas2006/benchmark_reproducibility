@@ -6,6 +6,8 @@ from typing import List
 import json
 import asyncio
 import os
+import re
+import sys
 import time
 from pathlib import Path
 import pandas as pd
@@ -17,7 +19,7 @@ from .schemas import (
     PromptPreviewRequest, PromptPreviewResponse,
     TruncationAnalysisRequest, TruncationAnalysisResponse
 )
-from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data, save_job_db
+from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data, save_job_db, reload_job_db
 from .path_manager import path_manager
 import subprocess
 import shlex
@@ -560,17 +562,51 @@ async def get_metrics_file(job_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error finding metrics file: {str(e)}")
 
+@app.post("/jobs/reload")
+async def reload_jobs():
+    """Reload job database from disk"""
+    try:
+        count = reload_job_db()
+        return {"message": "Job database reloaded successfully", "job_count": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reloading job database: {str(e)}")
+
 @app.get("/jobs")
 async def list_jobs():
     jobs = []
     try:
+        import asyncio
+        # Use cached status from job_db to avoid blocking on slow status checks
+        # Only check status for jobs that might have changed (running/queued jobs)
         for jid, info in job_db.items():
-            # Get real-time status for each job
-            job_info = get_job_status(jid)
-            if isinstance(job_info, dict):
-                job_info = job_info.copy()
-                job_info.pop("proc", None)
-                job_info.pop("cli", None)
+            # Copy job info
+            job_info = info.copy()
+            job_info.pop("proc", None)
+            job_info.pop("cli", None)
+            
+            # Only do expensive status checks for jobs that are still running/queued
+            current_status = job_info.get("status", "")
+            if current_status in ["RUNNING", "QUEUED"]:
+                # Do async status check with timeout
+                try:
+                    # Run status check in executor to avoid blocking
+                    loop = asyncio.get_event_loop()
+                    updated_info = await asyncio.wait_for(
+                        loop.run_in_executor(None, get_job_status, jid),
+                        timeout=2.0  # 2 second timeout per job
+                    )
+                    if isinstance(updated_info, dict):
+                        updated_info = updated_info.copy()
+                        updated_info.pop("proc", None)
+                        updated_info.pop("cli", None)
+                        job_info.update(updated_info)
+                except asyncio.TimeoutError:
+                    # If status check times out, use cached status
+                    print(f"Status check timeout for job {jid}, using cached status")
+                except Exception as e:
+                    print(f"Error checking status for job {jid}: {e}")
+                    # Continue with cached status
+            
             slurm_jid = job_info.get("slurm_jid")
             result_file = job_info.get("result_file")
             prob_file = job_info.get("prob_file")
@@ -578,6 +614,8 @@ async def list_jobs():
         return {"jobs": jobs}
     except Exception as e:
         print(f"Error in /jobs: {e}")
+        import traceback
+        traceback.print_exc()
         return {"jobs": [], "error": str(e)}
 
 @app.get("/jobs/{job_id}/questions", response_model=List[QuestionPreview])
@@ -1309,32 +1347,81 @@ async def get_cot_analysis(job_id: str):
         results = []
         total_samples = len(data_list)
         
-        print(f"🔍 Starting CoT analysis for {total_samples} samples...")
+        print(f"🔍 Starting CoT analysis for {total_samples} samples...", flush=True)
         
         for i, sample in enumerate(data_list):
             try:
-                print(f"📊 Analyzing sample {i+1}/{total_samples}...")
+                print(f"📊 Analyzing sample {i+1}/{total_samples}...", flush=True)
+                sys.stdout.flush()
                 
                 # Extract model reasoning and answer
-                model_reasoning = sample.get('code', [''])
-                model_reasoning_text = model_reasoning[0] if model_reasoning else ""
-                predicted_answer = sample.get('pred', [''])
-                predicted_answer_text = predicted_answer[0] if predicted_answer else ""
+                # Try multiple fields in order of preference (different datasets use different field names)
+                model_reasoning_text = ""
+                predicted_answer_text = ""
+                
+                # Try to get reasoning from 'code', 'solution', or 'output' fields
+                if sample.get('code'):
+                    code_val = sample.get('code', [''])
+                    if isinstance(code_val, list):
+                        model_reasoning_text = code_val[0] if code_val and code_val[0] else ""
+                    else:
+                        model_reasoning_text = str(code_val) if code_val else ""
+                
+                if not model_reasoning_text and sample.get('solution'):
+                    model_reasoning_text = str(sample.get('solution', ''))
+                
+                if not model_reasoning_text and sample.get('output'):
+                    output_val = sample.get('output', '')
+                    if isinstance(output_val, list):
+                        model_reasoning_text = output_val[0] if output_val and output_val[0] else ""
+                    else:
+                        model_reasoning_text = str(output_val) if output_val else ""
+                
+                # Try to get predicted answer from 'pred', 'answer', or extract from reasoning
+                if sample.get('pred'):
+                    pred_val = sample.get('pred', [''])
+                    if isinstance(pred_val, list):
+                        predicted_answer_text = str(pred_val[0]) if pred_val and pred_val[0] is not None else ""
+                    else:
+                        predicted_answer_text = str(pred_val) if pred_val else ""
+                
+                if not predicted_answer_text and sample.get('answer'):
+                    predicted_answer_text = str(sample.get('answer', ''))
+                
+                # If still no answer, try to extract from reasoning text
+                if not predicted_answer_text and model_reasoning_text:
+                    # Look for boxed answer
+                    boxed_match = re.search(r'\\boxed\{([^}]+)\}', model_reasoning_text)
+                    if boxed_match:
+                        predicted_answer_text = boxed_match.group(1).strip()
+                    else:
+                        # Look for framebox
+                        framebox_match = re.search(r'\\framebox\{([^}]+)\}', model_reasoning_text)
+                        if framebox_match:
+                            predicted_answer_text = framebox_match.group(1).strip()
                 
                 # Construct full CoT text
-                full_cot_text = f"{model_reasoning_text}\n#### {predicted_answer_text}"
+                if predicted_answer_text:
+                    full_cot_text = f"{model_reasoning_text}\n#### {predicted_answer_text}"
+                else:
+                    full_cot_text = model_reasoning_text
                 
                 # Get existing correctness from job data
                 existing_scores = sample.get('score', [])
                 is_correct = existing_scores[0] if existing_scores else False
                 
-                print(f"   Question: {sample.get('question', '')[:100]}{'...' if len(sample.get('question', '')) > 100 else ''}")
-                print(f"   Ground Truth: {sample.get('gt', '')}")
-                print(f"   Predicted: {predicted_answer_text}")
-                print(f"   Correct: {is_correct}")
+                print(f"   Question: {sample.get('question', '')[:100]}{'...' if len(sample.get('question', '')) > 100 else ''}", flush=True)
+                print(f"   Ground Truth: {sample.get('gt', '')}", flush=True)
+                print(f"   Reasoning length: {len(model_reasoning_text)} chars", flush=True)
+                print(f"   Predicted: {predicted_answer_text}", flush=True)
+                print(f"   Correct: {is_correct}", flush=True)
+                if not model_reasoning_text:
+                    print(f"   ⚠️ Warning: No model reasoning found in 'code', 'solution', or 'output' fields", flush=True)
+                sys.stdout.flush()
                 
                 # Run analysis
-                print(f"   🔍 Running Pillars v2 evaluation...")
+                print(f"   🔍 Running Pillars v2 evaluation...", flush=True)
+                sys.stdout.flush()
                 flags, evidence, rule_scores, judge_scores, fused_scores = evaluator.analyze(
                     problem=sample.get('question', ''),
                     cot_text=full_cot_text,
@@ -1362,20 +1449,21 @@ async def get_cot_analysis(job_id: str):
                     flags_dict[pillar] = [flag.to_dict() for flag in pillar_flags]
                 
                 # Log analysis results
-                print(f"   ✅ Analysis complete!")
-                print(f"   📊 Rule scores: {rule_scores}")
-                print(f"   🤖 Judge scores: {judge_scores}")
-                print(f"   🔗 Fused scores: {fused_scores}")
+                print(f"   ✅ Analysis complete!", flush=True)
+                print(f"   📊 Rule scores: {rule_scores}", flush=True)
+                print(f"   🤖 Judge scores: {judge_scores}", flush=True)
+                print(f"   🔗 Fused scores: {fused_scores}", flush=True)
                 total_flags = sum(len(flags_dict[pillar]) for pillar in flags_dict)
-                print(f"   🚩 Flags found: {total_flags}")
+                print(f"   🚩 Flags found: {total_flags}", flush=True)
                 if total_flags > 0:
                     for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
                         pillar_flags = flags_dict[pillar]
                         if pillar_flags:
-                            print(f"      - {pillar}: {len(pillar_flags)} flags")
+                            print(f"      - {pillar}: {len(pillar_flags)} flags", flush=True)
                             for flag in pillar_flags[:2]:  # Show first 2 flags per pillar
-                                print(f"        * {flag['issue']} (step: {flag['step']})")
-                print()
+                                print(f"        * {flag['issue']} (step: {flag['step']})", flush=True)
+                print(flush=True)
+                sys.stdout.flush()
                 
                 # Build result for this sample
                 sample_result = {
@@ -1394,7 +1482,8 @@ async def get_cot_analysis(job_id: str):
                 results.append(sample_result)
                 
             except Exception as e:
-                print(f"Error processing sample {i}: {e}")
+                print(f"Error processing sample {i}: {e}", flush=True)
+                sys.stdout.flush()
                 # Add error result
                 results.append({
                     "sample_id": i,
@@ -1496,13 +1585,14 @@ async def get_cot_analysis(job_id: str):
         }
         
         # Print final summary
-        print(f"🎉 CoT analysis complete! Processed {len(results)} samples")
+        print(f"🎉 CoT analysis complete! Processed {len(results)} samples", flush=True)
         successful_samples = len([r for r in results if 'error' not in r])
-        print(f"✅ Successfully analyzed: {successful_samples}/{len(results)} samples")
+        print(f"✅ Successfully analyzed: {successful_samples}/{len(results)} samples", flush=True)
         if valid_results:
-            print(f"📊 Average scores: {avg_scores}")
-            print(f"🚩 Total flags found: {sum(flag_counts.values())}")
-        print()
+            print(f"📊 Average scores: {avg_scores}", flush=True)
+            print(f"🚩 Total flags found: {sum(flag_counts.values())}", flush=True)
+        print(flush=True)
+        sys.stdout.flush()
         
         # Save CoT analysis results to file
         try:
@@ -1518,9 +1608,11 @@ async def get_cot_analysis(job_id: str):
                 with open(cot_analysis_file, 'w') as f:
                     json.dump(analysis_result, f, indent=2)
                 
-                print(f"💾 CoT analysis saved to: {cot_analysis_file}")
+                print(f"💾 CoT analysis saved to: {cot_analysis_file}", flush=True)
+                sys.stdout.flush()
         except Exception as e:
-            print(f"⚠️ Warning: Could not save CoT analysis to file: {e}")
+            print(f"⚠️ Warning: Could not save CoT analysis to file: {e}", flush=True)
+            sys.stdout.flush()
         
         # Generate Excel export
         try:
@@ -1532,9 +1624,11 @@ async def get_cot_analysis(job_id: str):
             job_db[job_id] = job_info
             save_job_db()
             
-            print(f"📊 Excel export saved to: {excel_path}")
+            print(f"📊 Excel export saved to: {excel_path}", flush=True)
+            sys.stdout.flush()
         except Exception as e:
-            print(f"⚠️ Warning: Could not generate Excel export: {e}")
+            print(f"⚠️ Warning: Could not generate Excel export: {e}", flush=True)
+            sys.stdout.flush()
         
         return analysis_result
         

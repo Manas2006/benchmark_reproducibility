@@ -48,6 +48,10 @@ find_available_port() {
 BACKEND_PORT=$(find_available_port 8000)
 echo "📡 Using backend port: $BACKEND_PORT"
 
+# Find an available frontend port
+FRONTEND_PORT=$(find_available_port 3000)
+echo "🌐 Using frontend port: $FRONTEND_PORT"
+
 # Create or update frontend config file with dynamic port
 CONFIG_FILE="frontend/config.js"
 cat > "$CONFIG_FILE" << EOF
@@ -58,34 +62,135 @@ window.WS_BASE = 'ws://localhost:$BACKEND_PORT';
 console.log('📡 Backend configured on port $BACKEND_PORT');
 EOF
 
-# Start backend
-echo "📡 Starting backend server on http://localhost:$BACKEND_PORT..."
-cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port $BACKEND_PORT &
-BACKEND_PID=$!
-cd ..
-
-# Wait a moment for backend to start
-sleep 3
-
-# Check if backend started successfully
-if ! ps -p $BACKEND_PID > /dev/null; then
-    echo "❌ Error: Backend server failed to start"
+# Function to start backend with retry
+start_backend() {
+    local start_port=$1
+    local port=$start_port
+    local max_retries=5
+    local retry=0
+    local pid
+    
+    while [ $retry -lt $max_retries ]; do
+        echo "📡 Attempting to start backend server on http://localhost:$port..."
+        echo "📝 Backend logs will be written to: /tmp/backend_$port.log"
+        echo "   To view logs in real-time, run: tail -f /tmp/backend_$port.log"
+        cd backend
+        uvicorn app.main:app --reload --host 0.0.0.0 --port $port > /tmp/backend_$port.log 2>&1 &
+        pid=$!
+        cd ..
+        
+        # Wait a moment for backend to start
+        sleep 3
+        
+        # Check if backend started successfully
+        if ps -p $pid > /dev/null 2>&1; then
+            # Check if there are any errors in the log
+            if grep -q "Address already in use" /tmp/backend_$port.log 2>/dev/null; then
+                echo "⚠️  Port $port is already in use, trying next port..."
+                kill $pid 2>/dev/null
+                port=$(find_available_port $((port + 1)))
+                retry=$((retry + 1))
+                continue
+            else
+                echo "✅ Backend server started successfully on port $port"
+                BACKEND_PID=$pid
+                BACKEND_PORT=$port
+                return 0
+            fi
+        else
+            # Check log for port conflict
+            if grep -q "Address already in use" /tmp/backend_$port.log 2>/dev/null; then
+                echo "⚠️  Port $port is already in use, trying next port..."
+                port=$(find_available_port $((port + 1)))
+                retry=$((retry + 1))
+                continue
+            else
+                echo "❌ Error: Backend server failed to start. Check /tmp/backend_$port.log for details"
+                rm -f "$CONFIG_FILE"
+                exit 1
+            fi
+        fi
+    done
+    
+    echo "❌ Error: Could not find an available port for backend after $max_retries attempts"
     rm -f "$CONFIG_FILE"
     exit 1
-fi
+}
 
-# Start frontend
-echo "🌐 Starting frontend server on http://localhost:3000..."
-cd frontend
-python3 -m http.server 3000 &
-FRONTEND_PID=$!
-cd ..
+# Function to start frontend with retry
+start_frontend() {
+    local start_port=$1
+    local port=$start_port
+    local max_retries=5
+    local retry=0
+    local pid
+    
+    while [ $retry -lt $max_retries ]; do
+        echo "🌐 Attempting to start frontend server on http://localhost:$port..."
+        cd frontend
+        python3 -m http.server $port > /tmp/frontend_$port.log 2>&1 &
+        pid=$!
+        cd ..
+        
+        # Wait a moment for frontend to start
+        sleep 2
+        
+        # Check if frontend started successfully
+        if ps -p $pid > /dev/null 2>&1; then
+            # Check if there are any errors in the log
+            if grep -q "Address already in use\|OSError.*98" /tmp/frontend_$port.log 2>/dev/null; then
+                echo "⚠️  Port $port is already in use, trying next port..."
+                kill $pid 2>/dev/null
+                port=$(find_available_port $((port + 1)))
+                retry=$((retry + 1))
+                continue
+            else
+                echo "✅ Frontend server started successfully on port $port"
+                FRONTEND_PID=$pid
+                FRONTEND_PORT=$port
+                return 0
+            fi
+        else
+            # Check log for port conflict
+            if grep -q "Address already in use\|OSError.*98" /tmp/frontend_$port.log 2>/dev/null; then
+                echo "⚠️  Port $port is already in use, trying next port..."
+                port=$(find_available_port $((port + 1)))
+                retry=$((retry + 1))
+                continue
+            else
+                echo "❌ Error: Frontend server failed to start. Check /tmp/frontend_$port.log for details"
+                kill $BACKEND_PID 2>/dev/null
+                rm -f "$CONFIG_FILE"
+                exit 1
+            fi
+        fi
+    done
+    
+    echo "❌ Error: Could not find an available port for frontend after $max_retries attempts"
+    kill $BACKEND_PID 2>/dev/null
+    rm -f "$CONFIG_FILE"
+    exit 1
+}
+
+# Start backend with retry
+start_backend $BACKEND_PORT
+
+# Update config with actual backend port
+cat > "$CONFIG_FILE" << EOF
+// Auto-generated configuration file
+// This file is automatically generated by start.sh - DO NOT EDIT MANUALLY
+window.API_BASE = 'http://localhost:$BACKEND_PORT';
+window.WS_BASE = 'ws://localhost:$BACKEND_PORT';
+console.log('📡 Backend configured on port $BACKEND_PORT');
+EOF
+
+# Start frontend with retry
+start_frontend $FRONTEND_PORT
 
 echo ""
 echo "✅ Qwen Math Evaluation UI is running!"
 echo "   Backend:  http://localhost:$BACKEND_PORT"
-echo "   Frontend: http://localhost:3000"
+echo "   Frontend: http://localhost:$FRONTEND_PORT"
 echo ""
 echo "Press Ctrl+C to stop both servers"
 
