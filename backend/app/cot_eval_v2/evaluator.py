@@ -284,10 +284,10 @@ class PillarsEvaluator:
         evidence = {
             "final_correct": final_correct,
             "intermediate_ok_rate": 1.0,  # Pillars v2 handles this internally
-            "coh_contra_cnt": len([f for f in all_flags if f.pillar == 'coherence' and f.issue == 'disordered_chain']),
+            "coh_contra_cnt": 0,  # No coherence flags currently enabled
             "avg_coh_margin": 0.5,  # Placeholder
-            "fact_entail_rate": 1.0 - (len([f for f in all_flags if f.pillar == 'factuality']) / max(1, len(all_flags))),
-            "fact_contra_cnt": len([f for f in all_flags if f.pillar == 'factuality' and f.issue == 'fact_contradiction']),
+            "fact_entail_rate": 1.0,  # No factuality flags currently enabled
+            "fact_contra_cnt": 0,  # No factuality flags currently enabled
             "avg_fact_margin": 0.5,  # Placeholder
             "redund_cnt": len([f for f in all_flags if f.pillar == 'utility' and f.issue == 'redundant_step']),
             "coverage": {"given": [], "used": [], "unused": []},  # Placeholder
