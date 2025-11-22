@@ -633,8 +633,34 @@ def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], samplin
                     # Remove invalid tokens
                     env.pop(token_var, None)
                     print(f"⚠️ Filtered out invalid {token_var}")
-        subprocess.run([sys.executable, "pass1_child_vllm.py", in_path, out_path], check=True, env=env)
-        print("✅ vLLM subprocess completed successfully")
+        try:
+            result = subprocess.run(
+                [sys.executable, "pass1_child_vllm.py", in_path, out_path],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True
+            )
+            print("✅ vLLM subprocess completed successfully")
+        except subprocess.CalledProcessError as e:
+            error_output = e.stderr if e.stderr else e.stdout if hasattr(e, 'stdout') else "No error output captured"
+            error_msg = (
+                f"❌ vLLM subprocess failed with exit code {e.returncode}\n"
+                f"   Model: {args.model_name_or_path}\n"
+                f"   \n"
+                f"   Error output:\n"
+                f"   {error_output}\n"
+                f"   \n"
+                f"   This may occur if:\n"
+                f"   1. The model configuration is incompatible with vLLM\n"
+                f"   2. The model is missing required configuration fields (e.g., head_dim)\n"
+                f"   3. There are memory/GPU compatibility issues\n"
+                f"   4. The model format is not supported by vLLM\n"
+                f"   \n"
+                f"   Try using a different model or checking vLLM compatibility."
+            )
+            print(error_msg)
+            raise RuntimeError(error_msg) from e
         
         with open(out_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -795,7 +821,37 @@ def setup(args):
         tokenizer = None
 
     elif args.use_vllm:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+        except TypeError as e:
+            if "not a string" in str(e) or "vocab_file" in str(e).lower():
+                error_msg = (
+                    f"❌ Error loading tokenizer for model '{args.model_name_or_path}':\n"
+                    f"   The tokenizer vocab file is missing or invalid.\n"
+                    f"   This may occur if:\n"
+                    f"   1. The model is in GGUF format (not supported by vLLM)\n"
+                    f"   2. The model repository is missing tokenizer files\n"
+                    f"   3. The model identifier is incorrect\n"
+                    f"   \n"
+                    f"   Original error: {str(e)}\n"
+                    f"   \n"
+                    f"   Please use a HuggingFace model in standard format (not GGUF/GGML)."
+                )
+                print(error_msg)
+                raise ValueError(error_msg) from e
+            raise
+        except Exception as e:
+            error_msg = (
+                f"❌ Error loading tokenizer for model '{args.model_name_or_path}':\n"
+                f"   {str(e)}\n"
+                f"   \n"
+                f"   Please verify:\n"
+                f"   1. The model exists on HuggingFace: https://huggingface.co/{args.model_name_or_path}\n"
+                f"   2. The model is in a supported format (not GGUF/GGML)\n"
+                f"   3. You have access to the model (if it's private)"
+            )
+            print(error_msg)
+            raise ValueError(error_msg) from e
 
         if getattr(args, "pass1_subprocess", False):
             # Do NOT load vLLM in the parent; child will load & exit (freeing VRAM)
@@ -1337,14 +1393,79 @@ def main(llm, tokenizer, data_name, args):
                     print_gpu_memory_usage("Stage 4: After Loading HF Scorer Model (on GPU)")
                 else:
                     raise RuntimeError("Insufficient GPU memory for HF scorer")
+            except ImportError as e:
+                error_msg = str(e)
+                if "pytest" in error_msg.lower() or "requires the following packages" in error_msg:
+                    print(f"\n❌ ERROR: Failed to load HF scorer model '{args.model_name_or_path}':")
+                    print(f"   The model requires additional dependencies that are not installed.")
+                    print(f"   \n   Error: {error_msg}\n")
+                    print(f"   To fix this, install the missing package(s) with:")
+                    if "pytest" in error_msg.lower():
+                        print(f"   pip install pytest")
+                    print(f"   \n   Or disable probability tracking for this job.")
+                    print(f"   \n   Skipping probability tracking and continuing with evaluation...")
+                    hf_model = None
+                else:
+                    raise
+            except ValueError as e:
+                error_msg = str(e)
+                # Check if it's a PyTorch version requirement error
+                if "torch.load" in error_msg and ("torch to at least v2.6" in error_msg or "CVE-2025-32434" in error_msg):
+                    print(f"\n❌ ERROR: Failed to load HF scorer model '{args.model_name_or_path}':")
+                    print(f"   The model uses PyTorch format (.pt/.bin files) which requires PyTorch >= 2.6")
+                    print(f"   due to security vulnerability (CVE-2025-32434).")
+                    print(f"   \n   Current PyTorch version: {torch.__version__}")
+                    print(f"   Required: PyTorch >= 2.6")
+                    print(f"   \n   Error: {error_msg}\n")
+                    print(f"   Solutions:")
+                    print(f"   1. Upgrade PyTorch: pip install --upgrade torch")
+                    print(f"   2. Use a model with safetensors format (this restriction doesn't apply)")
+                    print(f"   3. Continue without probability tracking (not critical)\n")
+                    print(f"   Skipping probability tracking and continuing with evaluation...")
+                    hf_model = None
+                else:
+                    raise
             except Exception as e:
-                print(f"WARNING: failed to load HF scorer on CUDA; falling back to CPU. Error: {e}")
-                hf_model = AutoModelForCausalLM.from_pretrained(
-                    args.model_name_or_path,
-                    torch_dtype=torch.float32,
-                    device_map={"": "cpu"},
-                    trust_remote_code=True,
-                ).eval()
+                error_msg = str(e)
+                # Check if it's a missing dependency error
+                if "requires the following packages" in error_msg or "No module named" in error_msg:
+                    print(f"\n❌ ERROR: Failed to load HF scorer model '{args.model_name_or_path}':")
+                    print(f"   The model requires additional dependencies that are not installed.")
+                    print(f"   \n   Error: {error_msg}\n")
+                    print(f"   To fix this, install the missing package(s) as suggested above.")
+                    print(f"   \n   Skipping probability tracking and continuing with evaluation...")
+                    hf_model = None
+                else:
+                    # For other errors, try CPU fallback
+                    print(f"WARNING: failed to load HF scorer on CUDA; falling back to CPU. Error: {e}")
+                    try:
+                        hf_model = AutoModelForCausalLM.from_pretrained(
+                            args.model_name_or_path,
+                            torch_dtype=torch.float32,
+                            device_map={"": "cpu"},
+                            trust_remote_code=True,
+                        ).eval()
+                    except ValueError as value_e:
+                        value_error_msg = str(value_e)
+                        if "torch.load" in value_error_msg and ("torch to at least v2.6" in value_error_msg or "CVE-2025-32434" in value_error_msg):
+                            print(f"\n❌ ERROR: Failed to load HF scorer model on CPU as well:")
+                            print(f"   PyTorch version requirement not met (requires >= 2.6, current: {torch.__version__})")
+                            print(f"   \n   Error: {value_error_msg}\n")
+                            print(f"   Skipping probability tracking and continuing with evaluation...")
+                            hf_model = None
+                        else:
+                            raise
+                    except ImportError as import_e:
+                        import_error_msg = str(import_e)
+                        if "pytest" in import_error_msg.lower() or "requires the following packages" in import_error_msg:
+                            print(f"\n❌ ERROR: Failed to load HF scorer model on CPU as well:")
+                            print(f"   The model requires additional dependencies that are not installed.")
+                            print(f"   \n   Error: {import_error_msg}\n")
+                            print(f"   To fix this, install the missing package(s) (e.g., pip install pytest)")
+                            print(f"   \n   Skipping probability tracking and continuing with evaluation...")
+                            hf_model = None
+                        else:
+                            raise
         if hf_model is None:
             print("WARNING: enable_prob_tracking requested but HF scorer unavailable; skipping prob tracking.")
         else:

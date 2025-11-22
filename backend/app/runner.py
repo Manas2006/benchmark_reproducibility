@@ -175,10 +175,40 @@ class MathEvalRunner:
         
         # Extract repository ID from Hugging Face URL if needed
         model_name = req.model
+        
+        # Clean URL fragments and query parameters
+        # Remove URL anchor fragments (e.g., #:~:text=...)
+        if '#' in model_name:
+            model_name = model_name.split('#')[0]
+        
+        # Remove query parameters
+        if '?' in model_name:
+            model_name = model_name.split('?')[0]
+        
+        # Extract HuggingFace repo ID from full URL
         if model_name.startswith('https://huggingface.co/'):
             model_name = model_name.replace('https://huggingface.co/', '')
         elif model_name.startswith('http://huggingface.co/'):
             model_name = model_name.replace('http://huggingface.co/', '')
+        
+        # Clean up any trailing slashes or whitespace
+        model_name = model_name.strip().rstrip('/')
+        
+        # Validate: model name should be in format "org/model" or just "model"
+        # Remove any invalid characters that might have slipped through
+        import re
+        # Keep only alphanumeric, forward slashes, hyphens, underscores, and dots
+        model_name = re.sub(r'[^a-zA-Z0-9/_.-]', '', model_name)
+        
+        # Warn about GGML/GGUF models which are not supported by vLLM/transformers
+        if 'GGML' in model_name.upper() or 'GGUF' in model_name.upper():
+            import warnings
+            warnings.warn(
+                f"⚠️  Warning: Model '{model_name}' appears to be a GGML/GGUF quantized model. "
+                f"These formats are not supported by vLLM/transformers and will likely fail. "
+                f"Please use the standard HuggingFace model format instead.",
+                UserWarning
+            )
         
         cli = [
             path_config.python_path, "-u", str(self.evaluation_dir / "math_eval.py"),
@@ -550,6 +580,43 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
         except Exception:
             return False
     
+    def _extract_error_summary(self, error_content: str) -> str:
+        """
+        Extract a summary of the error from error content.
+        
+        Args:
+            error_content: Full error file content
+            
+        Returns:
+            Error summary string (first few lines or key error message)
+        """
+        if not error_content:
+            return "Unknown error"
+        
+        lines = error_content.strip().split('\n')
+        
+        # Look for traceback or key error messages
+        error_start_idx = None
+        for i, line in enumerate(lines):
+            if 'traceback' in line.lower() or 'error' in line.lower() or 'exception' in line.lower():
+                error_start_idx = i
+                break
+        
+        if error_start_idx is not None:
+            # Get 10 lines starting from error
+            error_lines = lines[error_start_idx:error_start_idx + 10]
+            summary = '\n'.join(error_lines).strip()
+            if len(summary) > 500:
+                summary = summary[:500] + "..."
+            return summary
+        else:
+            # Get last 10 lines
+            summary_lines = lines[-10:] if len(lines) > 10 else lines
+            summary = '\n'.join(summary_lines).strip()
+            if len(summary) > 500:
+                summary = summary[:500] + "..."
+            return summary
+    
     def _run_post_processing(self, jid: str, result_file: str, model_name: str) -> bool:
         """Run post-processing script on completed probability tracking job"""
         try:
@@ -683,13 +750,56 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
             proc = job_info["proc"]
             if proc.poll() is not None:
                 # Process finished
-                if proc.returncode == 0:
+                job_info["return_code"] = proc.returncode
+                
+                # Check for errors in error file first, even if returncode is 0
+                error_file = Path(job_info.get("err_file", ""))
+                has_errors = False
+                if error_file.exists() and error_file.stat().st_size > 0:
+                    try:
+                        with open(error_file, 'r') as f:
+                            error_content = f.read()
+                            if is_real_error(error_content):
+                                has_errors = True
+                                job_info["error_summary"] = self._extract_error_summary(error_content)
+                    except Exception:
+                        pass
+                
+                # Check if result file exists and is valid
+                result_file = Path(job_info.get("result_file", ""))
+                has_valid_result = False
+                if result_file.exists() and result_file.stat().st_size > 0:
+                    # Verify result file is valid JSONL
+                    try:
+                        with open(result_file, 'r') as f:
+                            # Try to read first few lines to verify it's valid
+                            for i, line in enumerate(f):
+                                if i >= 10:  # Check first 10 lines
+                                    break
+                                if line.strip():
+                                    json.loads(line)
+                            has_valid_result = True
+                    except Exception:
+                        has_valid_result = False
+                
+                # Determine status based on returncode, errors, and result file
+                if proc.returncode != 0 or has_errors:
+                    job_info["status"] = JobStatus.ERROR
+                    if not job_info.get("error"):
+                        if has_errors:
+                            job_info["error"] = "Job failed with errors. Check error log for details."
+                        else:
+                            job_info["error"] = f"Job exited with return code {proc.returncode}"
+                elif has_valid_result:
                     job_info["status"] = JobStatus.DONE
+                    job_info.pop("error", None)
                     # Check if this job needs post-processing
                     self._check_and_run_post_processing(jid, job_info)
                 else:
+                    # No errors but no valid result file either
                     job_info["status"] = JobStatus.ERROR
-                job_info["return_code"] = proc.returncode
+                    if not job_info.get("error"):
+                        job_info["error"] = "Job completed but result file is missing or invalid"
         
         # Check SLURM job status
         elif job_info.get("backend") == "slurm" and "slurm_jid" in job_info:
@@ -712,36 +822,86 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                         error_file = Path(job_info.get("err_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.err"))
                         result_file = Path(job_info.get("result_file", ""))
                         
-                        # Check if result file exists and is non-empty FIRST
-                        # If result file exists, job completed successfully regardless of error log
+                        # Check for errors in error file FIRST, even if result file exists
+                        has_errors = False
+                        error_summary = None
+                        if error_file.exists() and error_file.stat().st_size > 0:
+                            try:
+                                with open(error_file, 'r') as f:
+                                    error_content = f.read()
+                                    if is_real_error(error_content):
+                                        has_errors = True
+                                        error_summary = self._extract_error_summary(error_content)
+                            except Exception:
+                                pass
+                        
+                        # Check if result file exists and is valid
+                        has_valid_result = False
                         if result_file.exists() and result_file.stat().st_size > 0:
+                            # Verify result file is valid JSONL
+                            try:
+                                valid_lines = 0
+                                with open(result_file, 'r') as f:
+                                    # Try to read first few lines to verify it's valid
+                                    for i, line in enumerate(f):
+                                        if i >= 10:  # Check first 10 lines
+                                            break
+                                        if line.strip():
+                                            json.loads(line)
+                                            valid_lines += 1
+                                # Require at least 1 valid line for the result to be considered valid
+                                if valid_lines > 0:
+                                    has_valid_result = True
+                            except Exception:
+                                has_valid_result = False
+                        
+                        # Determine status based on errors and result file
+                        # Priority: errors > valid result > output file check > error
+                        if has_errors:
+                            # Even if result file exists, if there are real errors, mark as ERROR
+                            job_info["status"] = JobStatus.ERROR
+                            job_info["error"] = "Job failed with errors. Check error log for details."
+                            job_info["error_summary"] = error_summary
+                            # Save updated status to file
+                            if original_status != job_info["status"]:
+                                save_job_db()
+                            return job_info
+                        elif has_valid_result:
+                            # Result file exists and is valid, job completed successfully
                             job_info["status"] = JobStatus.DONE
                             job_info.pop("error", None)
+                            job_info.pop("error_summary", None)
                             # Check if this job needs post-processing
                             self._check_and_run_post_processing(jid, job_info)
-                        # Fallback: check if output file exists and has content
                         elif output_file.exists() and output_file.stat().st_size > 0:
-                            job_info["status"] = JobStatus.DONE
-                            job_info.pop("error", None)
-                            # Check if this job needs post-processing
-                            self._check_and_run_post_processing(jid, job_info)
-                        # Only check error file if result/output files don't exist
-                        elif error_file.exists():
-                            with open(error_file, 'r') as f:
-                                error_content = f.read()
-                                if is_real_error(error_content):
-                                    job_info["status"] = JobStatus.ERROR
-                                    job_info["error"] = f"Job failed with errors. Check error log for details."
-                                    # Save updated status to file
-                                    if original_status != job_info["status"]:
-                                        save_job_db()
-                                    return job_info
-                            # Error file exists but no real errors found, but no result file either
-                            job_info["status"] = JobStatus.ERROR
-                            job_info["error"] = f"Job completed but output/result files missing or empty"
+                            # Check output file for completion indicators
+                            try:
+                                with open(output_file, 'r') as f:
+                                    output_content = f.read()
+                                    # Check if job actually completed (has completion indicators)
+                                    if any(indicator in output_content.lower() for indicator in [
+                                        'evaluate: 100%', 'processed prompts: 100%', 'saved to', 'accuracy:', 'acc:'
+                                    ]):
+                                        # Job appears to have completed but result file is missing/invalid
+                                        job_info["status"] = JobStatus.ERROR
+                                        job_info["error"] = "Job completed but result file is missing or invalid"
+                                        job_info["error_summary"] = "Output file shows completion but result file is missing or invalid"
+                                    else:
+                                        # No completion indicators found
+                                        job_info["status"] = JobStatus.ERROR
+                                        job_info["error"] = "Job ended prematurely without completion indicators"
+                                        job_info["error_summary"] = "Job appears to have stopped before completion"
+                            except Exception:
+                                job_info["status"] = JobStatus.ERROR
+                                job_info["error"] = "Job completed but result file is missing or invalid"
                         else:
+                            # No output or result files
                             job_info["status"] = JobStatus.ERROR
-                            job_info["error"] = f"Job completed but output/result files missing or empty"
+                            if has_errors:
+                                job_info["error"] = "Job failed with errors. Check error log for details."
+                                job_info["error_summary"] = error_summary
+                            else:
+                                job_info["error"] = "Job completed but output/result files missing or empty"
                 else:
                     # Failed to check SLURM status
                     config = path_manager.get_config()
@@ -749,33 +909,69 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     error_file = Path(job_info.get("err_file", f"{config.logs_dir}/qwen-math-{job_info.get('slurm_jid','')}.err"))
                     result_file = Path(job_info.get("result_file", ""))
                     
-                    # Check if result file exists and is non-empty FIRST
-                    # If result file exists, job completed successfully regardless of error log
+                    # Check for errors in error file FIRST, even if result file exists
+                    has_errors = False
+                    error_summary = None
+                    if error_file.exists() and error_file.stat().st_size > 0:
+                        try:
+                            with open(error_file, 'r') as f:
+                                error_content = f.read()
+                                if is_real_error(error_content):
+                                    has_errors = True
+                                    error_summary = self._extract_error_summary(error_content)
+                        except Exception:
+                            pass
+                    
+                    # Check if result file exists and is valid
+                    has_valid_result = False
                     if result_file.exists() and result_file.stat().st_size > 0:
-                        job_info["status"] = JobStatus.DONE
-                        job_info.pop("error", None)
-                        # Check if this job needs post-processing
-                        self._check_and_run_post_processing(jid, job_info)
-                    # Fallback: check if output file exists and has content
-                    elif output_file.exists() and output_file.stat().st_size > 0:
-                        job_info["status"] = JobStatus.DONE
-                        job_info.pop("error", None)
-                        # Check if this job needs post-processing
-                        self._check_and_run_post_processing(jid, job_info)
-                    # Only check error file if result/output files don't exist
-                    elif error_file.exists():
-                        with open(error_file, 'r') as f:
-                            error_content = f.read()
-                            if is_real_error(error_content):
-                                job_info["status"] = JobStatus.ERROR
-                                job_info["error"] = f"Job failed with errors. Check error log for details."
-                                # Save updated status to file
-                                if original_status != job_info["status"]:
-                                    save_job_db()
-                                return job_info
-                        # Error file exists but no real errors found, but no result file either
+                        # Verify result file is valid JSONL
+                        try:
+                            with open(result_file, 'r') as f:
+                                # Try to read first few lines to verify it's valid
+                                for i, line in enumerate(f):
+                                    if i >= 10:  # Check first 10 lines
+                                        break
+                                    if line.strip():
+                                        json.loads(line)
+                                has_valid_result = True
+                        except Exception:
+                            has_valid_result = False
+                    
+                    # Determine status based on errors and result file
+                    if has_errors:
                         job_info["status"] = JobStatus.ERROR
-                        job_info["error"] = f"Failed to check SLURM status: {result.stderr}"
+                        job_info["error"] = "Job failed with errors. Check error log for details."
+                        job_info["error_summary"] = error_summary
+                        # Save updated status to file
+                        if original_status != job_info["status"]:
+                            save_job_db()
+                        return job_info
+                    elif has_valid_result:
+                        job_info["status"] = JobStatus.DONE
+                        job_info.pop("error", None)
+                        job_info.pop("error_summary", None)
+                        # Check if this job needs post-processing
+                        self._check_and_run_post_processing(jid, job_info)
+                    elif output_file.exists() and output_file.stat().st_size > 0:
+                        # Check output file for completion indicators
+                        try:
+                            with open(output_file, 'r') as f:
+                                output_content = f.read()
+                                # Check if job actually completed (has completion indicators)
+                                if any(indicator in output_content.lower() for indicator in [
+                                    'evaluate: 100%', 'processed prompts: 100%', 'saved to', 'accuracy:', 'acc:'
+                                ]):
+                                    job_info["status"] = JobStatus.DONE
+                                    job_info.pop("error", None)
+                                    # Check if this job needs post-processing
+                                    self._check_and_run_post_processing(jid, job_info)
+                                else:
+                                    job_info["status"] = JobStatus.ERROR
+                                    job_info["error"] = "Job completed but result file is missing or invalid"
+                        except Exception:
+                            job_info["status"] = JobStatus.ERROR
+                            job_info["error"] = "Job completed but result file is missing or invalid"
                     else:
                         job_info["status"] = JobStatus.ERROR
                         job_info["error"] = f"Failed to check SLURM status: {result.stderr}"

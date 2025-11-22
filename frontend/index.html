@@ -367,8 +367,27 @@
 
             <!-- CoT Analysis Tab -->
             <div id="cot-analysis" class="tab-content">
+                <!-- CoT Analyses List Section -->
+                <div class="bg-white shadow-lg rounded-xl p-6 card mb-6">
+                    <h2 class="text-2xl font-bold mb-4 text-gray-900">Completed CoT Analyses</h2>
+                    <p class="text-sm text-gray-600 mb-4">
+                        View all completed Chain-of-Thought analysis results with reasoning scores and download options.
+                    </p>
+                    <div class="mb-4">
+                        <button onclick="refreshCoTAnalysesList()"
+                            class="px-5 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium shadow-sm hover:shadow transition-all duration-200">
+                            🔄 Refresh List
+                        </button>
+                    </div>
+                    <div id="cot-analyses-list">
+                        <!-- CoT analyses will be listed here -->
+                        <p class="text-gray-500">Loading...</p>
+                    </div>
+                </div>
+
+                <!-- Run New Analysis Section -->
                 <div class="bg-white shadow-lg rounded-xl p-6 card">
-                    <h2 class="text-2xl font-bold mb-4 text-gray-900">Chain-of-Thought Analysis</h2>
+                    <h2 class="text-2xl font-bold mb-4 text-gray-900">Run New CoT Analysis</h2>
                     <p class="text-sm text-gray-600 mb-6">
                         Analyze the reasoning quality of completed evaluation jobs using our rigorous CoT Quality Score
                         (CQS) system.
@@ -1094,7 +1113,7 @@
 
     <!-- Load dynamic config first (if it exists) -->
     <script src="config.js"></script>
-    <script src="app.js?v=1.8"></script>
+    <script src="app.js?v=1.9"></script>
 </body>
 
 </html>

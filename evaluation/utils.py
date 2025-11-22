@@ -167,14 +167,33 @@ PROMPT_TEMPLATES = {
         "\n\n",
     ),
     "numina": ("### Problem: {input}\n### Solution:", " {output}", "\n\n"),
+    "aime": (
+        "You are solving an AIME (American Invitational Mathematics Examination) problem.\n\n"
+        "These are competition math problems that require multiple steps of reasoning.\n\n"
+        "Show all your work carefully, think step by step, and reason in detail.\n\n"
+        "Important rules:\n\n"
+        "- The final answer is always a non-negative integer from 000 to 999.\n\n"
+        "- Format your final answer as: \\boxed{{XYZ}}\n\n"
+        "- Only put the final integer in the box.\n\n"
+        "Problem:\n\n"
+        "{input}\n\n"
+        "Now, think step-by-step and solve the problem.",
+        "{output}",
+        "\n\n\n",
+    ),
 }
 
 
 def construct_prompt(example, data_name, args):
     # Check if custom prompt is provided
     if hasattr(args, 'prompt') and args.prompt and args.prompt.strip():
-        # Use custom prompt directly - replace {question} with the actual question
-        return args.prompt.format(question=example["question"])
+        # Use custom prompt directly - replace only {question} with the actual question
+        # All other curly braces are preserved as literal text (e.g., {your_answer}, \boxed{...})
+        question_text = example.get("question", "")
+        # Replace {question} with actual question, but preserve all other curly braces
+        prompt = args.prompt.strip()
+        # Only replace the exact {question} placeholder, nothing else
+        return prompt.replace("{question}", question_text)
     
     # Otherwise use the original prompt_type logic
     if args.adapt_few_shot and data_name in [

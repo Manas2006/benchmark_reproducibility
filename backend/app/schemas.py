@@ -307,4 +307,36 @@ class PromptPreviewResponse(BaseModel):
     """Response for prompt preview"""
     sample_question: str
     full_prompt: str
-    prompt_type: str 
+    prompt_type: str
+
+class CoTAnalysisQueueRequest(BaseModel):
+    """Request to queue a CoT analysis job"""
+    judge_mode: str = Field(default="ALWAYS", description="Judge mode: ALWAYS, SMART, or NEVER")
+    diagnostic: bool = Field(default=False, description="Include diagnostic information in output")
+
+class CoTAnalysisProgressResponse(BaseModel):
+    """Response for CoT analysis progress"""
+    cot_job_id: str = Field(description="CoT analysis job identifier")
+    status: str = Field(description="Job status: QUEUED, RUNNING, DONE, ERROR")
+    current_sample: int = Field(description="Currently processing sample index (0-based)")
+    total_samples: int = Field(description="Total samples to process")
+    processed_samples: int = Field(description="Number of samples completed")
+    percentage: float = Field(description="Completion percentage (0-100)")
+    estimated_time_remaining: Optional[float] = Field(default=None, description="Estimated seconds remaining")
+    start_time: Optional[float] = Field(default=None, description="When analysis started (timestamp)")
+    current_activity: Optional[str] = Field(default=None, description="Current activity description")
+    queue_position: Optional[int] = Field(default=None, description="Position in queue (if queued)")
+
+class CoTAnalysisQueueStatus(BaseModel):
+    """Status information for a queued/running CoT analysis"""
+    cot_job_id: str = Field(description="CoT analysis job identifier")
+    parent_job_id: str = Field(description="Parent job identifier")
+    status: str = Field(description="Job status: QUEUED, RUNNING, DONE, ERROR")
+    queue_position: Optional[int] = Field(default=None, description="Position in queue (if queued)")
+    created_at: float = Field(description="When job was created (timestamp)")
+    started_at: Optional[float] = Field(default=None, description="When job started (timestamp)")
+    completed_at: Optional[float] = Field(default=None, description="When job completed (timestamp)")
+    model_name: Optional[str] = Field(default=None, description="Model name")
+    dataset: Optional[str] = Field(default=None, description="Dataset name")
+    judge_mode: Optional[str] = Field(default=None, description="Judge mode used")
+    progress: Optional[CoTAnalysisProgressResponse] = Field(default=None, description="Progress information if running") 

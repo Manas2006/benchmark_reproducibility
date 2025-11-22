@@ -1049,6 +1049,20 @@ function renderJobList(jobs) {
         }
         // Buttons for viewing results
         let resultButtonHtml = '';
+        let errorButtonHtml = '';
+        
+        // Show error button and message for ERROR jobs
+        if (job.status === 'ERROR') {
+            const errorMessage = job.error || 'Job failed with an error';
+            errorButtonHtml = `
+                <div class="mt-3 p-3 bg-red-50 border border-red-200 rounded">
+                    <p class="text-sm text-red-800 font-medium mb-2">⚠️ ${errorMessage}</p>
+                    ${job.error_summary ? `<pre class="text-xs text-red-700 bg-red-100 p-2 rounded mb-2 overflow-auto max-h-32">${escapeHtml(job.error_summary)}</pre>` : ''}
+                    <button onclick="viewErrorLog('${job.job_id}')" class="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700">View Error Log</button>
+                </div>
+            `;
+        }
+        
         if (job.status === 'DONE' && job.result_file) {
             resultButtonHtml = `
                 <div class="flex flex-wrap gap-2 mt-4">
@@ -1061,7 +1075,7 @@ function renderJobList(jobs) {
                     ${job.prob_file ? `<button onclick="openProbPlotModal('${job.job_id}')" class="px-3 py-1 bg-pink-600 text-white text-sm rounded hover:bg-pink-700">Plot Probabilities</button>` : ''}
                 </div>
             `;
-        } else if (job.status !== 'DONE' && job.result_file) {
+        } else if (job.status !== 'DONE' && job.status !== 'ERROR' && job.result_file) {
             // Show disabled buttons for jobs that are not done but have result_file
             resultButtonHtml = `
                 <div class="flex space-x-2 mt-4">
@@ -1092,12 +1106,14 @@ function renderJobList(jobs) {
                     <p class="text-sm text-gray-600">Model: ${job.request?.model || 'N/A'}</p>
                     <p class="text-sm text-gray-600">Dataset: ${job.request?.dataset || 'N/A'}</p>
                     <p class="text-sm text-gray-600">Status: <span class="font-medium ${getStatusColor(job.status)}">${job.status}</span></p>
+                    ${job.error ? `<p class="text-sm text-red-600 font-medium mt-1">Error: ${escapeHtml(job.error)}</p>` : ''}
                 </div>
                 <div class="flex space-x-2 items-start">
                     ${monitorButtonHtml}
                     ${deleteButtonHtml}
                 </div>
             </div>
+            ${errorButtonHtml}
             ${resultButtonHtml}
         `;
         jobsList.appendChild(jobDiv);
@@ -1534,6 +1550,58 @@ function parseCoTFromAnswer(answer) {
     }
 }
 
+async function viewErrorLog(jobId) {
+    try {
+        console.log(`Loading error log for job: ${jobId}`);
+        const response = await apiFetch(`/jobs/${jobId}/error-log`);
+        const errorData = await response.json();
+        
+        // Create modal to display error log
+        const modal = document.createElement('div');
+        modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+        modal.innerHTML = `
+            <div class="bg-white rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[90vh] flex flex-col">
+                <div class="p-4 border-b border-gray-200 flex justify-between items-center">
+                    <h2 class="text-xl font-bold text-red-600">Error Log - Job ${jobId}</h2>
+                    <button onclick="this.closest('.fixed').remove()" class="text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+                </div>
+                <div class="p-4 overflow-auto flex-1">
+                    <div class="mb-4 text-sm text-gray-600">
+                        <p><strong>Error File:</strong> ${errorData.error_file || 'N/A'}</p>
+                        <p><strong>Size:</strong> ${errorData.size_bytes ? (errorData.size_bytes / 1024).toFixed(2) + ' KB' : 'N/A'}</p>
+                        <p><strong>Lines:</strong> ${errorData.lines || 'N/A'}</p>
+                    </div>
+                    <div class="bg-gray-900 text-green-400 p-4 rounded font-mono text-sm overflow-auto max-h-[60vh]">
+                        <pre id="error-log-content">${escapeHtml(errorData.content || 'No error content available')}</pre>
+                    </div>
+                </div>
+                <div class="p-4 border-t border-gray-200 flex justify-end gap-2">
+                    <button onclick="copyErrorLog('${jobId}')" class="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700">Copy to Clipboard</button>
+                    <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 bg-gray-300 text-gray-800 rounded hover:bg-gray-400">Close</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        
+        // Store error content for copy function
+        window._lastErrorLog = errorData.content;
+    } catch (error) {
+        console.error('Error loading error log:', error);
+        alert('Error loading error log: ' + error.message);
+    }
+}
+
+function copyErrorLog(jobId) {
+    if (window._lastErrorLog) {
+        navigator.clipboard.writeText(window._lastErrorLog).then(() => {
+            alert('Error log copied to clipboard!');
+        }).catch(err => {
+            console.error('Failed to copy:', err);
+            alert('Failed to copy error log to clipboard');
+        });
+    }
+}
+
 async function showResultModal(resultFilePath, title = 'Results') {
     try {
         console.log(`Loading result file: ${resultFilePath}`);
@@ -1905,6 +1973,7 @@ document.addEventListener('DOMContentLoaded', async function () {
 
     // Load CoT jobs when page loads
     loadCoTJobs();
+    refreshCoTAnalysesList();
 });
 
 // ===== CoT ANALYSIS FUNCTIONS =====
@@ -1951,6 +2020,131 @@ async function loadCoTJobs() {
     } catch (error) {
         console.error('Error loading jobs for CoT analysis:', error);
         showCoTError('Failed to load jobs for analysis');
+    }
+}
+
+async function refreshCoTAnalysesList() {
+    try {
+        const response = await apiFetch('/cot-analyses');
+        const data = await response.json();
+        const analyses = data.analyses || [];
+        
+        renderCoTAnalysesList(analyses);
+    } catch (error) {
+        console.error('Error loading CoT analyses list:', error);
+        const listDiv = document.getElementById('cot-analyses-list');
+        if (listDiv) {
+            listDiv.innerHTML = `<p class="text-red-500">Error loading CoT analyses: ${error.message}</p>`;
+        }
+    }
+}
+
+function renderCoTAnalysesList(analyses) {
+    const listDiv = document.getElementById('cot-analyses-list');
+    if (!listDiv) return;
+    
+    if (analyses.length === 0) {
+        listDiv.innerHTML = '<p class="text-gray-500">No completed CoT analyses found. Run an analysis on a completed job to see results here.</p>';
+        return;
+    }
+    
+    listDiv.innerHTML = '';
+    
+    analyses.forEach(analysis => {
+        const analysisDiv = document.createElement('div');
+        analysisDiv.className = 'border border-gray-200 rounded-lg p-4 mb-4 hover:shadow-md transition-shadow';
+        
+        // Format job ID display
+        let jobIdDisplay = analysis.job_id;
+        let slurmIdLine = '';
+        if (analysis.slurm_jid) {
+            jobIdDisplay = analysis.slurm_jid;
+            slurmIdLine = `<p class="text-xs text-gray-400">UUID: ${analysis.job_id.substring(0, 8)}...</p>`;
+        }
+        
+        // Format model name
+        let modelName = analysis.model || 'Unknown';
+        if (modelName.includes('/')) {
+            modelName = modelName.split('/').slice(-1)[0];
+        }
+        
+        // Format scores with color coding
+        const overallScore = (analysis.overall_score * 100).toFixed(1);
+        const scoreColor = analysis.overall_score >= 0.8 ? 'text-green-600' : 
+                          analysis.overall_score >= 0.6 ? 'text-yellow-600' : 'text-red-600';
+        
+        analysisDiv.innerHTML = `
+            <div class="flex justify-between items-start">
+                <div class="flex-1">
+                    <h3 class="font-semibold text-lg">Job ID: ${jobIdDisplay}</h3>
+                    ${slurmIdLine}
+                    <p class="text-sm text-gray-600 mt-1">Model: ${modelName}</p>
+                    <p class="text-sm text-gray-600">Dataset: ${analysis.dataset || 'N/A'}</p>
+                    <p class="text-sm text-gray-600">Samples: ${analysis.total_samples || 0}</p>
+                    ${analysis.timestamp ? `<p class="text-xs text-gray-400 mt-1">Analyzed: ${analysis.timestamp}</p>` : ''}
+                </div>
+                <div class="ml-4 text-right">
+                    <div class="mb-2">
+                        <p class="text-xs text-gray-500">Overall Score</p>
+                        <p class="text-2xl font-bold ${scoreColor}">${overallScore}%</p>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-xs mt-2">
+                        <div>
+                            <span class="text-gray-500">Faith:</span>
+                            <span class="font-medium">${(analysis.faithfulness * 100).toFixed(1)}%</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-500">Util:</span>
+                            <span class="font-medium">${(analysis.utility * 100).toFixed(1)}%</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-500">Coh:</span>
+                            <span class="font-medium">${(analysis.coherence * 100).toFixed(1)}%</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-500">Fact:</span>
+                            <span class="font-medium">${(analysis.factuality * 100).toFixed(1)}%</span>
+                        </div>
+                    </div>
+                    ${analysis.total_flags > 0 ? `<p class="text-xs text-red-600 mt-1">🚩 ${analysis.total_flags} flags</p>` : ''}
+                </div>
+            </div>
+            <div class="mt-4 pt-4 border-t">
+                <button onclick="downloadCoTAnalysisExcel('${analysis.job_id}')" 
+                    class="px-4 py-2 text-white text-sm rounded font-medium shadow-sm hover:shadow transition-all duration-200 ${!analysis.has_excel ? 'bg-gray-400 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'}"
+                    ${!analysis.has_excel ? 'disabled' : ''}>
+                    📊 Download Excel
+                </button>
+                <button onclick="viewCoTAnalysisDetails('${analysis.job_id}')" 
+                    class="ml-2 px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 font-medium shadow-sm hover:shadow transition-all duration-200">
+                    👁️ View Details
+                </button>
+            </div>
+        `;
+        
+        listDiv.appendChild(analysisDiv);
+    });
+}
+
+async function downloadCoTAnalysisExcel(jobId) {
+    try {
+        const apiBase = await getApiBase();
+        const url = `${apiBase}/jobs/${jobId}/export`;
+        window.open(url, '_blank');
+    } catch (error) {
+        alert('Error downloading Excel file: ' + error.message);
+    }
+}
+
+function viewCoTAnalysisDetails(jobId) {
+    // Set the job select to this job and run analysis
+    const jobSelect = document.getElementById('cot-job-select');
+    if (jobSelect) {
+        jobSelect.value = jobId;
+        // Trigger the change event to enable the analyze button
+        jobSelect.dispatchEvent(new Event('change'));
+        // Optionally auto-run the analysis
+        // runCoTAnalysis();
     }
 }
 
