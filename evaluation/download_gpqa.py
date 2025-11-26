@@ -5,14 +5,30 @@ Script to download and convert GPQA dataset to JSONL format.
 GPQA is a gated dataset on HuggingFace. Before running this script:
 1. Visit https://huggingface.co/datasets/Idavidrein/gpqa
 2. Click 'Agree and access repository' to accept the terms
-3. Run: huggingface-cli login (or set HF_TOKEN environment variable)
-4. Then run this script
+3. The script will automatically use the token from backend/path_config.json
 """
 
 import os
 import json
+import sys
 from pathlib import Path
 from datasets import load_dataset
+
+def get_hf_token():
+    """Get HuggingFace token from path_config.json or environment."""
+    # First try path_config.json
+    config_path = Path(__file__).parent.parent / "backend" / "path_config.json"
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            if 'hf_token' in config:
+                return config['hf_token']
+        except Exception as e:
+            print(f"Warning: Could not read path_config.json: {e}")
+    
+    # Fallback to environment variable
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
 
 def download_gpqa():
     """Download and convert GPQA dataset to JSONL format."""
@@ -28,9 +44,24 @@ def download_gpqa():
     print("3. Run: huggingface-cli login")
     print("4. Then re-run this script\n")
     
+    # Get HuggingFace token
+    hf_token = get_hf_token()
+    if not hf_token:
+        print("✗ No HuggingFace token found!")
+        print("Please set HF_TOKEN environment variable or add 'hf_token' to backend/path_config.json")
+        return False
+    
+    # Set token in environment for datasets library
+    os.environ['HF_TOKEN'] = hf_token
+    os.environ['HUGGINGFACE_HUB_TOKEN'] = hf_token
+    
     try:
-        # Try to load the dataset
-        dataset = load_dataset("Idavidrein/gpqa")
+        # GPQA has multiple configs, use 'gpqa_main' as the default
+        # Available configs: 'gpqa_extended', 'gpqa_main', 'gpqa_diamond', 'gpqa_experts'
+        config_name = "gpqa_main"  # Main GPQA dataset
+        print(f"Using HuggingFace token from config...")
+        print(f"Loading GPQA dataset with config: {config_name}")
+        dataset = load_dataset("Idavidrein/gpqa", config_name, token=hf_token)
         print(f"✓ Successfully loaded GPQA dataset")
         print(f"Dataset splits: {list(dataset.keys())}")
         
@@ -41,12 +72,37 @@ def download_gpqa():
             
             for idx, example in enumerate(dataset[split_name]):
                 # Convert to our format
-                # GPQA has: Question, Correct (answer), and possibly other fields
+                # GPQA has: Question, Correct Answer (text), and Incorrect Answer 1-3
+                question_text = example.get("Question", example.get("question", ""))
+                correct_answer = example.get("Correct Answer", example.get("correct answer", ""))
+                
+                # Build question with options if available
+                incorrect_answers = []
+                for i in range(1, 4):
+                    incorrect = example.get(f"Incorrect Answer {i}", example.get(f"incorrect answer {i}", ""))
+                    if incorrect:
+                        incorrect_answers.append(incorrect)
+                
+                # If we have options, format them as multiple choice
+                if incorrect_answers and correct_answer:
+                    # Create options list
+                    all_answers = [correct_answer] + incorrect_answers
+                    # Shuffle or keep order? Let's keep correct first for now
+                    options_text = "\nOptions:\n"
+                    labels = ["(A)", "(B)", "(C)", "(D)", "(E)"]
+                    for i, ans in enumerate(all_answers[:5]):
+                        options_text += f"{labels[i]} {ans}\n"
+                    question_text = question_text.rstrip() + "\n" + options_text.rstrip()
+                    # Store the label for the correct answer
+                    correct_label = labels[0]  # Correct answer is first
+                else:
+                    correct_label = correct_answer
+                
                 converted_example = {
                     "idx": idx,
-                    "question": example.get("Question", example.get("question", "")),
-                    "target": example.get("Correct", example.get("correct", example.get("answer", ""))),
-                    "gt": example.get("Correct", example.get("correct", example.get("answer", ""))),
+                    "question": question_text,
+                    "target": correct_label if incorrect_answers else correct_answer,
+                    "gt": correct_label if incorrect_answers else correct_answer,
                     "gt_cot": None,
                 }
                 
