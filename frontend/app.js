@@ -897,6 +897,15 @@ function renderModelConfigs() {
                         <option value="custom" ${config.prompt_type === 'custom' ? 'selected' : ''}>Custom Prompt</option>
                         <option value="direct" ${config.prompt_type === 'direct' ? 'selected' : ''}>Direct</option>
                         <option value="aime" ${config.prompt_type === 'aime' ? 'selected' : ''}>AIME (American Invitational Mathematics Examination)</option>
+                        <option value="gsm8k" ${config.prompt_type === 'gsm8k' ? 'selected' : ''}>📘 GSM8K</option>
+                        <option value="math500" ${config.prompt_type === 'math500' ? 'selected' : ''}>🧠 MATH500</option>
+                        <option value="aqua" ${config.prompt_type === 'aqua' ? 'selected' : ''}>🧮 AQuA-RAT</option>
+                        <option value="svamp" ${config.prompt_type === 'svamp' ? 'selected' : ''}>✏️ SVAMP</option>
+                        <option value="asdiv" ${config.prompt_type === 'asdiv' ? 'selected' : ''}>📊 ASDiv (Algebraic Word Problems)</option>
+                        <option value="humaneval" ${config.prompt_type === 'humaneval' ? 'selected' : ''}>💻 HumanEval+ (Coding Reasoning)</option>
+                        <option value="bigbenchhard" ${config.prompt_type === 'bigbenchhard' ? 'selected' : ''}>🧩 BIG-Bench Hard (Logical Reasoning)</option>
+                        <option value="gpqa" ${config.prompt_type === 'gpqa' ? 'selected' : ''}>🔬 GPQA (Graduate-Level Physics QA)</option>
+                        <option value="arc_challenge" ${config.prompt_type === 'arc_challenge' ? 'selected' : ''}>🎯 ARC-Challenge (Abstract Pattern Reasoning)</option>
                     </select>
                 </div>
                 
