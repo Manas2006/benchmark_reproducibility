@@ -54,7 +54,9 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
             test_code = test_info.get('test', '')
             entry_point = test_info.get('entry_point', '')
             for pred in sample['pred']:
-                params.append((prompt, pred, test_code, entry_point))
+                # Extract function body from raw model output
+                extracted_code = extract_answer(pred, data_name)
+                params.append((prompt, extracted_code, test_code, entry_point))
     else:
         # Standard evaluation: compare predictions with ground truth
         params = [(idx, pred, sample['gt']) for idx, sample in enumerate(samples) for pred in sample['pred']]
