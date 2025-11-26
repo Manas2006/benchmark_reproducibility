@@ -505,6 +505,21 @@ def extract_answer(pred_str, data_name, use_last_number=True):
         effective_data_name = data_name
     
     pred_str = pred_str.replace("\u043a\u0438", "")
+    if effective_data_name in ["arc_challenge", "arc_easy", "arc"]:
+        # ARC: Extract multiple choice answer (A-D format)
+        # Look for parenthesized letters first: (A), (B), etc.
+        mc_parentheses = re.findall(r"\(([A-D])\)", pred_str, re.IGNORECASE)
+        if mc_parentheses:
+            return mc_parentheses[-1].upper()  # Return as "A", not "(A)"
+        
+        # Look for standalone letters A-D (word boundaries)
+        mc_standalone = re.findall(r"\b([A-D])\b", pred_str, re.IGNORECASE)
+        if mc_standalone:
+            return mc_standalone[-1].upper()  # Return as "A", not "(A)"
+        
+        # Fallback: return empty string if no match
+        return ""
+    
     if effective_data_name == "gpqa":
         # GPQA: Extract multiple choice answer (A-E format)
         # Look for parenthesized letters first: (A), (B), etc.
@@ -808,6 +823,11 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         gt_cot = None
         gt_ans = example.get("target", example.get("gt", ""))
         # Preserve format like "(A)", "(B)", etc.
+    elif data_name in ["arc_challenge", "arc_easy", "arc"]:
+        # ARC: multiple choice format A, B, C, D (without parentheses in original, but we can handle both)
+        gt_cot = None
+        gt_ans = example.get("target", example.get("gt", example.get("answerKey", "")))
+        # Store as "A", "B", etc. (can be normalized to "(A)" format if needed)
     else:
         raise NotImplementedError(f"`{data_name}`")
     # post process
@@ -820,6 +840,9 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         gt_ans = str(gt_ans).strip() if gt_ans else ""
     elif data_name == "gpqa":
         # GPQA: preserve answer format, only strip whitespace
+        gt_ans = str(gt_ans).strip() if gt_ans else ""
+    elif data_name in ["arc_challenge", "arc_easy", "arc"]:
+        # ARC: preserve answer format, only strip whitespace
         gt_ans = str(gt_ans).strip() if gt_ans else ""
     elif data_name not in STRIP_EXCEPTIONS:
         gt_ans = strip_string(gt_ans, skip_unit=data_name == "carp_en")
@@ -891,6 +914,9 @@ def parse_question(example, data_name):
         question = example.get("question", example.get("input", ""))
     elif data_name == "gpqa":
         # GPQA: return question field (already contains options formatted as "(A) option1", etc.)
+        question = example.get("question", "")
+    elif data_name in ["arc_challenge", "arc_easy", "arc"]:
+        # ARC: return question field (already contains options formatted as "(A) option1", etc.)
         question = example.get("question", "")
     else:
         for key in ["question", "problem", "Question", "input"]:
