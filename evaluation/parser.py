@@ -506,16 +506,28 @@ def extract_answer(pred_str, data_name, use_last_number=True):
     
     pred_str = pred_str.replace("\u043a\u0438", "")
     if effective_data_name in ["arc_challenge", "arc_easy", "arc"]:
-        # ARC: Extract multiple choice answer (A-D format)
+        # ARC: Extract multiple choice answer (A-E format, or 1-4 numeric format)
+        # Some questions have up to 5 options (A-E), though most have A-D
         # Look for parenthesized letters first: (A), (B), etc.
-        mc_parentheses = re.findall(r"\(([A-D])\)", pred_str, re.IGNORECASE)
+        mc_parentheses = re.findall(r"\(([A-E])\)", pred_str, re.IGNORECASE)
         if mc_parentheses:
             return mc_parentheses[-1].upper()  # Return as "A", not "(A)"
         
-        # Look for standalone letters A-D (word boundaries)
-        mc_standalone = re.findall(r"\b([A-D])\b", pred_str, re.IGNORECASE)
+        # Look for standalone letters A-E (word boundaries)
+        mc_standalone = re.findall(r"\b([A-E])\b", pred_str, re.IGNORECASE)
         if mc_standalone:
             return mc_standalone[-1].upper()  # Return as "A", not "(A)"
+        
+        # Also handle numeric format (1-4) - some ARC questions use numbers
+        # Look for parenthesized numbers: (1), (2), etc.
+        mc_num_parentheses = re.findall(r"\(([1-4])\)", pred_str)
+        if mc_num_parentheses:
+            return mc_num_parentheses[-1]  # Return as "1", "2", etc.
+        
+        # Look for standalone numbers 1-4 (word boundaries)
+        mc_num_standalone = re.findall(r"\b([1-4])\b", pred_str)
+        if mc_num_standalone:
+            return mc_num_standalone[-1]  # Return as "1", "2", etc.
         
         # Fallback: return empty string if no match
         return ""
@@ -824,10 +836,10 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         gt_ans = example.get("target", example.get("gt", ""))
         # Preserve format like "(A)", "(B)", etc.
     elif data_name in ["arc_challenge", "arc_easy", "arc"]:
-        # ARC: multiple choice format A, B, C, D (without parentheses in original, but we can handle both)
+        # ARC: multiple choice format A, B, C, D or 1, 2, 3, 4 (some questions use numeric labels)
         gt_cot = None
         gt_ans = example.get("target", example.get("gt", example.get("answerKey", "")))
-        # Store as "A", "B", etc. (can be normalized to "(A)" format if needed)
+        # Store as "A", "B", etc. or "1", "2", etc. (preserve original format)
     else:
         raise NotImplementedError(f"`{data_name}`")
     # post process
