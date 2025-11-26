@@ -29,13 +29,36 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
     # parse gt
     for sample in samples:
         sample['gt_cot'], sample['gt'] = parse_ground_truth(sample, data_name)
-    params = [(idx, pred, sample['gt']) for idx, sample in enumerate(samples) for pred in sample['pred']]
+    
+    # Check if this is HumanEval dataset (requires code execution evaluation)
+    is_humaneval = (data_name == "humaneval")
+    
+    if is_humaneval:
+        # HumanEval: construct parameters for code execution evaluation
+        # Each param: (prompt, generated_code, test_code, entry_point)
+        params = []
+        for idx, sample in enumerate(samples):
+            prompt = sample.get('prompt', '')
+            test_info = sample['gt']  # This is a dict with 'test', 'entry_point', 'canonical_solution'
+            test_code = test_info.get('test', '')
+            entry_point = test_info.get('entry_point', '')
+            for pred in sample['pred']:
+                params.append((prompt, pred, test_code, entry_point))
+    else:
+        # Standard evaluation: compare predictions with ground truth
+        params = [(idx, pred, sample['gt']) for idx, sample in enumerate(samples) for pred in sample['pred']]
 
     scores = []
     timeout_cnt = 0 
 
     with ProcessPool(max_workers=1) as pool:
-        future = pool.map(math_equal_process, params, timeout=3)
+        if is_humaneval:
+            # Use HumanEval-specific evaluation
+            from grader import humaneval_check_process
+            future = pool.map(humaneval_check_process, params, timeout=5)
+        else:
+            # Use standard math_equal evaluation
+            future = pool.map(math_equal_process, params, timeout=3)
         iterator = future.result()
         with tqdm(total=len(samples), desc="Evaluate") as progress_bar:
             while True:
