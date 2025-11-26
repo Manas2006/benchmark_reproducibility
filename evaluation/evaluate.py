@@ -39,7 +39,18 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
         params = []
         for idx, sample in enumerate(samples):
             prompt = sample.get('prompt', '')
-            test_info = sample['gt']  # This is a dict with 'test', 'entry_point', 'canonical_solution'
+            test_info = sample['gt']  # This should be a dict with 'test', 'entry_point', 'canonical_solution'
+            
+            # Handle case where gt might be a string (from old data format)
+            if isinstance(test_info, str):
+                # Reconstruct dict from sample fields
+                test_info = {
+                    "test": sample.get('test', ''),
+                    "entry_point": sample.get('entry_point', ''),
+                    "canonical_solution": sample.get('canonical_solution', sample.get('gt', ''))
+                }
+                sample['gt'] = test_info  # Update sample for consistency
+            
             test_code = test_info.get('test', '')
             entry_point = test_info.get('entry_point', '')
             for pred in sample['pred']:
