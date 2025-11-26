@@ -505,6 +505,22 @@ def extract_answer(pred_str, data_name, use_last_number=True):
         effective_data_name = data_name
     
     pred_str = pred_str.replace("\u043a\u0438", "")
+    if effective_data_name == "gpqa":
+        # GPQA: Extract multiple choice answer (A-E format)
+        # Look for parenthesized letters first: (A), (B), etc.
+        mc_parentheses = re.findall(r"\(([A-E])\)", pred_str, re.IGNORECASE)
+        if mc_parentheses:
+            return f"({mc_parentheses[-1].upper()})"
+        
+        # Look for standalone letters A-E (word boundaries)
+        mc_standalone = re.findall(r"\b([A-E])\b", pred_str, re.IGNORECASE)
+        if mc_standalone:
+            # Return in parenthesized format to match ground truth
+            return f"({mc_standalone[-1].upper()})"
+        
+        # Fallback: return empty string if no match
+        return ""
+    
     if effective_data_name == "bigbenchhard":
         # BigBenchHard: Extract answer with multiple strategies
         # Priority: Multiple choice > Boolean/Valid-Invalid > Text > Number
@@ -787,6 +803,11 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         gt_cot = None
         gt_ans = example.get("target", example.get("gt", ""))
         # Don't strip_string here - preserve format like "(A)", "True", "valid", etc.
+    elif data_name == "gpqa":
+        # GPQA: multiple choice format (A), (B), etc.
+        gt_cot = None
+        gt_ans = example.get("target", example.get("gt", ""))
+        # Preserve format like "(A)", "(B)", etc.
     else:
         raise NotImplementedError(f"`{data_name}`")
     # post process
@@ -796,6 +817,9 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         pass
     elif data_name == "bigbenchhard":
         # BigBenchHard: preserve answer format, only strip whitespace
+        gt_ans = str(gt_ans).strip() if gt_ans else ""
+    elif data_name == "gpqa":
+        # GPQA: preserve answer format, only strip whitespace
         gt_ans = str(gt_ans).strip() if gt_ans else ""
     elif data_name not in STRIP_EXCEPTIONS:
         gt_ans = strip_string(gt_ans, skip_unit=data_name == "carp_en")
@@ -865,6 +889,9 @@ def parse_question(example, data_name):
     elif data_name == "bigbenchhard":
         # BigBenchHard: return question or input field (contains full prompt with options)
         question = example.get("question", example.get("input", ""))
+    elif data_name == "gpqa":
+        # GPQA: return question field (already contains options formatted as "(A) option1", etc.)
+        question = example.get("question", "")
     else:
         for key in ["question", "problem", "Question", "input"]:
             if key in example:
