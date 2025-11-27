@@ -620,6 +620,15 @@ def extract_answer(pred_str, data_name, use_last_number=True):
         if code_blocks:
             # Use the last code block (most likely the final answer)
             pred = code_blocks[-1].strip()
+            # Normalize indentation: detect base indentation and remove it
+            lines = pred.split('\n')
+            if lines:
+                # Find minimum indentation (excluding empty lines)
+                non_empty = [line for line in lines if line.strip()]
+                if non_empty:
+                    min_indent = min(len(line) - len(line.lstrip()) for line in non_empty)
+                    # Remove base indentation from all lines
+                    pred = '\n'.join(line[min_indent:] if line.strip() else line for line in lines).strip()
         else:
             # If no code block, extract everything after the prompt
             # Remove any leading text/explanations
@@ -674,6 +683,23 @@ def extract_answer(pred_str, data_name, use_last_number=True):
         if lines and lines[0].strip().startswith('def '):
             # Remove function signature line
             pred = '\n'.join(lines[1:]).strip()
+        
+        # Normalize indentation: ensure consistent indentation for function body
+        # Function body should typically be indented 4 spaces
+        lines = pred.split('\n')
+        if lines:
+            # Find minimum indentation (excluding empty lines)
+            non_empty_lines = [line for line in lines if line.strip()]
+            if non_empty_lines:
+                min_indent = min(len(line) - len(line.lstrip()) for line in non_empty_lines)
+                # If code has some indentation, preserve relative indentation
+                # If code has no indentation, add 4 spaces (standard Python function body indent)
+                if min_indent == 0:
+                    # No base indentation - add 4 spaces to all non-empty lines
+                    pred = '\n'.join('    ' + line if line.strip() else line for line in lines).strip()
+                else:
+                    # Has indentation - normalize to remove base indent, then add 4 spaces
+                    pred = '\n'.join('    ' + (line[min_indent:] if line.strip() else line) for line in lines).strip()
         
         return pred
     

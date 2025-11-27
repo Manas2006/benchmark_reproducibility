@@ -38,6 +38,16 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
         # HumanEval: construct parameters for code execution evaluation
         # Each param: (prompt, generated_code, test_code, entry_point)
         params = []
+        
+        # Load original HumanEval data to get test cases and entry points if missing
+        from data_loader import load_data
+        try:
+            original_data = load_data("humaneval", "test")
+            original_data_dict = {ex.get('idx', i): ex for i, ex in enumerate(original_data)}
+        except Exception as e:
+            print(f"Warning: Could not load original HumanEval data: {e}")
+            original_data_dict = {}
+        
         for idx, sample in enumerate(samples):
             prompt = sample.get('prompt', '')
             test_info = sample['gt']  # This should be a dict with 'test', 'entry_point', 'canonical_solution'
@@ -55,18 +65,33 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
             test_code = test_info.get('test', '')
             entry_point = test_info.get('entry_point', '')
             
-            # Get predictions - handle None, empty list, or missing pred field
-            preds = sample.get('pred', [])
-            if preds is None:
-                preds = []
-            if not isinstance(preds, list):
-                preds = [preds] if preds else []
+            # If test_code or entry_point are missing, try to load from original data
+            if not test_code or not entry_point:
+                sample_idx = sample.get('idx', idx)
+                if sample_idx in original_data_dict:
+                    orig_sample = original_data_dict[sample_idx]
+                    if not test_code:
+                        test_code = orig_sample.get('test', '')
+                    if not entry_point:
+                        entry_point = orig_sample.get('entry_point', '')
+                    # Update sample for future use
+                    test_info['test'] = test_code
+                    test_info['entry_point'] = entry_point
+                    sample['gt'] = test_info
             
-            # If no valid predictions, try 'code' field as fallback
-            if len(preds) == 0:
-                code_field = sample.get('code', [])
-                if code_field and isinstance(code_field, list) and len(code_field) > 0:
-                    preds = code_field
+            # For HumanEval, prefer 'code' field which contains raw model output
+            # 'pred' field may have processed/stripped code that's missing spaces
+            code_field = sample.get('code', [])
+            if code_field and isinstance(code_field, list) and len(code_field) > 0:
+                # Use code field as primary source for HumanEval
+                preds = code_field
+            else:
+                # Fallback to pred field if code is not available
+                preds = sample.get('pred', [])
+                if preds is None:
+                    preds = []
+                if not isinstance(preds, list):
+                    preds = [preds] if preds else []
             
             # Track valid predictions for this sample
             valid_pred_indices = []
