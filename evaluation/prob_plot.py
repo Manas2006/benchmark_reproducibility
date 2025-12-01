@@ -1001,10 +1001,10 @@ def plot_correct_vs_incorrect(data, dataset_name, method_name, output_dir, token
     correct_avg_chosen_probs = normalize_and_bin_sequences(correct_chosen_sequences)
     incorrect_avg_chosen_probs = normalize_and_bin_sequences(incorrect_chosen_sequences)
     
-    # Calculate average absolute difference
+    # Calculate average difference (correct - incorrect)
     correct_avg_chosen_probs = np.array(correct_avg_chosen_probs)
     incorrect_avg_chosen_probs = np.array(incorrect_avg_chosen_probs)
-    avg_difference = np.mean(np.abs(correct_avg_chosen_probs - incorrect_avg_chosen_probs))
+    avg_difference = np.mean(correct_avg_chosen_probs - incorrect_avg_chosen_probs)
 
     # Calculate slope of the gap (correct - incorrect) over generation percentage
     # Use OLS with NaN masking for robustness
@@ -1137,7 +1137,7 @@ def plot_correct_vs_incorrect(data, dataset_name, method_name, output_dir, token
     
     stats_text = f"Correct Avg Steps: {correct_avg_steps:.1f} | Incorrect Avg Steps: {incorrect_avg_steps:.1f}"
     if avg_acc is not None:
-        stats_text += f"\nAvg Accuracy: {avg_acc:.1f}% | Avg Abs Difference: {avg_difference:.3f} | Slope (Correct-Incorrect): {slope_gap:.4f}{ece_info}{ece_debug_text}"
+        stats_text += f"\nAvg Accuracy: {avg_acc:.1f}% | Avg Difference: {avg_difference:.3f} | Slope (Correct-Incorrect): {slope_gap:.4f}{ece_info}{ece_debug_text}"
     plt.figtext(0.5, 0.02, stats_text, fontsize=11, ha='center', va='bottom', 
                 bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.7))
     

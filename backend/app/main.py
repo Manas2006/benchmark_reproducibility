@@ -153,7 +153,33 @@ async def job_status(jid: str):
     slurm_jid = status_info.get("slurm_jid")
     result_file = status_info.get("result_file")
     prob_file = status_info.get("prob_file")
-    return {"job_id": jid, "slurm_jid": slurm_jid, **status_info, "result_file": result_file, "prob_file": prob_file}
+    summary_file = status_info.get("summary_file")
+    request_cfg = status_info.get("request", {})
+    is_ece = status_info.get("is_ece") or request_cfg.get("enable_ece_eval")
+
+    if is_ece:
+        status_info["is_ece"] = True
+        if summary_file:
+            try:
+                summary_path = Path(summary_file)
+                if summary_path.exists():
+                    with open(summary_path, "r") as f:
+                        summary_json = json.load(f)
+                    datasets = summary_json.get("datasets", {})
+                    averaged_prob = None
+                    for dataset_data in datasets.values():
+                        averaged_prob = dataset_data.get("averaged_prob_file")
+                        if averaged_prob:
+                            break
+                    if averaged_prob and Path(averaged_prob).exists():
+                        prob_file = averaged_prob
+                        status_info["prob_file"] = prob_file
+                        job_db[jid]["prob_file"] = prob_file
+                        save_job_db()
+            except Exception as e:
+                print(f"Warning: failed to parse ECE summary for job {jid}: {e}")
+
+    return {"job_id": jid, "slurm_jid": slurm_jid, **status_info, "result_file": result_file, "prob_file": prob_file, "summary_file": summary_file}
 
 @app.get("/jobs/{jid}/prob-file")
 async def get_prob_file(jid: str):
@@ -550,6 +576,27 @@ async def get_metrics_file(job_id: str):
         
         job_info = job_db[job_id]
         result_file = job_info.get("result_file")
+        summary_file = job_info.get("summary_file")
+        
+        if summary_file:
+            summary_path = Path(summary_file)
+            config = path_manager.get_config()
+            allowed_dirs = [Path(config.output_dir), Path(config.logs_dir), Path(config.evaluation_dir)]
+            if summary_path.exists():
+                is_allowed = False
+                for allowed_dir in allowed_dirs:
+                    try:
+                        summary_path.relative_to(allowed_dir)
+                        is_allowed = True
+                        break
+                    except ValueError:
+                        continue
+                if is_allowed:
+                    return FileResponse(
+                        path=str(summary_path),
+                        filename=summary_path.name,
+                        media_type='application/json'
+                    )
         
         if not result_file:
             raise HTTPException(status_code=404, detail="No result file found for this job")
@@ -1112,12 +1159,12 @@ def _get_model_and_dataset_from_job(job_id: str) -> tuple[str, str]:
     
     # Try to extract from result_file path if not in request
     if model_name == "Unknown" and result_file:
-        path_parts = Path(result_file).parts
-        for part in path_parts:
-            if any(model in part.lower() for model in ['qwen', 'gpt', 'claude', 'llama', 'mistral', 'gemini', 'mathstral']):
-                model_name = part
-            if part in ['gsm8k', 'math', 'mmlu', 'humaneval']:
-                dataset = part
+            path_parts = Path(result_file).parts
+            for part in path_parts:
+                if any(model in part.lower() for model in ['qwen', 'gpt', 'claude', 'llama', 'mistral', 'gemini', 'mathstral']):
+                    model_name = part
+                if part in ['gsm8k', 'math', 'mmlu', 'humaneval']:
+                    dataset = part
     
     # Sanitize model name for filesystem (replace / with _)
     model_name = model_name.replace('/', '_').replace('\\', '_')
@@ -1376,11 +1423,11 @@ async def export_job_excel(job_id: str):
             # Generate Excel file on the fly
             excel_path = export_results_to_excel(job_id, job_info)
             excel_file = Path(excel_path)
-            return FileResponse(
-                path=str(excel_file),
-                filename=excel_file.name,
-                media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            )
+        return FileResponse(
+            path=str(excel_file),
+            filename=excel_file.name,
+            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
         
     except HTTPException:
         raise
@@ -2092,9 +2139,9 @@ async def get_cot_analysis(job_id: str, queue: bool = True):
                 print(f"📊 Excel export saved to: {excel_path}", flush=True)
             except Exception as e:
                 print(f"⚠️ Warning: Could not generate Excel export: {e}", flush=True)
-            
+        
             return analysis_result
-            
+        
         except HTTPException:
             raise
         except Exception as e:
@@ -2497,9 +2544,14 @@ async def run_truncation_analysis(job_id: str, request: TruncationAnalysisReques
             # Build conda activation section if conda_env_path is configured
             conda_activation = ""
             if config.conda_env_path:
+                # Extract environment name from path (e.g., /path/to/envs/mathevalUI -> mathevalUI)
+                conda_env_name = os.path.basename(config.conda_env_path)
+                # If path ends with /envs/env_name, extract env_name
+                if '/envs/' in config.conda_env_path:
+                    conda_env_name = config.conda_env_path.split('/envs/')[-1]
                 conda_activation = f"""# Activate conda environment
 source {config.conda_env_path}/etc/profile.d/conda.sh
-conda activate qwen-eval
+conda activate {conda_env_name}
 """
             else:
                 conda_activation = "# Note: No conda environment configured. Using system Python.\n"
@@ -2651,7 +2703,7 @@ async def get_truncation_plot(job_id: str, plot_type: str = "correct"):
     if not is_allowed:
         raise HTTPException(status_code=403, detail="Access denied to this file path")
     
-    return FileResponse(path=str(latest_plot), filename=latest_plot.name, media_type='image/png')
+    return FileResponse(path=str(latest_plot), filename=latest_plot.name, media_type='image/png') 
 
 @app.post("/prompt/preview", response_model=PromptPreviewResponse)
 async def get_prompt_preview(request: PromptPreviewRequest):

@@ -3,6 +3,7 @@ import os
 import argparse
 import time
 import json
+import copy
 from vllm import LLM, SamplingParams
 from datetime import datetime
 from tqdm import tqdm
@@ -21,6 +22,7 @@ import torch
 import gc # <<< NEW: Ensure gc is imported
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 import numpy as np
+from collections import Counter
 
 from evaluate import evaluate
 from utils import set_seed, load_jsonl, save_jsonl, construct_prompt
@@ -31,6 +33,7 @@ from python_executor import PythonExecutor
 from model_utils import load_hf_lm_and_tokenizer, generate_completions
 from prob_recorder import BatchProbabilityRecorder
 from run_truncation_analysis_with_logs import run_truncation_analysis_over_samples_with_logs as run_truncation_analysis_over_samples
+from math_utils import compare_ans
 try:
     # Optional import for answer confidence calculation (ECE)
     from extract_answer_confidence import extract_answer_confidence
@@ -605,6 +608,9 @@ def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], samplin
     with tempfile.TemporaryDirectory() as td:
         in_path  = os.path.join(td, "pass1_in.json")
         out_path = os.path.join(td, "pass1_out.json")
+        # Get max_num_seqs from args or use a safer default
+        max_num_seqs = getattr(args, 'vllm_max_num_seqs', 16) if args else 16  # Lower default to reduce OOM risk
+        
         payload = {
             "model": model_name_or_path,
             "prompts": prompts,
@@ -617,14 +623,34 @@ def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], samplin
             "gpu_memory_utilization": gpu_memory_utilization,
             # Use the final, safe value determined above
             "max_model_len": final_max_model_len,
+            "max_num_seqs": max_num_seqs,  # Limit batch size to reduce memory usage
         }
         with open(in_path, "w", encoding="utf-8") as f:
             json.dump(payload, f)
         
-        print(f"🚀 Starting vLLM subprocess with max_model_len={final_max_model_len}, gpu_memory_utilization={gpu_memory_utilization}")
+        print(f"🚀 Starting vLLM subprocess with max_model_len={final_max_model_len}, gpu_memory_utilization={gpu_memory_utilization}, max_num_seqs={max_num_seqs}")
+        
+        # Clear GPU memory before spawning subprocess to ensure it has enough memory
+        try:
+            import torch
+            if torch.cuda.is_available():
+                print("🧹 Clearing GPU memory cache before subprocess...")
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                # Give a moment for memory to be freed
+                import time
+                time.sleep(0.5)
+        except Exception as e:
+            print(f"⚠️ Warning: Could not clear GPU cache before subprocess: {e}")
+        
         # Spawn child. It will exit and release all VRAM.
         # Pass environment variables, but filter out invalid HF tokens
         env = os.environ.copy()
+        # Set PyTorch memory allocation config to reduce fragmentation
+        # This helps when there's reserved but unallocated memory
+        if 'PYTORCH_CUDA_ALLOC_CONF' not in env:
+            env['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+            print("🔧 Setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to reduce memory fragmentation")
         # Only pass HF tokens if they look valid (not placeholder values)
         for token_var in ['HF_TOKEN', 'HUGGINGFACE_HUB_TOKEN']:
             if token_var in env:
@@ -642,28 +668,224 @@ def run_pass1_in_subprocess(model_name_or_path: str, prompts: List[str], samplin
                 text=True
             )
             print("✅ vLLM subprocess completed successfully")
+            
+            # Clear GPU memory after subprocess completes to ensure it's freed
+            # This is critical for ECE runs where we call subprocess multiple times
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    print("🧹 Clearing GPU memory cache after subprocess completion...")
+                    # Force garbage collection first to free Python objects
+                    import gc
+                    gc.collect()
+                    # Then clear CUDA cache
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    # Small delay to let GPU actually free the memory
+                    time.sleep(0.5)
+                    
+                    # Verify memory is available
+                    free_bytes, total_bytes = torch.cuda.mem_get_info()
+                    free_gb = round(free_bytes / (1024**3), 2)
+                    print(f"✅ GPU memory after cleanup: {free_gb}GB free")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not clear GPU cache after subprocess: {e}")
+                
         except subprocess.CalledProcessError as e:
             error_output = e.stderr if e.stderr else e.stdout if hasattr(e, 'stdout') else "No error output captured"
-            error_msg = (
-                f"❌ vLLM subprocess failed with exit code {e.returncode}\n"
-                f"   Model: {args.model_name_or_path}\n"
-                f"   \n"
-                f"   Error output:\n"
-                f"   {error_output}\n"
-                f"   \n"
-                f"   This may occur if:\n"
-                f"   1. The model configuration is incompatible with vLLM\n"
-                f"   2. The model is missing required configuration fields (e.g., head_dim)\n"
-                f"   3. There are memory/GPU compatibility issues\n"
-                f"   4. The model format is not supported by vLLM\n"
-                f"   \n"
-                f"   Try using a different model or checking vLLM compatibility."
-            )
+            is_oom = "out of memory" in error_output.lower() or "CUDA error: out of memory" in error_output
+            
+            if is_oom:
+                error_msg = (
+                    f"❌ vLLM subprocess failed with CUDA out of memory\n"
+                    f"   Model: {args.model_name_or_path}\n"
+                    f"   \n"
+                    f"   Current settings:\n"
+                    f"   - gpu_memory_utilization: {gpu_memory_utilization}\n"
+                    f"   - max_model_len: {final_max_model_len}\n"
+                    f"   - max_num_seqs: {max_num_seqs}\n"
+                    f"   \n"
+                    f"   Error output:\n"
+                    f"   {error_output}\n"
+                    f"   \n"
+                    f"   Suggestions to fix:\n"
+                    f"   1. Lower --vllm_gpu_memory_utilization (current: {gpu_memory_utilization}, try 0.7, 0.6, or 0.5)\n"
+                    f"   2. Lower max_model_len (current: {final_max_model_len}, try {final_max_model_len // 2})\n"
+                    f"   3. Lower --vllm_max_num_seqs (current: {max_num_seqs}, try {max_num_seqs // 2} or {max_num_seqs // 4})\n"
+                    f"   4. Free up GPU memory from other processes (check with: ps aux | grep python)\n"
+                    f"   5. Use a smaller model or reduce batch size\n"
+                    f"   6. Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to reduce fragmentation\n"
+                )
+            else:
+                error_msg = (
+                    f"❌ vLLM subprocess failed with exit code {e.returncode}\n"
+                    f"   Model: {args.model_name_or_path}\n"
+                    f"   \n"
+                    f"   Error output:\n"
+                    f"   {error_output}\n"
+                    f"   \n"
+                    f"   This may occur if:\n"
+                    f"   1. The model configuration is incompatible with vLLM\n"
+                    f"   2. The model is missing required configuration fields (e.g., head_dim)\n"
+                    f"   3. There are memory/GPU compatibility issues\n"
+                    f"   4. The model format is not supported by vLLM\n"
+                    f"   \n"
+                    f"   Try using a different model or checking vLLM compatibility."
+                )
             print(error_msg)
             raise RuntimeError(error_msg) from e
         
         with open(out_path, "r", encoding="utf-8") as f:
             return json.load(f)
+
+
+# --- NEW: Pass-2 in a child process (so HF model exits and frees VRAM)
+def run_pass2_in_subprocess(
+    model_name_or_path: str,
+    vllm_outputs: List[Any],
+    samples: List[Dict[str, Any]],
+    n_sampling: int,
+    enable_path_vectors: bool,
+    path_vectors_npz: Optional[str],
+    max_tokens_per_batch: int = 2048,
+    max_len_per_batch: int = 1024,
+    args: Any = None,
+) -> Tuple[List[Optional[Dict[str, Any]]], bool, Dict[int, float]]:
+    """
+    Run HF scoring in a subprocess to ensure memory is fully freed.
+    Returns: (hf_results_per_output, wrote_npz, expert_prob_results)
+    """
+    # Convert vllm_outputs to records format expected by pass2_child_hf.py
+    vllm_outputs_records = []
+    for out in vllm_outputs:
+        # Extract prompt_token_ids and generated_token_ids
+        p_ids = list(out.prompt_token_ids) if hasattr(out, 'prompt_token_ids') else []
+        g_ids = []
+        if hasattr(out, 'outputs') and out.outputs:
+            if hasattr(out.outputs[0], 'token_ids'):
+                g_ids = list(out.outputs[0].token_ids) if out.outputs[0].token_ids else []
+        
+        vllm_outputs_records.append({
+            "prompt": out.prompt if hasattr(out, 'prompt') else "",
+            "prompt_token_ids": p_ids,
+            "generated_token_ids": g_ids,
+        })
+    
+    with tempfile.TemporaryDirectory() as td:
+        in_path = os.path.join(td, "pass2_in.json")
+        out_path = os.path.join(td, "pass2_out.json")
+        
+        payload = {
+            "model_path": model_name_or_path,
+            "vllm_outputs": vllm_outputs_records,
+            "samples": samples,
+            "n_sampling": n_sampling,
+            "enable_path_vectors": enable_path_vectors,
+            "path_vectors_npz": path_vectors_npz,
+            "max_tokens_per_batch": max_tokens_per_batch,
+            "max_len_per_batch": max_len_per_batch,
+        }
+        
+        with open(in_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        
+        print(f"🚀 Starting HF scorer subprocess with max_tokens_per_batch={max_tokens_per_batch}, max_len_per_batch={max_len_per_batch}")
+        
+        # Clear GPU memory before spawning subprocess
+        try:
+            import torch
+            if torch.cuda.is_available():
+                print("🧹 Clearing GPU memory cache before HF subprocess...")
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                import time
+                time.sleep(0.5)
+        except Exception as e:
+            print(f"⚠️ Warning: Could not clear GPU cache before HF subprocess: {e}")
+        
+        # Spawn child. It will exit and release all VRAM.
+        env = os.environ.copy()
+        # Filter out invalid HF tokens
+        for token_var in ['HF_TOKEN', 'HUGGINGFACE_HUB_TOKEN']:
+            if token_var in env:
+                token = env[token_var]
+                if not token or token.startswith('your_token') or len(token) < 10:
+                    env.pop(token_var, None)
+                    print(f"⚠️ Filtered out invalid {token_var}")
+        
+        try:
+            result = subprocess.run(
+                [sys.executable, "pass2_child_hf.py", in_path, out_path],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True
+            )
+            print("✅ HF scorer subprocess completed successfully")
+            
+            # Clear GPU memory after subprocess completes
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    print("🧹 Clearing GPU memory cache after HF subprocess completion...")
+                    import gc
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    time.sleep(0.5)
+                    
+                    free_bytes, total_bytes = torch.cuda.mem_get_info()
+                    free_gb = round(free_bytes / (1024**3), 2)
+                    print(f"✅ GPU memory after cleanup: {free_gb}GB free")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not clear GPU cache after HF subprocess: {e}")
+                
+        except subprocess.CalledProcessError as e:
+            error_output = e.stderr if e.stderr else e.stdout if hasattr(e, 'stdout') else "No error output captured"
+            is_oom = "out of memory" in error_output.lower() or "CUDA error: out of memory" in error_output
+            
+            if is_oom:
+                error_msg = (
+                    f"❌ HF scorer subprocess failed with CUDA out of memory\n"
+                    f"   Model: {model_name_or_path}\n"
+                    f"   \n"
+                    f"   Current settings:\n"
+                    f"   - max_tokens_per_batch: {max_tokens_per_batch}\n"
+                    f"   - max_len_per_batch: {max_len_per_batch}\n"
+                    f"   \n"
+                    f"   Error output:\n"
+                    f"   {error_output}\n"
+                    f"   \n"
+                    f"   Suggestions to fix:\n"
+                    f"   1. Lower max_tokens_per_batch (current: {max_tokens_per_batch}, try {max_tokens_per_batch // 2})\n"
+                    f"   2. Lower max_len_per_batch (current: {max_len_per_batch}, try {max_len_per_batch // 2})\n"
+                    f"   3. Free up GPU memory from other processes\n"
+                    f"   4. Disable path vectors if enabled\n"
+                )
+            else:
+                error_msg = (
+                    f"❌ HF scorer subprocess failed with exit code {e.returncode}\n"
+                    f"   Model: {model_name_or_path}\n"
+                    f"   \n"
+                    f"   Error output:\n"
+                    f"   {error_output}\n"
+                    f"   \n"
+                    f"   This may occur if:\n"
+                    f"   1. The model failed to load\n"
+                    f"   2. There are memory/GPU compatibility issues\n"
+                    f"   3. The model format is not supported\n"
+                )
+            print(error_msg)
+            raise RuntimeError(error_msg) from e
+        
+        with open(out_path, "r", encoding="utf-8") as f:
+            result_data = json.load(f)
+        
+        return (
+            result_data["hf_results_per_output"],
+            result_data.get("wrote_npz", False),
+            result_data.get("expert_prob_results", {}),
+        )
 
 
 def parse_args():
@@ -712,6 +934,13 @@ def parse_args():
                         help="Maximum steps to record for path vectors (0 or negative = unlimited, to limit memory)")
     parser.add_argument("--run_truncation_analysis_after_eval", action="store_true",
                         help="Run CoT truncation analysis immediately after evaluation")
+    # ECE evaluation arguments
+    parser.add_argument("--enable_ece", action="store_true",
+                        help="Run Expected Calibration Error (ECE) evaluation with N repeated runs.")
+    parser.add_argument("--ece_runs", type=int, default=10,
+                        help="Number of runs to perform when --enable_ece is set.")
+    parser.add_argument("--ece_summary_file", type=str, default=None,
+                        help="Optional explicit path for the aggregated ECE summary JSON file.")
     # Together API integration
     parser.add_argument("--use_together_api", action="store_true", help="Use Together API for generation instead of local models")
     parser.add_argument("--together_api_key", type=str, default=None, help="Together API key (or via TOGETHER_API_KEY env var)")
@@ -722,16 +951,31 @@ def parse_args():
                         help="Run vLLM Pass-1 in a subprocess so its VRAM is freed before Pass-2 HF scoring.")
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.9,
                         help="GPU memory utilization for VLLM (default: 0.9)")
+    parser.add_argument("--vllm_max_num_seqs", type=int, default=32,
+                        help="Maximum number of sequences to process in parallel for vLLM (default: 32, lower to reduce OOM risk)")
 
     args = parser.parse_args()
     args.top_p = (1 if args.temperature == 0 else args.top_p)  # top_p must be 1 when using greedy sampling (vllm)
     
-    # 🚀 AUTO-ENABLE SUBPROCESS MODE FOR PROBABILITY TRACKING
+    # 🚀 AUTO-ENABLE SUBPROCESS MODE FOR PROBABILITY TRACKING AND ECE EVALUATION
     # This automatically uses subprocess mode when probability tracking is enabled
     # to avoid memory conflicts between vLLM and HF scorer
+    # Also enable for ECE evaluation to avoid fork-related engine invalidation issues
+    should_auto_enable = False
+    reason = None
     if args.enable_prob_tracking and args.use_vllm and not getattr(args, "pass1_subprocess", False):
-        print("🔧 Auto-enabling subprocess mode for probability tracking to avoid memory conflicts")
+        should_auto_enable = True
+        reason = "probability tracking to avoid memory conflicts"
+    elif getattr(args, "enable_ece", False) and args.use_vllm and not getattr(args, "pass1_subprocess", False):
+        should_auto_enable = True
+        reason = "ECE evaluation to avoid fork-related engine invalidation"
+    
+    if should_auto_enable:
+        print(f"🔧 Auto-enabling subprocess mode for {reason}")
         args.pass1_subprocess = True
+    
+    if args.enable_ece and args.ece_runs < 1:
+        raise ValueError("--ece_runs must be >= 1 when --enable_ece is set.")
     
     return args
 
@@ -811,6 +1055,438 @@ def load_recorder_sidecar(output_dir, dataset, run_id, request_id):
         return None
 
 
+def generate_ece_run_job_id(base_job_id: str, run_index: int) -> str:
+    return f"{base_job_id}_run{run_index + 1:02d}"
+
+
+def derive_default_summary_path(args, base_job_id: str) -> str:
+    model_alias = args.model_name_or_path.split("/")[-1]
+    summary_dir = os.path.join(args.output_dir, model_alias)
+    os.makedirs(summary_dir, exist_ok=True)
+    return os.path.join(summary_dir, f"ece_summary_{base_job_id}.json")
+
+
+def load_run_predictions(run_file: Optional[str], data_name: str) -> Dict[int, Dict[str, Any]]:
+    """Load predictions from a run result JSONL file."""
+    records: Dict[int, Dict[str, Any]] = {}
+    if not run_file or not os.path.exists(run_file):
+        print(f"[ECE] Warning: run file missing or inaccessible: {run_file}")
+        return records
+    try:
+        for sample in load_jsonl(run_file):
+            idx = sample.get("idx")
+            if idx is None:
+                continue
+            question = sample.get("question", sample.get("problem", ""))
+            gold = sample.get("gt") or sample.get("answer") or sample.get("gt_ans")
+            preds = sample.get("pred", [])
+            if isinstance(preds, list) and preds:
+                raw_prediction = preds[-1]
+            elif isinstance(preds, str):
+                raw_prediction = preds
+            else:
+                raw_prediction = ""
+            extracted = extract_answer(raw_prediction or "", data_name)
+            records[idx] = {
+                "question": question,
+                "gold": gold,
+                "raw_answer": raw_prediction,
+                "extracted_answer": extracted,
+            }
+    except Exception as exc:
+        print(f"[ECE] Error reading run file {run_file}: {exc}")
+    return records
+
+
+def compute_ece_metric(confidences: List[float], correctness: List[int], num_bins: int = 10) -> float:
+    if not confidences:
+        return 0.0
+    bin_boundaries = [i / num_bins for i in range(num_bins + 1)]
+    total = len(confidences)
+    ece = 0.0
+    for bin_idx in range(num_bins):
+        lower = bin_boundaries[bin_idx]
+        upper = bin_boundaries[bin_idx + 1]
+        in_bin = [
+            (conf, corr)
+            for conf, corr in zip(confidences, correctness)
+            if conf >= lower and (conf < upper or (bin_idx == num_bins - 1 and conf <= upper))
+        ]
+        if not in_bin:
+            continue
+        avg_conf = sum(conf for conf, _ in in_bin) / len(in_bin)
+        avg_acc = sum(corr for _, corr in in_bin) / len(in_bin)
+        ece += (len(in_bin) / total) * abs(avg_conf - avg_acc)
+    return ece
+
+
+def build_ece_dataset_summary(data_name: str, run_files: List[Optional[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """
+    Build ECE dataset summary and per-question details.
+    Returns (summary_dict, per_question_list)
+    """
+    question_map: Dict[int, Dict[str, Any]] = {}
+    for run_file in run_files:
+        run_answers = load_run_predictions(run_file, data_name)
+        for idx, info in run_answers.items():
+            entry = question_map.setdefault(
+                idx,
+                {
+                    "question": info.get("question", ""),
+                    "gold": info.get("gold"),
+                    "answers": [],
+                },
+            )
+            entry["answers"].append(info.get("extracted_answer"))
+
+    per_question = []
+    confidences: List[float] = []
+    correctness: List[int] = []
+    for idx in sorted(question_map.keys()):
+        info = question_map[idx]
+        answers = [ans if ans is not None else "" for ans in info["answers"]]
+        if not answers:
+            continue
+        gold_text = str(info.get("gold") or "").strip()
+
+        # Calculate correctness for each answer
+        answer_correctness = []
+        for answer in answers:
+            try:
+                is_correct = compare_ans(answer, gold_text)
+            except Exception:
+                is_correct = answer == gold_text
+            answer_correctness.append(1 if is_correct else 0)
+
+        counter = Counter(answers)
+        majority_answer, count = counter.most_common(1)[0]
+        confidence = count / len(answers)
+        try:
+            is_correct = compare_ans(majority_answer, gold_text)
+        except Exception:
+            is_correct = majority_answer == gold_text
+        confidences.append(confidence)
+        correctness.append(1 if is_correct else 0)
+        per_question.append(
+            {
+                "idx": idx,
+                "question": info.get("question", ""),
+                "gold": info.get("gold"),
+                "answers": answers,
+                "answer_correctness": answer_correctness,
+                "majority_answer": majority_answer,
+                "confidence": confidence,
+                "correctness": 1 if is_correct else 0,
+                "answer_counts": dict(counter),
+            }
+        )
+
+    majority_accuracy = sum(correctness) / len(correctness) if correctness else 0.0
+    confidence_mean = sum(confidences) / len(confidences) if confidences else 0.0
+    ece_value = compute_ece_metric(confidences, correctness)
+
+    summary = {
+        "data_name": data_name,
+        "question_count": len(per_question),
+        "majority_accuracy": majority_accuracy,
+        "confidence_mean": confidence_mean,
+        "ece": ece_value,
+    }
+
+    return summary, per_question
+
+
+def merge_ece_sample_data(sample_idx: int, run_data_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Merge data for a single sample across multiple ECE runs by averaging probabilities.
+    """
+    if not run_data_list:
+        return {"idx": sample_idx}
+
+    def average_prob_sequences(sequences: List[List[float]]) -> List[float]:
+        if not sequences:
+            return []
+        if len(sequences) == 1:
+            return sequences[0]
+        max_len = max(len(seq) for seq in sequences)
+        averaged = []
+        for i in range(max_len):
+            values_at_i = [seq[i] for seq in sequences if i < len(seq)]
+            if values_at_i:
+                averaged.append(float(np.mean(values_at_i)))
+            else:
+                averaged.append(0.0)
+        return averaged
+
+    def average_prob_dicts(prob_dicts: List[Dict[str, List[float]]]) -> Dict[str, List[float]]:
+        if not prob_dicts:
+            return {}
+        all_keys = set()
+        for d in prob_dicts:
+            if d:
+                all_keys.update(d.keys())
+        result = {}
+        for key in all_keys:
+            sequences = [d.get(key, []) for d in prob_dicts if d and key in d]
+            if sequences:
+                result[key] = average_prob_sequences(sequences)
+        return result
+
+    merged = {"idx": sample_idx}
+    prob_logs = [sample.get("probability_log", {}) for sample in run_data_list]
+    if any(prob_logs):
+        merged["probability_log"] = average_prob_dicts(prob_logs)
+
+    chosen_probs = [sample.get("chosen_token_probs", {}) for sample in run_data_list]
+    if any(chosen_probs):
+        merged["chosen_token_probs"] = average_prob_dicts(chosen_probs)
+
+    entropies = [sample.get("entropies", {}) for sample in run_data_list]
+    if any(entropies):
+        merged["entropies"] = average_prob_dicts(entropies)
+
+    if "chosen_token_ids" in run_data_list[0]:
+        merged["chosen_token_ids"] = run_data_list[0]["chosen_token_ids"]
+    if "correct_token_ids" in run_data_list[0]:
+        merged["correct_token_ids"] = run_data_list[0]["correct_token_ids"]
+
+    em_steps = [sample.get("exact_match_steps", {}) for sample in run_data_list]
+    if any(em_steps):
+        all_keys = set()
+        for d in em_steps:
+            if d:
+                all_keys.update(d.keys())
+        result = {}
+        for key in all_keys:
+            values = [d.get(key, 0) for d in em_steps if d and key in d]
+            if values:
+                result[key] = int(np.mean(values))
+        merged["exact_match_steps"] = result
+
+    if "score" in run_data_list[0]:
+        merged["score"] = run_data_list[0]["score"]
+
+    answer_confs = [
+        sample.get("answer_confidence")
+        for sample in run_data_list
+        if sample.get("answer_confidence") is not None
+    ]
+    if answer_confs:
+        merged["answer_confidence"] = float(np.mean(answer_confs))
+
+    for field in ["answer_token_ids", "answer_token_indices", "answer_text", "model_path_vectors", "gold_path_vectors"]:
+        if field in run_data_list[0]:
+            merged[field] = run_data_list[0][field]
+
+    merged["_averaged_from_n_runs"] = len(run_data_list)
+    merged["_averaged"] = True
+    return merged
+
+
+def generate_averaged_prob_file(prob_files: List[str], output_path: str) -> bool:
+    """
+    Generate averaged probability file from multiple ECE run probability files.
+    """
+    if not prob_files:
+        print("[ECE] No probability files to average")
+        return False
+
+    print(f"[ECE] Averaging {len(prob_files)} probability files...")
+    try:
+        all_run_data = []
+        for prob_file in prob_files:
+            if not prob_file or not os.path.exists(prob_file):
+                print(f"[ECE] Warning: Probability file not found: {prob_file}")
+                continue
+            data = []
+            with open(prob_file, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        data.append(json.loads(line))
+            all_run_data.append(data)
+
+        if not all_run_data:
+            print("[ECE] No valid probability data found")
+            return False
+
+        sample_indices = set()
+        for run_data in all_run_data:
+            sample_indices.update(sample.get("idx") for sample in run_data if sample.get("idx") is not None)
+        sample_indices = sorted(sample_indices)
+
+        averaged_data = []
+        for idx in sample_indices:
+            sample_data_across_runs = []
+            for run_data in all_run_data:
+                sample = next((s for s in run_data if s.get("idx") == idx), None)
+                if sample:
+                    sample_data_across_runs.append(sample)
+            if sample_data_across_runs:
+                averaged_data.append(merge_ece_sample_data(idx, sample_data_across_runs))
+
+        with open(output_path, "w") as f:
+            for item in averaged_data:
+                f.write(json.dumps(item) + "\n")
+
+        print(f"[ECE] Created averaged probability file: {output_path}")
+        print(f"[ECE] Averaged {len(averaged_data)} samples from {len(prob_files)} runs")
+        return True
+    except Exception as e:
+        print(f"[ECE] Failed to create averaged probability file: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def run_ece_evaluation(llm, tokenizer, data_list: List[str], args):
+    print(f"\n{'='*60}\n🔁 Running ECE evaluation with {args.ece_runs} runs\n{'='*60}")
+    base_job_id = getattr(args, "job_id", None)
+    if not base_job_id:
+        base_job_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+        args.job_id = base_job_id
+
+    summary_payload = {
+        "job_id": base_job_id,
+        "model": args.model_name_or_path,
+        "ece_runs": args.ece_runs,
+        "created_at": datetime.now().isoformat(),
+        "datasets": {},
+        "job_configuration": {
+            "model": args.model_name_or_path,
+            "datasets": data_list,
+            "prompt_type": args.prompt_type,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+            "seed": args.seed,
+            "n_sampling": args.n_sampling,
+            "max_tokens": args.max_tokens_per_call,
+            "eval_method": args.eval_method,
+            "enable_prob_tracking": bool(getattr(args, "enable_prob_tracking", False)),
+            "enable_ece": True,
+            "ece_runs": args.ece_runs,
+        },
+    }
+
+    summary_path = args.ece_summary_file or derive_default_summary_path(args, base_job_id)
+    os.makedirs(os.path.dirname(summary_path), exist_ok=True)
+
+    for data_name in data_list:
+        print(f"\n[ECE] Dataset: {data_name}")
+        dataset_time_start = time.time()
+        run_files: List[Optional[str]] = []
+        run_prob_files: List[Optional[str]] = []
+        run_metrics_files: List[Optional[str]] = []
+        run_accuracies: List[float] = []
+        run_ids: List[str] = []
+        first_run_metrics = None
+
+        for run_idx in range(args.ece_runs):
+            run_args = copy.deepcopy(args)
+            run_args.enable_ece = False
+            run_args.ece_summary_file = None
+            run_args.data_names = data_name
+            run_args.job_id = generate_ece_run_job_id(base_job_id, run_idx)
+            run_args.overwrite = True
+            run_args.is_ece_run = True
+            result_json = main(llm, tokenizer, data_name, run_args)
+            run_files.append(result_json.get("result_file"))
+            run_prob_files.append(result_json.get("prob_file"))
+            run_metrics_files.append(result_json.get("metrics_file"))
+            run_accuracies.append(result_json.get("acc"))
+            run_ids.append(run_args.job_id)
+            if run_idx == 0:
+                first_run_metrics = result_json
+            print(f"[ECE] Completed run {run_idx + 1}/{args.ece_runs} for {data_name} | accuracy={result_json.get('acc', 0):.2f}")
+
+            if run_idx < args.ece_runs - 1:
+                print(f"[ECE] Performing aggressive GPU memory cleanup before next run...")
+                flush_cuda_cache()
+
+        dataset_summary, per_question_details = build_ece_dataset_summary(data_name, run_files)
+        dataset_time = time.time() - dataset_time_start
+        dataset_time_minutes = f"{int(dataset_time // 60)}:{int(dataset_time % 60):02d}"
+
+        ece_metrics = {
+            "num_samples": first_run_metrics.get("num_samples", 0) if first_run_metrics else 0,
+            "num_scores": first_run_metrics.get("num_scores", 0) if first_run_metrics else 0,
+            "timeout_samples": first_run_metrics.get("timeout_samples", 0) if first_run_metrics else 0,
+            "empty_samples": first_run_metrics.get("empty_samples", 0) if first_run_metrics else 0,
+            "acc": run_accuracies,
+            "is_ece_eval": True,
+            "ece_runs": args.ece_runs,
+            "majority_acc": round(dataset_summary["majority_accuracy"], 4),
+            "ece": round(dataset_summary["ece"], 4),
+            "eval_method": "ece",
+            "k": args.ece_runs,
+            "time_use_in_second": round(dataset_time, 2),
+            "time_use_in_minite": dataset_time_minutes,
+            "job_configuration": {
+                "model": args.model_name_or_path,
+                "dataset": data_name,
+                "prompt_type": args.prompt_type,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "top_k": args.top_k,
+                "seed": args.seed,
+                "n_sampling": args.n_sampling,
+                "max_tokens": args.max_tokens_per_call,
+                "eval_method": args.eval_method,
+                "k": args.n_sampling,
+                "run_id": base_job_id,
+                "enable_prob_tracking": bool(getattr(args, "enable_prob_tracking", False)),
+            },
+        }
+
+        metrics_file_path = summary_path.replace("_ece_summary.json", f"_{args.prompt_type}_metrics.json")
+        os.makedirs(os.path.dirname(metrics_file_path), exist_ok=True)
+        with open(metrics_file_path, "w") as f:
+            json.dump(ece_metrics, f, indent=4)
+
+        details_file_path = summary_path.replace("_ece_summary.json", "_details.jsonl")
+        with open(details_file_path, "w") as f:
+            for question_data in per_question_details:
+                f.write(json.dumps(question_data) + "\n")
+
+        dataset_summary["per_run_accuracy"] = run_accuracies
+        dataset_summary["runs"] = []
+        for idx, result_path in enumerate(run_files):
+            dataset_summary["runs"].append(
+                {
+                    "run_index": idx + 1,
+                    "run_id": run_ids[idx],
+                    "accuracy": run_accuracies[idx],
+                    "result_file": result_path,
+                    "metrics_file": run_metrics_files[idx],
+                    "prob_file": run_prob_files[idx],
+                }
+            )
+        dataset_summary["metrics_file"] = metrics_file_path
+        dataset_summary["details_file"] = details_file_path
+
+        if args.enable_prob_tracking and run_prob_files:
+            valid_prob_files = [pf for pf in run_prob_files if pf and os.path.exists(pf)]
+            if valid_prob_files:
+                base_path = valid_prob_files[0].replace("_run01_", "_")
+                if f"_{args.prompt_type}_prob.jsonl" in base_path:
+                    base_path = base_path.replace(f"_{args.prompt_type}_prob.jsonl", "")
+                averaged_prob_file = f"{base_path}_{args.prompt_type}_averaged_prob.jsonl"
+                success = generate_averaged_prob_file(valid_prob_files, averaged_prob_file)
+                if success:
+                    dataset_summary["averaged_prob_file"] = averaged_prob_file
+                    print(f"[ECE] Averaged probability file: {averaged_prob_file}")
+
+        summary_payload["datasets"][data_name] = dataset_summary
+        print(f"[ECE] {data_name}: majority accuracy={dataset_summary['majority_accuracy']*100:.2f}% | ECE={dataset_summary['ece']:.4f}")
+        print(f"[ECE] Metrics file: {metrics_file_path}")
+        print(f"[ECE] Details file: {details_file_path}")
+
+    summary_payload["summary_file"] = summary_path
+    summary_payload["metrics_file"] = summary_path.replace("_ece_summary.json", f"_{args.prompt_type}_metrics.json")
+    with open(summary_path, "w") as f:
+        json.dump(summary_payload, f, indent=2)
+    print(f"\n[ECE] Summary written to {summary_path}\n")
 
 def setup(args):
     # load model
@@ -860,22 +1536,112 @@ def setup(args):
             # In-process vLLM (original behavior)
             print(f"🚀 Loading vLLM model: {args.model_name_or_path}")
             
-            # Limit max_model_len to 8192 to reduce KV cache memory requirements
-            # Most math problems are much shorter than this, so this is a safe limit
-            max_model_len = getattr(args, 'max_model_len', 8192)
+            # Get user's desired max_model_len (default 8192)
+            user_max_model_len = getattr(args, 'max_model_len', 4096)
             
-            llm = LLM(
-                model=args.model_name_or_path,
-                tensor_parallel_size=len(available_gpus) // args.pipeline_parallel_size,
-                pipeline_parallel_size=args.pipeline_parallel_size,
-                trust_remote_code=True,
-                gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-                max_model_len=max_model_len,  # Limit context length
-                max_num_seqs=64,
-            )
-            print(f"✅ vLLM model loaded successfully with max_model_len={max_model_len}!")
-            # <<< NEW: Print memory after loading vLLM
-            print_gpu_memory_usage("Stage 2: After Loading Model with vLLM")
+            # Check model's actual architectural limit
+            try:
+                print("🔧 Checking model's config for max_position_embeddings...")
+                config = AutoConfig.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+                model_max_len = getattr(config, "max_position_embeddings", None)
+                if model_max_len is None:
+                    # Some models use model_max_length instead
+                    model_max_len = getattr(config, "model_max_length", None)
+                
+                if model_max_len:
+                    print(f"✅ Model's architectural limit: {model_max_len}")
+                    # Use the smaller of user's desired value and model's limit
+                    max_model_len = min(user_max_model_len, model_max_len)
+                    if max_model_len < user_max_model_len:
+                        print(f"⚠️  Warning: Requested max_model_len={user_max_model_len} exceeds model's limit={model_max_len}. Using {max_model_len} instead.")
+                else:
+                    print(f"⚠️  Warning: Could not determine model's max_position_embeddings. Using requested value: {user_max_model_len}")
+                    max_model_len = user_max_model_len
+            except Exception as e:
+                print(f"⚠️  Warning: Could not check model config. Using requested value: {user_max_model_len}. Error: {e}")
+                max_model_len = user_max_model_len
+            
+            print(f"🎯 Using max_model_len={max_model_len} for vLLM")
+            
+            # Get max_num_seqs from args or use a safer default
+            max_num_seqs = getattr(args, 'vllm_max_num_seqs', 32)  # Lower default to reduce OOM risk
+            
+            # Try to initialize vLLM with error handling
+            try:
+                llm = LLM(
+                    model=args.model_name_or_path,
+                    tensor_parallel_size=len(available_gpus) // args.pipeline_parallel_size,
+                    pipeline_parallel_size=args.pipeline_parallel_size,
+                    trust_remote_code=True,
+                    gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+                    max_model_len=max_model_len,  # Limit context length
+                    max_num_seqs=max_num_seqs,
+                )
+                
+                # CRITICAL: Verify LLM is properly initialized immediately after creation
+                # Check both attribute existence and that it's not None
+                has_llm_engine = hasattr(llm, 'llm_engine')
+                llm_engine_value = getattr(llm, 'llm_engine', None) if has_llm_engine else None
+                has_run_engine = hasattr(llm, '_run_engine')
+                run_engine_value = getattr(llm, '_run_engine', None) if has_run_engine else None
+                
+                # Check if either engine exists and is not None
+                engine_valid = (has_llm_engine and llm_engine_value is not None) or (has_run_engine and run_engine_value is not None)
+                
+                if not engine_valid:
+                    # Try to get more diagnostic info
+                    llm_attrs = [attr for attr in dir(llm) if not attr.startswith('__')]
+                    raise RuntimeError(
+                        f"vLLM LLM object failed to initialize properly - missing or None engine attribute.\n"
+                        f"   hasattr(llm, 'llm_engine'): {has_llm_engine}\n"
+                        f"   llm.llm_engine value: {llm_engine_value}\n"
+                        f"   hasattr(llm, '_run_engine'): {has_run_engine}\n"
+                        f"   llm._run_engine value: {run_engine_value}\n"
+                        f"   This usually means the LLM initialization completed but the engine wasn't properly set up.\n"
+                        f"   The LLM object may be in an invalid state. Check error logs above for initialization errors."
+                    )
+                
+                # Try to verify the engine is accessible by checking model_config
+                # This is the actual check that vLLM's generate() method will do
+                try:
+                    if has_llm_engine and llm_engine_value is not None:
+                        # This is what vLLM's generate() method does - access llm_engine.model_config
+                        _ = llm.llm_engine.model_config
+                        print(f"✅ Verified llm_engine.model_config is accessible")
+                    elif has_run_engine and run_engine_value is not None:
+                        # For _run_engine version, just verify it's accessible
+                        _ = llm._run_engine
+                        print(f"✅ Verified _run_engine is accessible")
+                except AttributeError as e:
+                    raise RuntimeError(
+                        f"vLLM LLM engine exists but is not accessible: {str(e)}\n"
+                        f"   This is the same error that will occur when calling llm.generate().\n"
+                        f"   The LLM object is in an invalid state. This can happen if:\n"
+                        f"   1. The initialization completed but the engine wasn't fully set up\n"
+                        f"   2. There was an error during engine initialization that was silently ignored\n"
+                        f"   3. vLLM version incompatibility\n"
+                        f"   Check the error logs above for initialization errors."
+                    ) from e
+                
+                print(f"✅ vLLM model loaded successfully with max_model_len={max_model_len}, max_num_seqs={max_num_seqs}!")
+                # <<< NEW: Print memory after loading vLLM
+                print_gpu_memory_usage("Stage 2: After Loading Model with vLLM")
+            except RuntimeError as e:
+                if "CUDA out of memory" in str(e) or "out of memory" in str(e).lower():
+                    error_msg = (
+                        f"❌ CUDA out of memory when initializing vLLM model '{args.model_name_or_path}':\n"
+                        f"   {str(e)}\n"
+                        f"   \n"
+                        f"   Suggestions to fix:\n"
+                        f"   1. Lower --vllm_gpu_memory_utilization (current: {args.vllm_gpu_memory_utilization}, try 0.7 or 0.6)\n"
+                        f"   2. Lower max_model_len (current: {max_model_len}, try {max_model_len // 2})\n"
+                        f"   3. Use --pass1_subprocess to free VRAM between passes\n"
+                        f"   4. Reduce max_num_seqs (current: {max_num_seqs}, try {max_num_seqs // 2})"
+                    )
+                    print(error_msg)
+                    raise ValueError(error_msg) from e
+                else:
+                    raise
 
 
         # Load an HF scorer if probability tracking is enabled
@@ -921,23 +1687,27 @@ def setup(args):
 
     # infer & eval
     data_list = args.data_names.split(",")
-    results = []
-    for data_name in data_list:
-        results.append(main(llm, tokenizer, data_name, args))
 
-    # add "avg" result to data_list and results
-    data_list.append("avg")
-    results.append(
-        {
-            "acc": sum([result["acc"] for result in results]) / len(results),
-        }
-    )
+    if getattr(args, "enable_ece", False):
+        run_ece_evaluation(llm, tokenizer, data_list, args)
+    else:
+        results = []
+        for data_name in data_list:
+            results.append(main(llm, tokenizer, data_name, args))
 
-    # print all results
-    pad = max([len(data_name) for data_name in data_list])
-    print("\t".join(data_name.ljust(pad, " ") for data_name in data_list))
-    print("\t".join([f"{result['acc']:.1f}".ljust(pad, " ") for result in results]))
-    
+        # add "avg" result to data_list and results
+        data_list.append("avg")
+        results.append(
+            {
+                "acc": sum([result["acc"] for result in results]) / len(results),
+            }
+        )
+
+        # print all results
+        pad = max([len(data_name) for data_name in data_list])
+        print("\t".join(data_name.ljust(pad, " ") for data_name in data_list))
+        print("\t".join([f"{result['acc']:.1f}".ljust(pad, " ") for result in results]))
+
     # 🧹 COMPREHENSIVE GPU MEMORY CLEANUP
     print("\n" + "="*60)
     print("🎯 EVALUATION COMPLETED - STARTING FINAL GPU MEMORY CLEANUP")
@@ -1003,6 +1773,52 @@ def cleanup_gpu_memory(llm=None, hf_scorer=None):
     
     # <<< NEW: Use our helper to show memory AFTER cleanup
     print_gpu_memory_usage("Memory State After Cleanup")
+
+
+def cleanup_hf_scorer_model(hf_model, tokenizer=None):
+    """
+    Ensure HF scorer model fully releases GPU memory between runs.
+    """
+    if hf_model is None:
+        return
+    print("🧹 Cleaning up HF scorer resources...")
+    try:
+        if torch.cuda.is_available():
+            device_type = next(hf_model.parameters()).device.type
+        else:
+            device_type = "cpu"
+
+        if device_type == "cuda":
+            hf_model.to("cpu")
+            print("[Cleanup] Moved HF scorer to CPU before deletion")
+
+        for param in hf_model.parameters():
+            if param.grad is not None:
+                param.grad = None
+        hf_model.zero_grad(set_to_none=True)
+        del hf_model
+    except Exception as e:
+        print(f"⚠️ Warning during HF scorer cleanup: {e}")
+    finally:
+        if tokenizer is not None:
+            try:
+                del tokenizer
+            except Exception:
+                pass
+        for _ in range(3):
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+
+
+def flush_cuda_cache():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
 
 def is_multi_choice(answer):
@@ -1214,7 +2030,83 @@ def main(llm, tokenizer, data_name, args):
                     )
                     sampling_params_list.append(sp)
 
-                current_vllm_outputs = llm.generate(prompts, sampling_params_list)
+                # Verify LLM is properly initialized before generating
+                if isinstance(llm, str):
+                    raise RuntimeError(f"LLM object is a string '{llm}' instead of an LLM instance. This should not happen.")
+                if not hasattr(llm, 'generate'):
+                    raise RuntimeError("LLM object does not have 'generate' method. LLM may not be properly initialized.")
+                
+                # Check if LLM has required engine attribute (vLLM version compatibility)
+                # Check both existence and that it's not None - do this RIGHT before generate call
+                # as the engine might become invalid between batches (e.g., after forking)
+                has_llm_engine = hasattr(llm, 'llm_engine') and getattr(llm, 'llm_engine', None) is not None
+                has_run_engine = hasattr(llm, '_run_engine') and getattr(llm, '_run_engine', None) is not None
+                
+                if not has_llm_engine and not has_run_engine:
+                    # Get diagnostic info
+                    llm_attrs = [attr for attr in dir(llm) if not attr.startswith('__') and 'engine' in attr.lower()]
+                    raise RuntimeError(
+                        "LLM object is missing engine attribute or engine is None. This usually means:\n"
+                        "1. The LLM failed to initialize properly\n"
+                        "2. There was a CUDA OOM during initialization\n"
+                        "3. vLLM version mismatch. Check error logs above for details.\n"
+                        "4. The engine was lost after process forking (check for 'forked after parallelism' warnings)\n"
+                        f"   hasattr(llm, 'llm_engine'): {hasattr(llm, 'llm_engine')}\n"
+                        f"   hasattr(llm, '_run_engine'): {hasattr(llm, '_run_engine')}\n"
+                        f"   Engine-related attributes: {llm_attrs}"
+                    )
+                
+                # Try to verify the engine is accessible before calling generate
+                # This mimics what vLLM's generate() method does internally
+                try:
+                    if has_llm_engine:
+                        # Try to access model_config to verify engine is fully initialized
+                        # This is exactly what vLLM's generate() does at line 377
+                        _ = llm.llm_engine.model_config
+                    elif has_run_engine:
+                        # For _run_engine version, just verify it's accessible
+                        _ = llm._run_engine
+                except AttributeError as e:
+                    # Get more diagnostic info
+                    llm_engine_val = getattr(llm, 'llm_engine', 'NOT_FOUND')
+                    run_engine_val = getattr(llm, '_run_engine', 'NOT_FOUND')
+                    raise RuntimeError(
+                        f"vLLM LLM engine exists but is not accessible: {str(e)}\n"
+                        "The LLM object may be in an invalid state. This can happen if:\n"
+                        "1. The initialization completed but the engine wasn't fully set up\n"
+                        "2. There was an error during engine initialization that was silently ignored\n"
+                        "3. vLLM version incompatibility\n"
+                        "4. The engine was lost after process forking (check for 'forked after parallelism' warnings)\n"
+                        f"   llm.llm_engine: {llm_engine_val}\n"
+                        f"   llm._run_engine: {run_engine_val}\n"
+                        "Check the error logs above for initialization errors."
+                    ) from e
+                
+                try:
+                    current_vllm_outputs = llm.generate(prompts, sampling_params_list)
+                except AttributeError as e:
+                    if 'llm_engine' in str(e) or '_run_engine' in str(e):
+                        # Get diagnostic info about the current state
+                        has_llm_engine_now = hasattr(llm, 'llm_engine')
+                        has_run_engine_now = hasattr(llm, '_run_engine')
+                        llm_engine_val_now = getattr(llm, 'llm_engine', 'NOT_FOUND') if has_llm_engine_now else 'NOT_FOUND'
+                        run_engine_val_now = getattr(llm, '_run_engine', 'NOT_FOUND') if has_run_engine_now else 'NOT_FOUND'
+                        
+                        raise RuntimeError(
+                            f"vLLM LLM object is not properly initialized: {str(e)}\n"
+                            "This usually happens when:\n"
+                            "1. The LLM initialization failed silently\n"
+                            "2. There was a CUDA OOM during initialization\n"
+                            "3. The model failed to load properly\n"
+                            "4. vLLM version mismatch - the engine attribute name changed\n"
+                            "5. The engine was lost after process forking (check for 'forked after parallelism' warnings)\n"
+                            f"   Current state - hasattr(llm, 'llm_engine'): {has_llm_engine_now}\n"
+                            f"   Current state - hasattr(llm, '_run_engine'): {has_run_engine_now}\n"
+                            f"   Current state - llm.llm_engine: {llm_engine_val_now}\n"
+                            f"   Current state - llm._run_engine: {run_engine_val_now}\n"
+                            "Check the error logs above for the root cause."
+                        ) from e
+                    raise
 
                 for prompt_idx, out in enumerate(current_vllm_outputs):
                     original_idx = current_prompts[prompt_idx][0]
@@ -1371,123 +2263,60 @@ def main(llm, tokenizer, data_name, args):
         print("✅ vLLM MEMORY CLEANUP COMPLETED - READY FOR HF SCORING")
         print("="*60)
 
-    # === PASS 2: HF scoring (microbatched & OOM-safe) ===
+    # === PASS 2: HF scoring in subprocess (ensures memory is fully freed) ===
     hf_results_per_output = None
     expert_prob_results = {}
+    wrote_npz = False
     if args.enable_prob_tracking and args.use_vllm:
-        if args.enable_prob_tracking and args.use_vllm:
-            print("\n" + "="*60)
-            print("🚀 Loading Hugging Face scorer model for Pass 2...")
-            print("="*60)
-            hf_model = None
-            try:
-                if torch.cuda.is_available() and torch.cuda.mem_get_info()[0] / (1024**3) >= 4.0:
-                    device_map = {"": 0}
-                    print("Loading HF scorer on GPU...")
-                    hf_model = AutoModelForCausalLM.from_pretrained(
-                        args.model_name_or_path,
-                        torch_dtype=torch.bfloat16,
-                        device_map=device_map,
-                        trust_remote_code=True,
-                    ).eval()
-                    print_gpu_memory_usage("Stage 4: After Loading HF Scorer Model (on GPU)")
-                else:
-                    raise RuntimeError("Insufficient GPU memory for HF scorer")
-            except ImportError as e:
-                error_msg = str(e)
-                if "pytest" in error_msg.lower() or "requires the following packages" in error_msg:
-                    print(f"\n❌ ERROR: Failed to load HF scorer model '{args.model_name_or_path}':")
-                    print(f"   The model requires additional dependencies that are not installed.")
-                    print(f"   \n   Error: {error_msg}\n")
-                    print(f"   To fix this, install the missing package(s) with:")
-                    if "pytest" in error_msg.lower():
-                        print(f"   pip install pytest")
-                    print(f"   \n   Or disable probability tracking for this job.")
-                    print(f"   \n   Skipping probability tracking and continuing with evaluation...")
-                    hf_model = None
-                else:
-                    raise
-            except ValueError as e:
-                error_msg = str(e)
-                # Check if it's a PyTorch version requirement error
-                if "torch.load" in error_msg and ("torch to at least v2.6" in error_msg or "CVE-2025-32434" in error_msg):
-                    print(f"\n❌ ERROR: Failed to load HF scorer model '{args.model_name_or_path}':")
-                    print(f"   The model uses PyTorch format (.pt/.bin files) which requires PyTorch >= 2.6")
-                    print(f"   due to security vulnerability (CVE-2025-32434).")
-                    print(f"   \n   Current PyTorch version: {torch.__version__}")
-                    print(f"   Required: PyTorch >= 2.6")
-                    print(f"   \n   Error: {error_msg}\n")
-                    print(f"   Solutions:")
-                    print(f"   1. Upgrade PyTorch: pip install --upgrade torch")
-                    print(f"   2. Use a model with safetensors format (this restriction doesn't apply)")
-                    print(f"   3. Continue without probability tracking (not critical)\n")
-                    print(f"   Skipping probability tracking and continuing with evaluation...")
-                    hf_model = None
-                else:
-                    raise
-            except Exception as e:
-                error_msg = str(e)
-                # Check if it's a missing dependency error
-                if "requires the following packages" in error_msg or "No module named" in error_msg:
-                    print(f"\n❌ ERROR: Failed to load HF scorer model '{args.model_name_or_path}':")
-                    print(f"   The model requires additional dependencies that are not installed.")
-                    print(f"   \n   Error: {error_msg}\n")
-                    print(f"   To fix this, install the missing package(s) as suggested above.")
-                    print(f"   \n   Skipping probability tracking and continuing with evaluation...")
-                    hf_model = None
-                else:
-                    # For other errors, try CPU fallback
-                    print(f"WARNING: failed to load HF scorer on CUDA; falling back to CPU. Error: {e}")
-                    try:
-                        hf_model = AutoModelForCausalLM.from_pretrained(
-                            args.model_name_or_path,
-                            torch_dtype=torch.float32,
-                            device_map={"": "cpu"},
-                            trust_remote_code=True,
-                        ).eval()
-                    except ValueError as value_e:
-                        value_error_msg = str(value_e)
-                        if "torch.load" in value_error_msg and ("torch to at least v2.6" in value_error_msg or "CVE-2025-32434" in value_error_msg):
-                            print(f"\n❌ ERROR: Failed to load HF scorer model on CPU as well:")
-                            print(f"   PyTorch version requirement not met (requires >= 2.6, current: {torch.__version__})")
-                            print(f"   \n   Error: {value_error_msg}\n")
-                            print(f"   Skipping probability tracking and continuing with evaluation...")
-                            hf_model = None
-                        else:
-                            raise
-                    except ImportError as import_e:
-                        import_error_msg = str(import_e)
-                        if "pytest" in import_error_msg.lower() or "requires the following packages" in import_error_msg:
-                            print(f"\n❌ ERROR: Failed to load HF scorer model on CPU as well:")
-                            print(f"   The model requires additional dependencies that are not installed.")
-                            print(f"   \n   Error: {import_error_msg}\n")
-                            print(f"   To fix this, install the missing package(s) (e.g., pip install pytest)")
-                            print(f"   \n   Skipping probability tracking and continuing with evaluation...")
-                            hf_model = None
-                        else:
-                            raise
-        if hf_model is None:
-            print("WARNING: enable_prob_tracking requested but HF scorer unavailable; skipping prob tracking.")
-        else:
-            # Tune this up/down based on GPU VRAM. Safe defaults:
-            SCORING_MAX_TOKENS = 2048      # e.g., 2k (try 4096/8192 if you have headroom)
-            MAX_LEN_PER_BATCH  = 1024      # cap long outliers (optional)
-            print("Starting HF scoring with max tokens:", SCORING_MAX_TOKENS)
-            hf_results_per_output, wrote_npz, expert_prob_results = run_hf_scoring_streaming(
-                hf_model=hf_model,
+        print("\n" + "="*60)
+        print("🚀 Starting HF scorer subprocess for Pass 2...")
+        print("="*60)
+        
+        # Tune this up/down based on GPU VRAM. Safe defaults:
+        SCORING_MAX_TOKENS = 2048      # e.g., 2k (try 4096/8192 if you have headroom)
+        MAX_LEN_PER_BATCH  = 1024      # cap long outliers (optional)
+        print("Starting HF scoring with max tokens:", SCORING_MAX_TOKENS)
+        
+        try:
+            hf_results_per_output, wrote_npz, expert_prob_results = run_pass2_in_subprocess(
+                model_name_or_path=args.model_name_or_path,
                 vllm_outputs=vllm_outputs,
                 samples=samples,              # each has "gt"
-                tokenizer=tokenizer,
                 n_sampling=args.n_sampling,
                 enable_path_vectors=bool(args.enable_path_vectors),
                 path_vectors_npz=path_vectors_npz,
                 max_tokens_per_batch=SCORING_MAX_TOKENS,
                 max_len_per_batch=MAX_LEN_PER_BATCH,
-                show_progress=True,
-                progress_label=f"Pass2 Scoring [{data_name}]",
-                log_monitor_json=True,
-                vram_guard_gb=2.0,            # CPU-fallback a batch when free VRAM < 2 GB
+                args=args,
             )
+            print("✅ HF scoring completed successfully")
+        except Exception as e:
+            error_msg = str(e)
+            # Check for common errors and provide helpful messages
+            if "torch.load" in error_msg and ("torch to at least v2.6" in error_msg or "CVE-2025-32434" in error_msg):
+                print(f"\n❌ ERROR: HF scorer subprocess failed:")
+                print(f"   PyTorch version requirement not met (requires >= 2.6, current: {torch.__version__})")
+                print(f"   \n   Error: {error_msg}\n")
+                print(f"   Solutions:")
+                print(f"   1. Upgrade PyTorch: pip install --upgrade torch")
+                print(f"   2. Use a model with safetensors format")
+                print(f"   3. Continue without probability tracking (not critical)\n")
+                print(f"   Skipping probability tracking and continuing with evaluation...")
+            elif "requires the following packages" in error_msg or "No module named" in error_msg or "pytest" in error_msg.lower():
+                print(f"\n❌ ERROR: HF scorer subprocess failed:")
+                print(f"   The model requires additional dependencies that are not installed.")
+                print(f"   \n   Error: {error_msg}\n")
+                print(f"   To fix this, install the missing package(s) (e.g., pip install pytest)")
+                print(f"   \n   Skipping probability tracking and continuing with evaluation...")
+            else:
+                print(f"\n❌ ERROR: HF scorer subprocess failed:")
+                print(f"   {error_msg}\n")
+                print(f"   Skipping probability tracking and continuing with evaluation...")
+            
+            # Continue without probability tracking
+            hf_results_per_output = None
+            expert_prob_results = {}
+            wrote_npz = False
 
     # put results back to examples
     all_samples = []
@@ -1661,6 +2490,7 @@ def main(llm, tokenizer, data_name, args):
             print(f"Truncation analysis failed: {_e}")
 
     # save outputs
+    prob_only_file = None
     if len(processed_samples) < len(all_samples) and args.save_outputs:
         save_jsonl(all_samples, out_file)
 
@@ -1763,6 +2593,15 @@ def main(llm, tokenizer, data_name, args):
     metrics_file = out_file.replace(".jsonl", f"_{args.prompt_type}_metrics.json")
     with open(metrics_file, "w") as f:
         json.dump(result_json, f, indent=4)
+
+    result_json["result_file"] = out_file
+    result_json["metrics_file"] = metrics_file
+    if getattr(args, 'enable_prob_tracking', False) or (
+        getattr(args, 'use_together_api', False) and getattr(args, 'together_logprobs', 0) and args.together_logprobs > 0
+    ):
+        result_json["prob_file"] = prob_only_file
+    else:
+        result_json["prob_file"] = None
     
     return result_json
 

@@ -20,15 +20,24 @@ def load_data(data_name, split, data_dir="./data"):
             hf_dataset_identifier = f"{dataset_org}/{dataset_name}"
             # Create a sanitized directory name from the URL
             data_name_sanitized = data_name.replace("https://", "").replace("http://", "").replace("/", "_")
+    elif "/" in data_name and not os.path.exists(data_name) and not data_name.startswith("http"):
+        # Check if data_name is a direct HuggingFace dataset identifier (format: org/dataset_name)
+        # This handles cases like "HuggingFaceH4/MATH-500"
+        # Exclude file paths and URLs
+        parts = data_name.split("/")
+        if len(parts) == 2 and not os.path.isabs(data_name):
+            # Likely a HuggingFace dataset identifier
+            hf_dataset_identifier = data_name
+            data_name_sanitized = data_name.replace("/", "_")
     
-    # Use sanitized name if it's a URL, otherwise use original data_name
+    # Use sanitized name if it's a URL or HF identifier, otherwise use original data_name
     data_name_dir = data_name_sanitized if hf_dataset_identifier else data_name
     data_file = f"{data_dir}/{data_name_dir}/{split}.jsonl"
     
     if os.path.exists(data_file):
         examples = list(load_jsonl(data_file))
     else:
-        # Check if data_name is a HuggingFace dataset URL
+        # Check if data_name is a HuggingFace dataset URL or identifier
         if hf_dataset_identifier:
                 
                 # Try to load the dataset with the specified split
