@@ -113,6 +113,16 @@ def load_data(data_name, split, data_dir="./data"):
             dataset = dataset.filter(lambda x: x["type"] in stem_subjects)
         elif data_name == "carp_en":
             dataset = load_jsonl(f"{data_dir}/carp_en/test.jsonl")
+        elif data_name == "humaneval":
+            # Load HumanEval from local JSONL file or HuggingFace
+            try:
+                dataset = load_dataset("openai/openai_humaneval", split=split)
+            except Exception as e:
+                # Fallback to local file if HuggingFace load fails
+                print(f"Warning: Could not load HumanEval from HuggingFace: {e}")
+                print(f"Attempting to load from local file...")
+                examples = list(load_jsonl(f"{data_dir}/humaneval/{split}.jsonl"))
+                dataset = Dataset.from_list(examples)
         else:
             raise NotImplementedError(data_name)
 

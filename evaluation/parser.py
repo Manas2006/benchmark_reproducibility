@@ -505,6 +505,204 @@ def extract_answer(pred_str, data_name, use_last_number=True):
         effective_data_name = data_name
     
     pred_str = pred_str.replace("\u043a\u0438", "")
+    if effective_data_name in ["arc_challenge", "arc_easy", "arc"]:
+        # ARC: Extract multiple choice answer (A-E format, or 1-4 numeric format)
+        # Some questions have up to 5 options (A-E), though most have A-D
+        # Look for parenthesized letters first: (A), (B), etc.
+        mc_parentheses = re.findall(r"\(([A-E])\)", pred_str, re.IGNORECASE)
+        if mc_parentheses:
+            return mc_parentheses[-1].upper()  # Return as "A", not "(A)"
+        
+        # Look for standalone letters A-E (word boundaries)
+        mc_standalone = re.findall(r"\b([A-E])\b", pred_str, re.IGNORECASE)
+        if mc_standalone:
+            return mc_standalone[-1].upper()  # Return as "A", not "(A)"
+        
+        # Also handle numeric format (1-4) - some ARC questions use numbers
+        # Look for parenthesized numbers: (1), (2), etc.
+        mc_num_parentheses = re.findall(r"\(([1-4])\)", pred_str)
+        if mc_num_parentheses:
+            return mc_num_parentheses[-1]  # Return as "1", "2", etc.
+        
+        # Look for standalone numbers 1-4 (word boundaries)
+        mc_num_standalone = re.findall(r"\b([1-4])\b", pred_str)
+        if mc_num_standalone:
+            return mc_num_standalone[-1]  # Return as "1", "2", etc.
+        
+        # Fallback: return empty string if no match
+        return ""
+    
+    if effective_data_name == "gpqa":
+        # GPQA: Extract multiple choice answer (A-E format)
+        # Look for parenthesized letters first: (A), (B), etc.
+        mc_parentheses = re.findall(r"\(([A-E])\)", pred_str, re.IGNORECASE)
+        if mc_parentheses:
+            return f"({mc_parentheses[-1].upper()})"
+        
+        # Look for standalone letters A-E (word boundaries)
+        mc_standalone = re.findall(r"\b([A-E])\b", pred_str, re.IGNORECASE)
+        if mc_standalone:
+            # Return in parenthesized format to match ground truth
+            return f"({mc_standalone[-1].upper()})"
+        
+        # Fallback: return empty string if no match
+        return ""
+    
+    if effective_data_name == "bigbenchhard":
+        # BigBenchHard: Extract answer with multiple strategies
+        # Priority: Multiple choice > Boolean/Valid-Invalid > Text > Number
+        
+        # 1. Multiple choice extraction (A-G, with or without parentheses)
+        # Look for parenthesized letters first: (A), (B), etc.
+        mc_parentheses = re.findall(r"\(([A-G])\)", pred_str, re.IGNORECASE)
+        if mc_parentheses:
+            return f"({mc_parentheses[-1].upper()})"
+        
+        # Look for standalone letters A-G (word boundaries)
+        mc_standalone = re.findall(r"\b([A-G])\b", pred_str, re.IGNORECASE)
+        if mc_standalone:
+            # Return in parenthesized format to match ground truth
+            return f"({mc_standalone[-1].upper()})"
+        
+        # 2. Boolean/Valid-Invalid extraction
+        pred_lower = pred_str.lower()
+        if "true" in pred_lower or "false" in pred_lower:
+            # Look for True/False (case-insensitive)
+            if re.search(r"\btrue\b", pred_lower):
+                return "True"
+            elif re.search(r"\bfalse\b", pred_lower):
+                return "False"
+        
+        if "valid" in pred_lower or "invalid" in pred_lower:
+            # Look for valid/invalid (case-insensitive)
+            if re.search(r"\bvalid\b", pred_lower):
+                return "valid"
+            elif re.search(r"\binvalid\b", pred_lower):
+                return "invalid"
+        
+        # 3. Text extraction - look for "answer is", "the answer is", etc.
+        answer_patterns = [
+            r"(?:the\s+)?answer\s+is\s*:?\s*(.+?)(?:\.|$|\n)",
+            r"answer\s*:?\s*(.+?)(?:\.|$|\n)",
+            r"solution\s+is\s*:?\s*(.+?)(?:\.|$|\n)",
+        ]
+        for pattern in answer_patterns:
+            match = re.search(pattern, pred_str, re.IGNORECASE)
+            if match:
+                answer = match.group(1).strip()
+                # Remove trailing punctuation
+                answer = answer.rstrip(".,;:!?")
+                if answer:
+                    return answer
+        
+        # 4. Number extraction (if applicable)
+        if use_last_number:
+            pattern = r"-?\d+\.?\d*"
+            numbers = re.findall(pattern, pred_str.replace(",", ""))
+            if numbers:
+                return numbers[-1]
+        
+        # 5. Fallback: return last non-empty line or empty string
+        lines = [line.strip() for line in pred_str.split("\n") if line.strip()]
+        if lines:
+            last_line = lines[-1]
+            # Remove trailing punctuation
+            last_line = last_line.rstrip(".,;:!?")
+            return last_line
+        
+        return ""
+    
+    if effective_data_name == "humaneval":
+        # Extract function body from model output for HumanEval
+        # First, try to extract from markdown code blocks
+        code_block_pattern = r"```(?:python)?\s*\n(.*?)```"
+        code_blocks = re.findall(code_block_pattern, pred_str, re.DOTALL)
+        if code_blocks:
+            # Use the last code block (most likely the final answer)
+            pred = code_blocks[-1].strip()
+            # Normalize indentation: detect base indentation and remove it
+            lines = pred.split('\n')
+            if lines:
+                # Find minimum indentation (excluding empty lines)
+                non_empty = [line for line in lines if line.strip()]
+                if non_empty:
+                    min_indent = min(len(line) - len(line.lstrip()) for line in non_empty)
+                    # Remove base indentation from all lines
+                    pred = '\n'.join(line[min_indent:] if line.strip() else line for line in lines).strip()
+        else:
+            # If no code block, extract everything after the prompt
+            # Remove any leading text/explanations
+            pred = pred_str.strip()
+            # Try to find function definition and extract body
+            # Look for lines starting with def (function signature)
+            lines = pred.split('\n')
+            function_start_idx = None
+            for i, line in enumerate(lines):
+                if line.strip().startswith('def '):
+                    function_start_idx = i
+                    break
+            
+            if function_start_idx is not None:
+                # Extract from function signature onwards
+                pred = '\n'.join(lines[function_start_idx:])
+                # Remove function signature to get just the body
+                # Find the first line that's not the def line and not a docstring
+                body_lines = []
+                in_docstring = False
+                docstring_quotes = None
+                for i, line in enumerate(pred.split('\n')):
+                    if i == 0 and line.strip().startswith('def '):
+                        continue  # Skip function signature
+                    # Check for docstring start
+                    stripped = line.strip()
+                    if not in_docstring:
+                        if stripped.startswith('"""') or stripped.startswith("'''"):
+                            in_docstring = True
+                            docstring_quotes = stripped[:3]
+                            # Check if docstring ends on same line
+                            if stripped.endswith(docstring_quotes) and len(stripped) > 3:
+                                in_docstring = False
+                            continue
+                    else:
+                        # Check for docstring end
+                        if docstring_quotes in stripped:
+                            in_docstring = False
+                            continue
+                        continue
+                    
+                    if not in_docstring:
+                        body_lines.append(line)
+                
+                pred = '\n'.join(body_lines).strip()
+            else:
+                # No function signature found, use the whole thing
+                pred = pred.strip()
+        
+        # Clean up: remove function signature if present
+        lines = pred.split('\n')
+        if lines and lines[0].strip().startswith('def '):
+            # Remove function signature line
+            pred = '\n'.join(lines[1:]).strip()
+        
+        # Normalize indentation: ensure consistent indentation for function body
+        # Function body should typically be indented 4 spaces
+        lines = pred.split('\n')
+        if lines:
+            # Find minimum indentation (excluding empty lines)
+            non_empty_lines = [line for line in lines if line.strip()]
+            if non_empty_lines:
+                min_indent = min(len(line) - len(line.lstrip()) for line in non_empty_lines)
+                # If code has some indentation, preserve relative indentation
+                # If code has no indentation, add 4 spaces (standard Python function body indent)
+                if min_indent == 0:
+                    # No base indentation - add 4 spaces to all non-empty lines
+                    pred = '\n'.join('    ' + line if line.strip() else line for line in lines).strip()
+                else:
+                    # Has indentation - normalize to remove base indent, then add 4 spaces
+                    pred = '\n'.join('    ' + (line[min_indent:] if line.strip() else line) for line in lines).strip()
+        
+        return pred
+    
     if effective_data_name in ["mmlu_stem", "sat_math", "aqua", "gaokao2023"]:
         # TODO check multiple choice
         return choice_answer_clean(pred_str)
@@ -645,11 +843,46 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         "imo2024",
     ]:
         gt_cot, gt_ans = None, example["answer"]
+    elif data_name == "humaneval":
+        # HumanEval: store test cases, entry point, and canonical solution
+        gt_cot = example.get("canonical_solution", "")
+        gt_ans = {
+            "test": example.get("test", ""),
+            "entry_point": example.get("entry_point", ""),
+            "canonical_solution": example.get("canonical_solution", "")
+        }
+    elif data_name == "bigbenchhard":
+        # BigBenchHard: preserve answer format (multiple choice, text, boolean, etc.)
+        gt_cot = None
+        gt_ans = example.get("target", example.get("gt", ""))
+        # Don't strip_string here - preserve format like "(A)", "True", "valid", etc.
+    elif data_name == "gpqa":
+        # GPQA: multiple choice format (A), (B), etc.
+        gt_cot = None
+        gt_ans = example.get("target", example.get("gt", ""))
+        # Preserve format like "(A)", "(B)", etc.
+    elif data_name in ["arc_challenge", "arc_easy", "arc"]:
+        # ARC: multiple choice format A, B, C, D or 1, 2, 3, 4 (some questions use numeric labels)
+        gt_cot = None
+        gt_ans = example.get("target", example.get("gt", example.get("answerKey", "")))
+        # Store as "A", "B", etc. or "1", "2", etc. (preserve original format)
     else:
         raise NotImplementedError(f"`{data_name}`")
     # post process
-    gt_cot = str(gt_cot).strip()
-    if data_name not in STRIP_EXCEPTIONS:
+    gt_cot = str(gt_cot).strip() if gt_cot is not None else None
+    if data_name == "humaneval":
+        # HumanEval: gt_ans is already a dict, no need to strip
+        pass
+    elif data_name == "bigbenchhard":
+        # BigBenchHard: preserve answer format, only strip whitespace
+        gt_ans = str(gt_ans).strip() if gt_ans else ""
+    elif data_name == "gpqa":
+        # GPQA: preserve answer format, only strip whitespace
+        gt_ans = str(gt_ans).strip() if gt_ans else ""
+    elif data_name in ["arc_challenge", "arc_easy", "arc"]:
+        # ARC: preserve answer format, only strip whitespace
+        gt_ans = str(gt_ans).strip() if gt_ans else ""
+    elif data_name not in STRIP_EXCEPTIONS:
         gt_ans = strip_string(gt_ans, skip_unit=data_name == "carp_en")
     else:
         gt_ans = (
@@ -711,6 +944,18 @@ def parse_question(example, data_name):
             options.append(f"({key}) {options_dict[key]}")
         options = " ".join(options)
         question = f"{example['question'].strip()}\n选项: {options}"
+    elif data_name == "humaneval":
+        # HumanEval: return the prompt as-is (contains function signature + docstring)
+        question = example.get("prompt", example.get("question", ""))
+    elif data_name == "bigbenchhard":
+        # BigBenchHard: return question or input field (contains full prompt with options)
+        question = example.get("question", example.get("input", ""))
+    elif data_name == "gpqa":
+        # GPQA: return question field (already contains options formatted as "(A) option1", etc.)
+        question = example.get("question", "")
+    elif data_name in ["arc_challenge", "arc_easy", "arc"]:
+        # ARC: return question field (already contains options formatted as "(A) option1", etc.)
+        question = example.get("question", "")
     else:
         for key in ["question", "problem", "Question", "input"]:
             if key in example:

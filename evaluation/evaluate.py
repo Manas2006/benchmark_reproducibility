@@ -29,13 +29,106 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
     # parse gt
     for sample in samples:
         sample['gt_cot'], sample['gt'] = parse_ground_truth(sample, data_name)
-    params = [(idx, pred, sample['gt']) for idx, sample in enumerate(samples) for pred in sample['pred']]
+    
+    # Check if this is HumanEval dataset (requires code execution evaluation)
+    is_humaneval = (data_name == "humaneval")
+    sample_pred_indices = []  # Track valid prediction indices for HumanEval
+    
+    if is_humaneval:
+        # HumanEval: construct parameters for code execution evaluation
+        # Each param: (prompt, generated_code, test_code, entry_point)
+        params = []
+        
+        # Load original HumanEval data to get test cases and entry points if missing
+        from data_loader import load_data
+        try:
+            original_data = load_data("humaneval", "test")
+            original_data_dict = {ex.get('idx', i): ex for i, ex in enumerate(original_data)}
+        except Exception as e:
+            print(f"Warning: Could not load original HumanEval data: {e}")
+            original_data_dict = {}
+        
+        for idx, sample in enumerate(samples):
+            prompt = sample.get('prompt', '')
+            test_info = sample['gt']  # This should be a dict with 'test', 'entry_point', 'canonical_solution'
+            
+            # Handle case where gt might be a string (from old data format)
+            if isinstance(test_info, str):
+                # Reconstruct dict from sample fields
+                test_info = {
+                    "test": sample.get('test', ''),
+                    "entry_point": sample.get('entry_point', ''),
+                    "canonical_solution": sample.get('canonical_solution', sample.get('gt', ''))
+                }
+                sample['gt'] = test_info  # Update sample for consistency
+            
+            test_code = test_info.get('test', '')
+            entry_point = test_info.get('entry_point', '')
+            
+            # If test_code or entry_point are missing, try to load from original data
+            if not test_code or not entry_point:
+                sample_idx = sample.get('idx', idx)
+                if sample_idx in original_data_dict:
+                    orig_sample = original_data_dict[sample_idx]
+                    if not test_code:
+                        test_code = orig_sample.get('test', '')
+                    if not entry_point:
+                        entry_point = orig_sample.get('entry_point', '')
+                    # Update sample for future use
+                    test_info['test'] = test_code
+                    test_info['entry_point'] = entry_point
+                    sample['gt'] = test_info
+            
+            # For HumanEval, prefer 'code' field which contains raw model output
+            # 'pred' field may have processed/stripped code that's missing spaces
+            code_field = sample.get('code', [])
+            if code_field and isinstance(code_field, list) and len(code_field) > 0:
+                # Use code field as primary source for HumanEval
+                preds = code_field
+            else:
+                # Fallback to pred field if code is not available
+                preds = sample.get('pred', [])
+                if preds is None:
+                    preds = []
+                if not isinstance(preds, list):
+                    preds = [preds] if preds else []
+            
+            # Track valid predictions for this sample
+            valid_pred_indices = []
+            for pred_idx, pred in enumerate(preds):
+                # Skip None or empty predictions
+                if pred is None:
+                    continue
+                if isinstance(pred, str) and not pred.strip():
+                    continue
+                
+                # Extract function body from raw model output
+                extracted_code = extract_answer(pred, data_name)
+                # Skip if extraction resulted in empty code
+                if not extracted_code or not extracted_code.strip():
+                    continue
+                
+                # Valid prediction - add to params
+                params.append((prompt, extracted_code, test_code, entry_point))
+                valid_pred_indices.append(pred_idx)
+            
+            # Store mapping of sample index to valid prediction indices
+            sample_pred_indices.append(valid_pred_indices)
+    else:
+        # Standard evaluation: compare predictions with ground truth
+        params = [(idx, pred, sample['gt']) for idx, sample in enumerate(samples) for pred in sample['pred']]
 
     scores = []
     timeout_cnt = 0 
 
     with ProcessPool(max_workers=1) as pool:
-        future = pool.map(math_equal_process, params, timeout=3)
+        if is_humaneval:
+            # Use HumanEval-specific evaluation
+            from grader import humaneval_check_process
+            future = pool.map(humaneval_check_process, params, timeout=5)
+        else:
+            # Use standard math_equal evaluation
+            future = pool.map(math_equal_process, params, timeout=3)
         iterator = future.result()
         with tqdm(total=len(samples), desc="Evaluate") as progress_bar:
             while True:
@@ -55,11 +148,32 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
 
     idx = 0
     score_mat = []
-    for sample in samples:
-        sample['score'] = scores[idx: idx+len(sample['pred'])]
-        assert len(sample['score']) == len(sample['pred'])
-        score_mat.append(sample['score'])
-        idx += len(sample['pred'])
+    if is_humaneval:
+        # For HumanEval, map scores back to original predictions (including skipped ones)
+        for sample_idx, sample in enumerate(samples):
+            valid_indices = sample_pred_indices[sample_idx]
+            preds = sample.get('pred', [])
+            if not isinstance(preds, list):
+                preds = [preds] if preds else []
+            
+            # Initialize all scores as False (for skipped/empty predictions)
+            sample_scores = [False] * len(preds)
+            
+            # Fill in scores for valid predictions
+            for local_idx, valid_idx in enumerate(valid_indices):
+                if idx + local_idx < len(scores):
+                    sample_scores[valid_idx] = scores[idx + local_idx]
+            
+            sample['score'] = sample_scores
+            score_mat.append(sample['score'])
+            idx += len(valid_indices)
+    else:
+        # Standard evaluation: scores match predictions 1:1
+        for sample in samples:
+            sample['score'] = scores[idx: idx+len(sample['pred'])]
+            assert len(sample['score']) == len(sample['pred'])
+            score_mat.append(sample['score'])
+            idx += len(sample['pred'])
 
     # Implement different evaluation methods
     if eval_method == "pass@k":

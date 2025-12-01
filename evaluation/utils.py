@@ -181,6 +181,87 @@ PROMPT_TEMPLATES = {
         "{output}",
         "\n\n\n",
     ),
+    "gsm8k": (
+        "Solve the following math word problem step by step. Show your reasoning clearly.\n\n"
+        "At the end, write only the final answer in the format: \\boxed{{your_answer}}.\n\n\n"
+        "Problem: {input}\n\n\n"
+        "Response: Let's think step by step.",
+        "{output}",
+        "\n\n\n",
+    ),
+    "math500": (
+        "Solve the following math problem step by step. Show all intermediate reasoning clearly and write any equations used.\n\n"
+        "At the end, write only the final boxed answer using the format: \\boxed{{your_answer}}.\n\n\n"
+        "Problem: {input}\n\n\n"
+        "Response: Let's think step by step.",
+        "{output}",
+        "\n\n\n",
+    ),
+    "aqua": (
+        "Solve the following math word problem step by step. Show your reasoning clearly.\n\n"
+        "At the end, write only the final answer choice in the format: \\boxed{{A}}, \\boxed{{B}}, etc.\n\n\n"
+        "Problem: {input}\n\n\n"
+        "Response: Let's think step by step.",
+        "{output}",
+        "\n\n\n",
+    ),
+    "svamp": (
+        "Solve the following math word problem step by step. Show your reasoning clearly.\n\n"
+        "At the end, write only the final answer in the format: \\boxed{{your_answer}}.\n\n\n"
+        "Problem: {input}\n\n\n"
+        "Response: Let's think step by step.",
+        "{output}",
+        "\n\n\n",
+    ),
+    "asdiv": (
+        "Solve the following algebra word problem step by step. Show your reasoning clearly and any equations used.\n\n"
+        "At the end, write only the final answer in the format: \\boxed{{your_answer}}.\n\n\n"
+        "Problem: {input}\n\n\n"
+        "Response: Let's think step by step.",
+        "{output}",
+        "\n\n\n",
+    ),
+    "humaneval": (
+        "You are a Python coding assistant. Read the following function specification and write the complete Python function that satisfies it.\n\n"
+        "Follow these rules:\n\n"
+        "1. Return only the Python code.\n\n"
+        "2. Do not include explanations or comments.\n\n"
+        "3. Do not write tests.\n\n"
+        "4. Do not include imports unless required.\n\n\n"
+        "Problem:\n\n"
+        "{input}\n\n\n"
+        "Write your final answer as Python code only.",
+        "{output}",
+        "\n\n\n",
+    ),
+    "bigbenchhard": (
+        "You are a reasoning assistant. Solve the following problem step-by-step.\n\n\n"
+        "Problem:\n\n"
+        "{input}\n\n\n"
+        "Think through the problem carefully. Then give your final answer in the format:\n\n\n"
+        "Final Answer: <your_answer>",
+        "{output}",
+        "\n\n\n",
+    ),
+    "gpqa": (
+        "You are a scientific reasoning model. Solve the problem below step-by-step using clear scientific reasoning.\n\n\n"
+        "Problem:\n\n"
+        "{input}\n\n\n"
+        "Show your reasoning. Then give your answer in the format:\n\n\n"
+        "Final Answer: <letter>",
+        "{output}",
+        "\n\n\n",
+    ),
+    "arc_challenge": (
+        "You are an abstract reasoning assistant. Each ARC puzzle consists of input grids and output grids. Deduce the pattern that transforms the input into the output, then apply that pattern to the test input.\n\n\n"
+        "Problem:\n\n"
+        "{input}\n\n\n"
+        "Explain your reasoning step-by-step. Then provide the final output grid in valid JSON format as the only output after:\n\n\n"
+        "Final Answer:\n\n"
+        "<json>",
+        "{output}",
+        "\n\n\n",
+    ),
 }
 
 

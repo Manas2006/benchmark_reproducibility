@@ -97,18 +97,30 @@ async function apiFetch(endpoint, options = {}) {
 
 // Available options
 const AVAILABLE_MODELS = [
-    'Qwen/Qwen2.5-Math-1.5B',
+    'https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B',
     'Qwen/Qwen2.5-Math-7B',
-    'Qwen/Qwen2.5-Math-14B',
-    'Qwen/Qwen2.5-Math-72B',
-    'WizardLMTeam/WizardMath-7B-V1.1',
-    'TIGER-Lab/MAmmoTH-7B',
-    'deepseek-ai/deepseek-math-7b-instruct',
-    '01-ai/Yi-1.5-6B-Chat',
-    'HuggingFaceTB/SmolLM-135M-Instruct',
-    'HuggingFaceTB/SmolLM-1.7B-Instruct',
+    'https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B',
+    'https://huggingface.co/Qwen/Qwen2.5-7B-Instruct',
+    'https://huggingface.co/google/gemma-7b',
+    'https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct',
+    'https://huggingface.co/microsoft/phi-4',
     'Link from Hugging Face'
 ];
+
+// Helper function to extract display name from model URL or name
+function getModelDisplayName(model) {
+    if (model === 'Link from Hugging Face') {
+        return model;
+    }
+    // If it's a URL, extract the model name
+    if (model.startsWith('https://')) {
+        // Extract the model name from URL (e.g., "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" -> "DeepSeek-R1-Distill-Qwen-1.5B")
+        const urlParts = model.split('/');
+        return urlParts[urlParts.length - 1];
+    }
+    // If it's already a model name (e.g., "Qwen/Qwen2.5-Math-7B"), just return it
+    return model;
+}
 
 const AVAILABLE_DATASETS = [
     'gsm8k',
@@ -238,6 +250,21 @@ function showTab(tabName, event = null) {
     // Load path config when settings tab is shown
     if (tabName === 'settings') {
         loadPathConfig();
+    }
+    
+    // Refresh CoT analysis jobs when CoT Analysis tab is shown
+    if (tabName === 'cot-analysis') {
+        console.log('[CoT] CoT Analysis tab shown, refreshing jobs list...');
+        // Small delay to ensure tab is visible before loading
+        // Use requestAnimationFrame to ensure UI is ready
+        requestAnimationFrame(() => {
+            refreshCoTAnalysesList();
+            // Force refresh when tab is shown
+            refreshCoTJobsList(true);
+        });
+    } else {
+        // Stop polling when leaving CoT Analysis tab
+        stopCoTJobsListPolling();
     }
     
     // Load jobs for specific tabs
@@ -726,7 +753,7 @@ function renderModelConfigs() {
                 <div>
                     <label class="block text-sm font-semibold text-gray-700 mb-2">Model (or Hugging Face URL)</label>
                     <select onchange="updateModelConfig(${config.id}, 'model', this.value); handleModelSelection(${config.id}, this.value)" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200">
-                        ${AVAILABLE_MODELS.map(model => `<option value="${model}" ${config.model === model ? 'selected' : ''}>${model}</option>`).join('')}
+                        ${AVAILABLE_MODELS.map(model => `<option value="${model}" ${config.model === model ? 'selected' : ''}>${getModelDisplayName(model)}</option>`).join('')}
                     </select>
                     <div id="url-input-${config.id}" class="mt-2 ${config.model === 'Link from Hugging Face' ? '' : 'hidden'}">
                         <input type="text" onchange="updateModelConfig(${config.id}, 'customModel', this.value)" 
@@ -886,16 +913,17 @@ function renderModelConfigs() {
                     </div>
                     <select onchange="updateModelConfig(${config.id}, 'prompt_type', this.value); updatePromptField(${config.id})" class="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                         <option value="custom" ${config.prompt_type === 'custom' ? 'selected' : ''}>Custom Prompt</option>
-                        <option value="cot" ${config.prompt_type === 'cot' ? 'selected' : ''}>Chain of Thought (CoT)</option>
-                        <option value="auto-cot" ${config.prompt_type === 'auto-cot' ? 'selected' : ''}>Auto Chain of Thought (Auto-CoT)</option>
-                        <option value="pal" ${config.prompt_type === 'pal' ? 'selected' : ''}>Program-aided Language (PAL)</option>
-                        <option value="tool-integrated" ${config.prompt_type === 'tool-integrated' ? 'selected' : ''}>Tool Integrated</option>
-                        <option value="qwen25-math-cot" ${config.prompt_type === 'qwen25-math-cot' ? 'selected' : ''}>Qwen2.5 Math CoT</option>
                         <option value="direct" ${config.prompt_type === 'direct' ? 'selected' : ''}>Direct</option>
-                        <option value="self-instruct" ${config.prompt_type === 'self-instruct' ? 'selected' : ''}>Self Instruct</option>
-                        <option value="wizard_zs" ${config.prompt_type === 'wizard_zs' ? 'selected' : ''}>Wizard Zero Shot</option>
-                        <option value="platypus_fs" ${config.prompt_type === 'platypus_fs' ? 'selected' : ''}>Platypus Few Shot</option>
                         <option value="aime" ${config.prompt_type === 'aime' ? 'selected' : ''}>AIME (American Invitational Mathematics Examination)</option>
+                        <option value="gsm8k" ${config.prompt_type === 'gsm8k' ? 'selected' : ''}>📘 GSM8K</option>
+                        <option value="math500" ${config.prompt_type === 'math500' ? 'selected' : ''}>🧠 MATH500</option>
+                        <option value="aqua" ${config.prompt_type === 'aqua' ? 'selected' : ''}>🧮 AQuA-RAT</option>
+                        <option value="svamp" ${config.prompt_type === 'svamp' ? 'selected' : ''}>✏️ SVAMP</option>
+                        <option value="asdiv" ${config.prompt_type === 'asdiv' ? 'selected' : ''}>📊 ASDiv (Algebraic Word Problems)</option>
+                        <option value="humaneval" ${config.prompt_type === 'humaneval' ? 'selected' : ''}>💻 HumanEval+ (Coding Reasoning)</option>
+                        <option value="bigbenchhard" ${config.prompt_type === 'bigbenchhard' ? 'selected' : ''}>🧩 BIG-Bench Hard (Logical Reasoning)</option>
+                        <option value="gpqa" ${config.prompt_type === 'gpqa' ? 'selected' : ''}>🔬 GPQA (Graduate-Level Physics QA)</option>
+                        <option value="arc_challenge" ${config.prompt_type === 'arc_challenge' ? 'selected' : ''}>🎯 ARC-Challenge (Abstract Pattern Reasoning)</option>
                     </select>
                 </div>
                 
@@ -1401,8 +1429,20 @@ async function refreshJobs() {
         }
         const data = await response.json();
         console.log(`[refreshJobs] Response data:`, data);
-        const jobs = data.jobs || [];
-        console.log(`[refreshJobs] Refreshed jobs list: ${jobs.length} jobs found`);
+        let jobs = data.jobs || [];
+        
+        // Filter out CoT analysis jobs (they should only appear in CoT Analysis tab)
+        jobs = jobs.filter(job => {
+            const jobId = job.job_id || job.slurm_jid || '';
+            // Exclude CoT analysis jobs
+            if (jobId.startsWith('cot_analysis_') || jobId.startsWith('cot_')) {
+                console.log(`[refreshJobs] Filtering out CoT job: ${jobId}`);
+                return false;
+            }
+            return true;
+        });
+        
+        console.log(`[refreshJobs] Refreshed jobs list: ${jobs.length} jobs found (after filtering CoT jobs)`);
         if (jobs.length > 0) {
             console.log(`[refreshJobs] Job IDs:`, jobs.map(j => j.job_id || j.slurm_jid || 'unknown'));
         }
@@ -1997,11 +2037,16 @@ document.addEventListener('DOMContentLoaded', async function () {
     // Load CoT jobs when page loads
     loadCoTJobs();
     refreshCoTAnalysesList();
+    // Also load and display active CoT analysis jobs
+    refreshCoTJobsList();
 });
 
 // ===== CoT ANALYSIS FUNCTIONS =====
 
 let currentCoTData = null; // Store current analysis data
+let cotProgressInterval = null; // Store interval for progress polling
+let cotJobsListTimeout = null; // Store timeout for CoT jobs list polling
+let cotJobsListPolling = false; // Flag to prevent overlapping polls
 
 async function loadCoTJobs() {
     try {
@@ -2062,12 +2107,226 @@ async function refreshCoTAnalysesList() {
     }
 }
 
+// Stop CoT jobs list polling
+function stopCoTJobsListPolling() {
+    if (cotJobsListTimeout) {
+        clearTimeout(cotJobsListTimeout);
+        cotJobsListTimeout = null;
+    }
+    cotJobsListPolling = false;
+}
+
+// Diagnostic function to test CoT jobs display (can be called from browser console)
+window.debugCoTJobs = async function() {
+    console.log('=== CoT Jobs Diagnostic ===');
+    const activeDiv = document.getElementById('cot-active-jobs-list');
+    console.log('1. Active div element:', activeDiv ? 'FOUND' : 'NOT FOUND', activeDiv);
+    
+    const cotTab = document.getElementById('cot-analysis');
+    console.log('2. CoT tab element:', cotTab ? 'FOUND' : 'NOT FOUND', cotTab);
+    console.log('3. CoT tab is active:', cotTab && cotTab.classList.contains('active'));
+    
+        console.log('4. Testing API call...');
+    try {
+        const apiBase = await getApiBase();
+        console.log('5. API Base:', apiBase);
+        const apiUrl = `${apiBase}/cot-analyses/queue`;
+        console.log('6. API URL:', apiUrl);
+        
+        // Add timeout to fetch
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+        
+        console.log('6a. Starting fetch with 10s timeout...');
+        const response = await fetch(apiUrl, {
+            signal: controller.signal,
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+            }
+        });
+        clearTimeout(timeoutId);
+        console.log('7. Response status:', response.status, response.statusText);
+        
+        if (response.ok) {
+            const data = await response.json();
+            console.log('8. Response data:', data);
+            const jobs = data.jobs || [];
+            console.log(`9. Found ${jobs.length} jobs:`, jobs);
+            
+            if (jobs.length > 0) {
+                const activeJobs = jobs.filter(j => j.status === 'RUNNING' || j.status === 'QUEUED');
+                console.log(`10. Active jobs: ${activeJobs.length}`, activeJobs);
+            } else {
+                console.log('10. No jobs found in response');
+            }
+            
+            // Try to render
+            if (activeDiv) {
+                const activeJobs = jobs.filter(j => j.status === 'RUNNING' || j.status === 'QUEUED');
+                const completedJobs = jobs.filter(j => j.status === 'DONE');
+                const errorJobs = jobs.filter(j => j.status === 'ERROR');
+                console.log('11. Attempting to render jobs...');
+                renderActiveCoTJobs(activeJobs, completedJobs, errorJobs);
+                console.log('12. Render function called, check DOM');
+            } else {
+                console.error('11. Cannot render - active div not found!');
+            }
+        } else {
+            const errorText = await response.text();
+            console.error('8. API Error:', response.status, errorText);
+            if (activeDiv) {
+                activeDiv.innerHTML = `<div class="p-4 bg-red-50 border border-red-200 rounded"><p class="text-red-600 font-semibold">API Error (${response.status})</p><p class="text-red-500 text-sm mt-1">${errorText}</p></div>`;
+            }
+        }
+    } catch (error) {
+        console.error('API call failed:', error);
+        if (error.name === 'AbortError') {
+            console.error('Request timed out or was aborted');
+            if (activeDiv) {
+                activeDiv.innerHTML = `<div class="p-4 bg-yellow-50 border border-yellow-200 rounded"><p class="text-yellow-600 font-semibold">Request Timeout</p><p class="text-yellow-500 text-sm mt-1">The API call took too long to respond. The backend server may be busy or not responding.</p><p class="text-xs text-gray-500 mt-2">Check if the backend is running on ${apiBase}</p></div>`;
+            }
+        } else {
+            if (activeDiv) {
+                activeDiv.innerHTML = `<div class="p-4 bg-red-50 border border-red-200 rounded"><p class="text-red-600 font-semibold">Error</p><p class="text-red-500 text-sm mt-1">${error.message}</p><p class="text-xs text-gray-500 mt-2">Check browser console for details</p></div>`;
+            }
+        }
+    }
+    console.log('=== End Diagnostic ===');
+};
+
+// Refresh CoT analysis jobs list (queue feature removed - no-op)
+async function refreshCoTJobsList(force = false) {
+    // Queue feature has been removed - CoT analysis now runs synchronously
+    // This function is kept for compatibility but does nothing
+    console.log('[CoT] refreshCoTJobsList called (queue feature removed)');
+    
+    const activeDiv = document.getElementById('cot-active-jobs-list');
+    if (activeDiv) {
+        activeDiv.innerHTML = `<div class="p-4 bg-gray-50 border border-gray-200 rounded"><p class="text-gray-600 text-sm">CoT analysis runs synchronously. No active jobs to display.</p></div>`;
+    }
+}
+
+// Update stats in header
+function updateCoTStats(activeCount, completedCount) {
+    const activeCountEl = document.getElementById('cot-active-count');
+    const completedCountEl = document.getElementById('cot-completed-count');
+    if (activeCountEl) activeCountEl.textContent = activeCount;
+    if (completedCountEl) completedCountEl.textContent = completedCount;
+}
+
+// Render active CoT analysis jobs (running/queued)
+function renderActiveCoTJobs(activeJobs, completedJobs, errorJobs) {
+    console.log('[CoT] renderActiveCoTJobs called with:', {
+        active: activeJobs.length,
+        completed: completedJobs.length,
+        error: errorJobs.length
+    });
+    
+    const activeDiv = document.getElementById('cot-active-jobs-list');
+    if (!activeDiv) {
+        console.error('[CoT] ERROR: cot-active-jobs-list element not found in DOM!');
+        console.error('[CoT] Available elements with "cot" in ID:', 
+            Array.from(document.querySelectorAll('[id*="cot"]')).map(el => el.id));
+        return;
+    }
+    
+    console.log('[CoT] Found cot-active-jobs-list element, rendering jobs...');
+    console.log(`[CoT] Rendering ${activeJobs.length} active, ${completedJobs.length} completed, ${errorJobs.length} error jobs`);
+    
+    const allActive = [...activeJobs, ...errorJobs];
+    
+    // Update stats
+    updateCoTStats(allActive.length, completedJobs.length);
+    
+    if (allActive.length === 0) {
+        activeDiv.innerHTML = '<div class="text-center py-8"><p class="text-gray-500 text-sm">No active CoT analysis jobs</p><p class="text-xs text-gray-400 mt-1">Start a new analysis below to see progress here</p></div>';
+        return;
+    }
+    
+    activeDiv.innerHTML = '';
+    
+    allActive.forEach(job => {
+        const jobDiv = document.createElement('div');
+        const progress = job.progress || {};
+        const percentage = progress.percentage || 0;
+        const statusColor = job.status === 'DONE' ? 'border-green-500 bg-green-50' : 
+                           job.status === 'ERROR' ? 'border-red-500 bg-red-50' :
+                           job.status === 'RUNNING' ? 'border-blue-500 bg-blue-50' : 'border-yellow-500 bg-yellow-50';
+        
+        const statusIcon = job.status === 'DONE' ? '✅' : 
+                          job.status === 'ERROR' ? '❌' :
+                          job.status === 'RUNNING' ? '🔄' : '⏳';
+        
+        let statusDisplay = job.status;
+        if (job.status === 'QUEUED' && job.queue_position !== null) {
+            statusDisplay = `Queued #${job.queue_position + 1}`;
+        }
+        
+        jobDiv.className = `border-l-4 ${statusColor} rounded-lg p-4 mb-3 shadow-sm hover:shadow-md transition-shadow`;
+        jobDiv.id = `cot-job-${job.cot_job_id}`;
+        
+        jobDiv.innerHTML = `
+            <div class="flex justify-between items-start mb-3">
+                <div class="flex-1">
+                    <div class="flex items-center gap-2 mb-1">
+                        <span class="text-xl">${statusIcon}</span>
+                        <h4 class="font-semibold text-gray-900">${job.model_name || 'Unknown Model'}</h4>
+                        <span class="text-xs text-gray-500 bg-gray-100 px-2 py-1 rounded">${job.dataset || 'Unknown'}</span>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1">
+                        Job ID: ${job.parent_job_id?.substring(0, 12) || 'N/A'}
+                        ${job.judge_mode ? ` • ${job.judge_mode} mode` : ''}
+                    </p>
+                </div>
+                <div class="text-right">
+                    <span class="inline-block px-3 py-1 text-xs font-semibold rounded-full ${job.status === 'ERROR' ? 'bg-red-200 text-red-800' : job.status === 'RUNNING' ? 'bg-blue-200 text-blue-800' : job.status === 'QUEUED' ? 'bg-yellow-200 text-yellow-800' : 'bg-green-200 text-green-800'}">
+                        ${statusDisplay}
+                    </span>
+                </div>
+            </div>
+            ${job.status === 'ERROR' && job.error ? `
+                <div class="mt-3 p-3 bg-red-100 border border-red-300 rounded text-sm text-red-800">
+                    <strong>Error:</strong> ${job.error}
+                </div>
+            ` : ''}
+            ${job.status === 'RUNNING' || job.status === 'QUEUED' ? `
+                <div class="mt-3">
+                    <div class="flex justify-between items-center text-sm mb-2">
+                        <span id="cot-progress-text-${job.cot_job_id}" class="text-gray-700 font-medium">${progress.current_activity || 'Initializing...'}</span>
+                        <span class="text-gray-600 font-semibold">${percentage.toFixed(1)}%</span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-2.5 mb-2">
+                        <div id="cot-progress-bar-${job.cot_job_id}" 
+                             class="bg-blue-600 h-2.5 rounded-full transition-all duration-300 shadow-sm" 
+                             style="width: ${percentage}%"></div>
+                    </div>
+                    ${progress.total_samples > 0 ? `
+                        <div class="flex justify-between text-xs text-gray-600">
+                            <span>${progress.current_sample || 0} / ${progress.total_samples} samples</span>
+                            ${progress.estimated_time_remaining ? `
+                                <span>ETA: ${Math.floor(progress.estimated_time_remaining / 60)}m ${Math.floor(progress.estimated_time_remaining % 60)}s</span>
+                            ` : ''}
+                        </div>
+                    ` : ''}
+                </div>
+            ` : ''}
+        `;
+        
+        activeDiv.appendChild(jobDiv);
+    });
+}
+
 function renderCoTAnalysesList(analyses) {
     const listDiv = document.getElementById('cot-analyses-list');
     if (!listDiv) return;
     
+    // Update completed count in stats
+    const completedCountEl = document.getElementById('cot-completed-count');
+    if (completedCountEl) completedCountEl.textContent = analyses.length;
+    
     if (analyses.length === 0) {
-        listDiv.innerHTML = '<p class="text-gray-500">No completed CoT analyses found. Run an analysis on a completed job to see results here.</p>';
+        listDiv.innerHTML = '<div class="text-center py-8"><p class="text-gray-500 text-sm">No completed CoT analyses found</p><p class="text-xs text-gray-400 mt-1">Run an analysis above to see results here</p></div>';
         return;
     }
     
@@ -2085,11 +2344,8 @@ function renderCoTAnalysesList(analyses) {
             slurmIdLine = `<p class="text-xs text-gray-400">UUID: ${analysis.job_id.substring(0, 8)}...</p>`;
         }
         
-        // Format model name
-        let modelName = analysis.model || 'Unknown';
-        if (modelName.includes('/')) {
-            modelName = modelName.split('/').slice(-1)[0];
-        }
+        // Format model name using the helper function
+        let modelName = analysis.model ? getModelDisplayName(analysis.model) : 'Unknown';
         
         // Format scores with color coding
         const overallScore = (analysis.overall_score * 100).toFixed(1);
@@ -2132,15 +2388,22 @@ function renderCoTAnalysesList(analyses) {
                     ${analysis.total_flags > 0 ? `<p class="text-xs text-red-600 mt-1">🚩 ${analysis.total_flags} flags</p>` : ''}
                 </div>
             </div>
-            <div class="mt-4 pt-4 border-t">
-                <button onclick="downloadCoTAnalysisExcel('${analysis.job_id}')" 
-                    class="px-4 py-2 text-white text-sm rounded font-medium shadow-sm hover:shadow transition-all duration-200 ${!analysis.has_excel ? 'bg-gray-400 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'}"
-                    ${!analysis.has_excel ? 'disabled' : ''}>
-                    📊 Download Excel
-                </button>
-                <button onclick="viewCoTAnalysisDetails('${analysis.job_id}')" 
-                    class="ml-2 px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 font-medium shadow-sm hover:shadow transition-all duration-200">
-                    👁️ View Details
+            <div class="mt-4 pt-4 border-t flex justify-between items-center">
+                <div>
+                    <button onclick="downloadCoTAnalysisExcel('${analysis.job_id}')" 
+                        class="px-4 py-2 text-white text-sm rounded font-medium shadow-sm hover:shadow transition-all duration-200 ${!analysis.has_excel ? 'bg-gray-400 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700'}"
+                        ${!analysis.has_excel ? 'disabled' : ''}>
+                        📊 Download Excel
+                    </button>
+                    <button onclick="viewCoTAnalysisDetails('${analysis.job_id}')" 
+                        class="ml-2 px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 font-medium shadow-sm hover:shadow transition-all duration-200">
+                        👁️ View Details
+                    </button>
+                </div>
+                <button onclick="deleteCoTAnalysis('${analysis.job_id}')" 
+                    class="px-4 py-2 bg-red-600 text-white text-sm rounded hover:bg-red-700 font-medium shadow-sm hover:shadow transition-all duration-200"
+                    title="Delete this analysis">
+                    🗑️ Delete
                 </button>
             </div>
         `;
@@ -2168,6 +2431,46 @@ function viewCoTAnalysisDetails(jobId) {
         jobSelect.dispatchEvent(new Event('change'));
         // Optionally auto-run the analysis
         // runCoTAnalysis();
+    }
+}
+
+async function deleteCoTAnalysis(jobId) {
+    if (!confirm(`Are you sure you want to delete the CoT analysis for job ${jobId}? This will permanently delete all analysis files and cannot be undone.`)) {
+        return;
+    }
+    
+    try {
+        const apiBase = await getApiBase();
+        const response = await apiFetch(`/cot-analyses/${jobId}`, {
+            method: 'DELETE'
+        });
+        
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({error: 'Unknown error'}));
+            throw new Error(error.error || `Failed to delete: ${response.status}`);
+        }
+        
+        const result = await response.json();
+        if (result.success) {
+            console.log('[CoT] Deleted CoT analysis:', result);
+            // Refresh the analyses list
+            refreshCoTAnalysesList();
+            // Show success message
+            const listDiv = document.getElementById('cot-analyses-list');
+            if (listDiv) {
+                const successMsg = document.createElement('div');
+                successMsg.className = 'mb-4 p-3 bg-green-100 border border-green-400 text-green-700 rounded';
+                successMsg.textContent = `Successfully deleted CoT analysis for job ${jobId}`;
+                listDiv.insertBefore(successMsg, listDiv.firstChild);
+                // Remove message after 3 seconds
+                setTimeout(() => successMsg.remove(), 3000);
+            }
+        } else {
+            throw new Error(result.error || 'Failed to delete analysis');
+        }
+    } catch (error) {
+        console.error('[CoT] Error deleting CoT analysis:', error);
+        alert('Error deleting CoT analysis: ' + error.message);
     }
 }
 
@@ -2203,7 +2506,6 @@ async function runCoTAnalysis() {
     try {
         console.log(`Running CoT analysis for job: ${jobId}`);
 
-
         // Call the backend CoT analysis endpoint
         const response = await apiFetch(`/jobs/${jobId}/cot-analysis`);
 
@@ -2214,25 +2516,104 @@ async function runCoTAnalysis() {
 
         const analysisData = await response.json();
         console.log('API response received:', analysisData);
-        console.log('Setting currentCoTData...');
-        currentCoTData = analysisData;
-        console.log('currentCoTData set successfully');
-
-
-        // Cache the data
-        cacheCoTData(jobId, analysisData);
-
-        // Hide loading and show results
-        console.log('About to hide loading...');
-        hideCoTLoading();
-        console.log('Loading hidden, about to show results...');
-        showCoTResults(analysisData, false); // false indicates fresh data
-        console.log('showCoTResults call completed');
+        
+        // Analysis runs synchronously, so we should have the results immediately
+        if (analysisData.job_summary || analysisData.summary || analysisData.per_sample?.length > 0) {
+            console.log('CoT analysis completed');
+            currentCoTData = analysisData;
+            cacheCoTData(jobId, analysisData);
+            hideCoTLoading();
+            showCoTResults(analysisData, false);
+        } else {
+            throw new Error('Unexpected response format from CoT analysis endpoint');
+        }
 
     } catch (error) {
         console.error('Error running CoT analysis:', error);
         hideCoTLoading();
         showCoTError(`Analysis failed: ${error.message}`);
+    }
+}
+
+// Start polling for CoT analysis progress (queue feature removed - no-op)
+function startCoTProgressPolling(cotJobId, parentJobId) {
+    // Queue feature has been removed - CoT analysis now runs synchronously
+    // This function is kept for compatibility but does nothing
+    console.log('[CoT] startCoTProgressPolling called (queue feature removed)');
+}
+
+// Show progress UI
+function showCoTProgress() {
+    const loadingDiv = document.getElementById('cot-loading');
+    if (loadingDiv) {
+        loadingDiv.innerHTML = `
+            <div class="max-w-2xl mx-auto">
+                <h3 class="text-lg font-semibold mb-4">Running CoT Analysis...</h3>
+                <div id="cot-progress-bar-container" class="mb-4">
+                    <div class="bg-gray-200 rounded-full h-4 mb-2">
+                        <div id="cot-progress-bar" class="bg-blue-600 h-4 rounded-full transition-all duration-300" style="width: 0%"></div>
+                    </div>
+                    <div class="text-sm text-gray-600 text-center">
+                        <span id="cot-progress-text">Initializing...</span>
+                    </div>
+                    <div class="text-xs text-gray-500 text-center mt-1">
+                        <span id="cot-progress-details"></span>
+                    </div>
+                </div>
+            </div>
+        `;
+        loadingDiv.classList.remove('hidden');
+    }
+}
+
+// Update progress display
+function updateCoTProgressDisplay(progress) {
+    const progressBar = document.getElementById('cot-progress-bar');
+    const progressText = document.getElementById('cot-progress-text');
+    const progressDetails = document.getElementById('cot-progress-details');
+    
+    if (progressBar) {
+        const percentage = progress.percentage || 0;
+        progressBar.style.width = `${percentage}%`;
+    }
+    
+    if (progressText) {
+        if (progress.status === 'QUEUED') {
+            progressText.textContent = `Queued (Position: ${progress.queue_position || 'N/A'})`;
+        } else if (progress.status === 'RUNNING') {
+            if (progress.total_samples > 0) {
+                progressText.textContent = `Processing: ${progress.current_sample || 0} / ${progress.total_samples} samples (${percentage.toFixed(1)}%)`;
+            } else {
+                progressText.textContent = progress.current_activity || 'Running...';
+            }
+        } else {
+            progressText.textContent = progress.current_activity || progress.status;
+        }
+    }
+    
+    if (progressDetails) {
+        const details = [];
+        if (progress.estimated_time_remaining) {
+            const minutes = Math.floor(progress.estimated_time_remaining / 60);
+            const seconds = Math.floor(progress.estimated_time_remaining % 60);
+            details.push(`ETA: ${minutes}m ${seconds}s`);
+        }
+        if (progress.processed_samples > 0) {
+            details.push(`Completed: ${progress.processed_samples}`);
+        }
+        progressDetails.textContent = details.join(' • ');
+    }
+}
+
+// Hide progress UI
+function hideCoTProgress() {
+    if (cotProgressInterval) {
+        clearInterval(cotProgressInterval);
+        cotProgressInterval = null;
+    }
+    const loadingDiv = document.getElementById('cot-loading');
+    if (loadingDiv) {
+        loadingDiv.classList.add('hidden');
     }
 }
 
