@@ -2203,7 +2203,6 @@ def _run_cot_analysis_sync_direct(job_id: str):
         
         # Save JSON
         try:
-<<<<<<< Updated upstream
             # Get raw data
             raw_data = get_job_raw_data(job_id)
             data_list = raw_data.get('data', [])
