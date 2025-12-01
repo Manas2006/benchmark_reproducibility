@@ -11,10 +11,16 @@ import os
 import tempfile
 import shutil
 
+# Add the directory containing this script to the Python path for imports
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
 try:
     from vllm import LLM, SamplingParams
-    from transformers import AutoConfig
+    from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
     import transformers
+    import torch
 except ImportError:
     print("ERROR: vllm not installed. Please install with: pip install vllm")
     sys.exit(1)
@@ -42,12 +48,10 @@ def main():
     stop_token_ids = payload.get('stop_token_ids', None)
     gpu_memory_utilization = payload.get('gpu_memory_utilization', 0.9)
     max_model_len = payload.get('max_model_len', 4096)
-    max_num_seqs = payload.get('max_num_seqs', 16)  # Lower default to reduce OOM risk
     
     print(f"🚀 Loading model: {model_name}")
     print(f"📊 GPU memory utilization: {gpu_memory_utilization}")
     print(f"📏 Max model length: {max_model_len}")
-    print(f"📦 Max num sequences: {max_num_seqs}")
     print(f"🎲 Temperature: {temperature}, top_p: {top_p}, top_k: {top_k}")
     print(f"📝 Number of prompts: {len(prompts)}")
     
@@ -130,7 +134,6 @@ def main():
         "trust_remote_code": True,
         "gpu_memory_utilization": gpu_memory_utilization,
         "max_model_len": max_model_len,
-        "max_num_seqs": max_num_seqs,  # Limit batch size to reduce memory usage
         "tensor_parallel_size": 1,
     }
     
@@ -140,11 +143,22 @@ def main():
     else:
         print("✅ Using FlashAttention for optimal performance")
     
+    # Try to load with vLLM, fall back to HuggingFace if architecture is unsupported
+    use_hf_fallback = False
+    llm = None
+    hf_model = None
+    hf_tokenizer = None
+    
     try:
         llm = LLM(**llm_kwargs)
     except (TypeError, ValueError) as e:
         error_str = str(e)
-        if "unsupported operand type" in error_str or "NoneType" in error_str or "head_dim" in error_str.lower():
+        # Check if this is an unsupported architecture error
+        if "Model architectures" in error_str and "are not supported" in error_str:
+            print(f"⚠️ vLLM does not support this model architecture: {model_name}")
+            print(f"🔄 Falling back to HuggingFace transformers...")
+            use_hf_fallback = True
+        elif "unsupported operand type" in error_str or "NoneType" in error_str or "head_dim" in error_str.lower():
             error_msg = (
                 f"\n❌ Error loading vLLM model '{model_name}':\n"
                 f"   The model configuration appears to be incomplete or incompatible with vLLM.\n"
@@ -165,33 +179,19 @@ def main():
             )
             print(error_msg, file=sys.stderr)
             sys.exit(1)
-        raise
+        else:
+            raise
     except Exception as e:
         error_str = str(e)
-        is_oom = "out of memory" in error_str.lower() or "CUDA error: out of memory" in error_str
-        
-        if is_oom:
-            error_msg = (
-                f"\n❌ CUDA out of memory when loading vLLM model '{model_name}':\n"
-                f"   {error_str}\n"
-                f"   \n"
-                f"   Current settings:\n"
-                f"   - gpu_memory_utilization: {gpu_memory_utilization}\n"
-                f"   - max_model_len: {max_model_len}\n"
-                f"   - max_num_seqs: {max_num_seqs}\n"
-                f"   \n"
-                f"   Suggestions to fix:\n"
-                f"   1. Lower gpu_memory_utilization (try 0.7, 0.6, or 0.5)\n"
-                f"   2. Lower max_model_len (try {max_model_len // 2} or {max_model_len // 4})\n"
-                f"   3. Lower max_num_seqs (try {max_num_seqs // 2} or {max_num_seqs // 4})\n"
-                f"   4. Free up GPU memory from other processes\n"
-                f"   5. Use a smaller model or reduce batch size\n"
-                f"   6. Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to reduce fragmentation\n"
-            )
+        # Check if this is an unsupported architecture error
+        if "Model architectures" in error_str and "are not supported" in error_str:
+            print(f"⚠️ vLLM does not support this model architecture: {model_name}")
+            print(f"🔄 Falling back to HuggingFace transformers...")
+            use_hf_fallback = True
         else:
             error_msg = (
                 f"\n❌ Error loading vLLM model '{model_name}':\n"
-                f"   {error_str}\n"
+                f"   {str(e)}\n"
                 f"   \n"
                 f"   Please verify:\n"
                 f"   1. The model exists on HuggingFace: https://huggingface.co/{model_name}\n"
@@ -200,33 +200,121 @@ def main():
                 f"   4. You have access to the model (if it's private)\n"
                 f"   5. Try updating vLLM: pip install --upgrade vllm\n"
             )
-        print(error_msg, file=sys.stderr)
-        sys.exit(1)
+            print(error_msg, file=sys.stderr)
+            sys.exit(1)
     
-    # Configure sampling parameters
-    sampling_params = SamplingParams(
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k if top_k > 0 else -1,
-        max_tokens=max_tokens,
-        stop=stop if stop else None,
-        stop_token_ids=stop_token_ids if stop_token_ids else None,
-    )
+    if use_hf_fallback:
+        # Load model and tokenizer with HuggingFace transformers
+        print(f"📥 Loading model with HuggingFace transformers...")
+        try:
+            hf_tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+            if hf_tokenizer.pad_token is None:
+                if hf_tokenizer.eos_token:
+                    hf_tokenizer.pad_token = hf_tokenizer.eos_token
+                    hf_tokenizer.pad_token_id = hf_tokenizer.eos_token_id
+                elif hf_tokenizer.unk_token:
+                    hf_tokenizer.pad_token = hf_tokenizer.unk_token
+                    hf_tokenizer.pad_token_id = hf_tokenizer.unk_token_id
+            
+            hf_model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            if torch.cuda.is_available():
+                hf_model = hf_model.cuda()
+            hf_model.eval()
+            print(f"✅ HuggingFace model loaded successfully")
+        except Exception as e:
+            error_msg = (
+                f"\n❌ Error loading HuggingFace model '{model_name}':\n"
+                f"   {str(e)}\n"
+                f"   \n"
+                f"   Fallback to HuggingFace also failed. Please check:\n"
+                f"   1. The model exists on HuggingFace: https://huggingface.co/{model_name}\n"
+                f"   2. You have sufficient memory (GPU or CPU)\n"
+                f"   3. You have access to the model (if it's private)\n"
+            )
+            print(error_msg, file=sys.stderr)
+            sys.exit(1)
     
     # Run inference
     print("🔄 Running inference...")
-    outputs = llm.generate(prompts, sampling_params)
-    
-    # Format results
     results = []
-    for i, output in enumerate(outputs):
-        result = {
-            "prompt": output.prompt,
-            "prompt_token_ids": output.prompt_token_ids,
-            "generated_text": output.outputs[0].text if output.outputs else "",
-            "generated_token_ids": output.outputs[0].token_ids if output.outputs else [],
+    
+    if use_hf_fallback:
+        # Use HuggingFace transformers for generation
+        from model_utils import generate_completions
+        
+        # Convert stop_token_ids to stop sequences if provided
+        stop_sequences = stop if stop else []
+        if stop_token_ids and hf_tokenizer:
+            for token_id in stop_token_ids:
+                try:
+                    stop_token = hf_tokenizer.decode([token_id], skip_special_tokens=False)
+                    if stop_token not in stop_sequences:
+                        stop_sequences.append(stop_token)
+                except:
+                    pass
+        
+        # Generate with HuggingFace
+        generation_kwargs = {
+            "max_new_tokens": max_tokens,
+            "temperature": temperature if temperature > 0 else None,
+            "top_p": top_p if top_p < 1.0 else None,
+            "top_k": top_k if top_k > 0 else None,
+            "do_sample": temperature > 0 or top_p < 1.0 or top_k > 0,
         }
-        results.append(result)
+        # Remove None values
+        generation_kwargs = {k: v for k, v in generation_kwargs.items() if v is not None}
+        
+        generated_texts = generate_completions(
+            model=hf_model,
+            tokenizer=hf_tokenizer,
+            prompts=prompts,
+            batch_size=16,
+            stop_id_sequences=stop_sequences,
+            **generation_kwargs
+        )
+        
+        # Format results to match vLLM output format
+        for i, (prompt, generated_text) in enumerate(zip(prompts, generated_texts)):
+            # Tokenize prompt to get token IDs
+            prompt_token_ids = hf_tokenizer.encode(prompt, add_special_tokens=False)
+            # Tokenize generated text to get token IDs
+            generated_token_ids = hf_tokenizer.encode(generated_text, add_special_tokens=False)
+            
+            result = {
+                "prompt": prompt,
+                "prompt_token_ids": prompt_token_ids,
+                "generated_text": generated_text,
+                "generated_token_ids": generated_token_ids,
+            }
+            results.append(result)
+    else:
+        # Use vLLM for generation
+        # Configure sampling parameters
+        sampling_params = SamplingParams(
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k if top_k > 0 else -1,
+            max_tokens=max_tokens,
+            stop=stop if stop else None,
+            stop_token_ids=stop_token_ids if stop_token_ids else None,
+        )
+        
+        outputs = llm.generate(prompts, sampling_params)
+        
+        # Format results
+        for i, output in enumerate(outputs):
+            result = {
+                "prompt": output.prompt,
+                "prompt_token_ids": output.prompt_token_ids,
+                "generated_text": output.outputs[0].text if output.outputs else "",
+                "generated_token_ids": output.outputs[0].token_ids if output.outputs else [],
+            }
+            results.append(result)
     
     # Write output
     with open(out_path, 'w', encoding='utf-8') as f:
@@ -234,32 +322,6 @@ def main():
     
     print(f"✅ Completed inference for {len(results)} prompts")
     print(f"💾 Results written to: {out_path}")
-    
-    # Explicitly free vLLM model and GPU memory before exiting
-    print("🧹 Cleaning up vLLM model and GPU memory before exit...")
-    try:
-        # Delete the LLM object to free model memory
-        del llm
-        llm = None
-        
-        # Force garbage collection
-        import gc
-        gc.collect()
-        
-        # Clear PyTorch CUDA cache
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            # Reset peak memory stats
-            torch.cuda.reset_peak_memory_stats()
-            
-            # Verify memory is freed
-            free_bytes, total_bytes = torch.cuda.mem_get_info()
-            free_gb = round(free_bytes / (1024**3), 2)
-            print(f"✅ GPU memory freed: {free_gb}GB free")
-    except Exception as e:
-        print(f"⚠️ Warning during cleanup: {e}")
     
     # Explicitly exit to free VRAM
     sys.exit(0)
