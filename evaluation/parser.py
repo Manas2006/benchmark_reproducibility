@@ -614,13 +614,18 @@ def extract_answer(pred_str, data_name, use_last_number=True):
     
     if effective_data_name == "humaneval":
         # Extract function body from model output for HumanEval
+        # Apply stopping logic similar to reference implementation:
+        # Stop at <|endoftext|>, \n\n\n, \n\n, or def (next function definition)
+        # This matches the behavior of the reference HumanEval evaluation code
+        # But apply it AFTER trying to extract from code blocks
+        
         # First, try to extract from markdown code blocks
         code_block_pattern = r"```(?:python)?\s*\n(.*?)```"
         code_blocks = re.findall(code_block_pattern, pred_str, re.DOTALL)
         if code_blocks:
             # Use the last code block (most likely the final answer)
-            pred = code_blocks[-1].strip()
-            # Normalize indentation: detect base indentation and remove it
+            pred = code_blocks[-1].rstrip()
+            # Normalize indentation: normalize to standard Python indentation (multiples of 4)
             lines = pred.split('\n')
             if lines:
                 # Find minimum indentation (excluding empty lines)
@@ -628,8 +633,41 @@ def extract_answer(pred_str, data_name, use_last_number=True):
                 if non_empty:
                     min_indent = min(len(line) - len(line.lstrip()) for line in non_empty)
                     # Remove base indentation from all lines
-                    pred = '\n'.join(line[min_indent:] if line.strip() else line for line in lines).strip()
+                    pred = '\n'.join(line[min_indent:] if line.strip() else line for line in lines).rstrip()
+                    # Now normalize relative indentation to multiples of 4
+                    normalized_lines = []
+                    for line in pred.split('\n'):
+                        if line.strip():
+                            # Calculate current indent
+                            current_indent = len(line) - len(line.lstrip())
+                            # Round to nearest multiple of 4, but ensure at least 4 spaces for function body
+                            normalized_indent = max(4, ((current_indent + 2) // 4) * 4)
+                            normalized_lines.append(' ' * normalized_indent + line.lstrip())
+                        else:
+                            normalized_lines.append(line)
+                    pred = '\n'.join(normalized_lines).rstrip()
         else:
+            # No code blocks found - apply stopping logic to raw text
+            # Stop at <|endoftext|>
+            if "<|endoftext|>" in pred_str:
+                pred_str = pred_str.split("<|endoftext|>")[0]
+            
+            # Stop at triple newline
+            if "\n\n\n" in pred_str:
+                pred_str = pred_str.split("\n\n\n")[0]
+            
+            # Stop at double newline
+            if "\n\n" in pred_str:
+                pred_str = pred_str.split("\n\n")[0]
+            
+            # Stop at next function definition (def after the prompt)
+            # Find the first 'def ' that's not part of the prompt
+            # The prompt already contains a function definition, so we want to stop at the NEXT one
+            def_positions = [m.start() for m in re.finditer(r'\bdef\s+', pred_str)]
+            if len(def_positions) > 1:
+                # There's a second 'def ' - stop there (this is the next function)
+                pred_str = pred_str[:def_positions[1]]
+            
             # If no code block, extract everything after the prompt
             # Remove any leading text/explanations
             pred = pred_str.strip()
@@ -686,22 +724,27 @@ def extract_answer(pred_str, data_name, use_last_number=True):
         
         # Normalize indentation: ensure consistent indentation for function body
         # Function body should typically be indented 4 spaces
+        # Normalize relative indentation to standard Python levels (multiples of 4)
         lines = pred.split('\n')
         if lines:
-            # Find minimum indentation (excluding empty lines)
-            non_empty_lines = [line for line in lines if line.strip()]
-            if non_empty_lines:
-                min_indent = min(len(line) - len(line.lstrip()) for line in non_empty_lines)
-                # If code has some indentation, preserve relative indentation
-                # If code has no indentation, add 4 spaces (standard Python function body indent)
-                if min_indent == 0:
-                    # No base indentation - add 4 spaces to all non-empty lines
-                    pred = '\n'.join('    ' + line if line.strip() else line for line in lines).strip()
+            normalized_lines = []
+            for line in lines:
+                if line.strip():
+                    # Calculate current indent
+                    current_indent = len(line) - len(line.lstrip())
+                    # Normalize to multiples of 4, ensuring at least 4 spaces for function body
+                    # If current indent is 0, use 4. Otherwise, round to nearest multiple of 4
+                    if current_indent == 0:
+                        normalized_indent = 4
+                    else:
+                        # Round to nearest multiple of 4, but ensure minimum of 4
+                        normalized_indent = max(4, ((current_indent + 2) // 4) * 4)
+                    normalized_lines.append(' ' * normalized_indent + line.lstrip())
                 else:
-                    # Has indentation - normalize to remove base indent, then add 4 spaces
-                    pred = '\n'.join('    ' + (line[min_indent:] if line.strip() else line) for line in lines).strip()
+                    normalized_lines.append(line)
+            pred = '\n'.join(normalized_lines).rstrip()
         
-        return pred
+        return pred.rstrip()
     
     if effective_data_name in ["mmlu_stem", "sat_math", "aqua", "gaokao2023"]:
         # TODO check multiple choice
