@@ -55,6 +55,8 @@ class EvalRequest(BaseModel):
     enable_prob_tracking: bool = Field(default=False, description="Track probabilities of target answer tokens (requires vLLM)")
     enable_path_vectors: bool = Field(default=False, description="Enable Path of Distributions vectors (high memory usage)")
     max_path_steps: int = Field(default=0, description="Maximum steps to record for path vectors (0 or negative = unlimited)")
+    enable_ece_eval: bool = Field(default=False, description="Run Expected Calibration Error (ECE) evaluation with multiple runs")
+    ece_runs: conint(ge=1, le=50) = Field(default=10, description="Number of runs to use when ECE evaluation is enabled")
     # Together API options
     use_together_api: bool = Field(default=False, description="Use Together API instead of local models")
     together_api_key: Optional[str] = Field(default=None, description="Together API key (if not in env)")

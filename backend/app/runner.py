@@ -168,7 +168,7 @@ class MathEvalRunner:
         self._job_status_cache: Dict[str, tuple] = {}
         self._cache_ttl = 5.0  # Cache TTL in seconds (5 seconds)
         
-    def _build_cli_args(self, req: EvalRequest, job_id: str = None) -> list[str]:
+    def _build_cli_args(self, req: EvalRequest, job_id: str = None):
         """Build command line arguments for math_eval.py"""
         # Use path config from request if provided, otherwise use default
         path_config = req.path_config if req.path_config else self.config
@@ -266,6 +266,8 @@ class MathEvalRunner:
         if job_id:
             cli.extend(["--job_id", job_id])
         
+        is_ece_eval = getattr(req, 'enable_ece_eval', False)
+
         # Add probability tracking flag (only for local/vLLM inference)
         if getattr(req, 'enable_prob_tracking', False) and not getattr(req, 'use_together_api', False):
             if "--use_vllm" not in cli:
@@ -305,9 +307,10 @@ class MathEvalRunner:
         
         # Add job_id to filename if provided to avoid overwrites
         if job_id:
-            result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}_{job_id}.jsonl"
+            base_result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}_{job_id}.jsonl"
         else:
-            result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
+            base_result_file = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}.jsonl"
+        base_without_ext = base_result_file[:-6]  # remove .jsonl
 
         # Pre-compute probability JSONL path that math_eval will generate when enabled
         prob_file = None
@@ -315,13 +318,25 @@ class MathEvalRunner:
             # Use req.prompt_type directly to match math_eval.py logic (line 629)
             # math_eval.py uses args.prompt_type, not the computed prompt_type_for_file
             prob_suffix = f"_{req.prompt_type}_prob.jsonl"
-            if job_id:
-                base = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}_{job_id}"
-            else:
-                base = f"{path_config.output_dir}/{model_name}/{dataset}/{split}_{prompt_type_for_file}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}"
-            prob_file = f"{base}{prob_suffix}"
-        
-        return cli, result_file, prob_file
+            prob_base = base_without_ext
+            prob_file = f"{prob_base}{prob_suffix}"
+
+        summary_file = None
+        result_file = base_result_file
+
+        if is_ece_eval:
+            cli.append("--enable_ece")
+            cli.extend(["--ece_runs", str(getattr(req, 'ece_runs', 10))])
+            summary_dir = f"{path_config.output_dir}/{model_name}"
+            os.makedirs(summary_dir, exist_ok=True)
+            summary_file = os.path.join(summary_dir, f"ece_summary_{job_id or 'summary'}.json")
+            cli.extend(["--ece_summary_file", summary_file])
+            # First run output will use job_id suffix _run01
+            result_file = f"{base_without_ext}_run01.jsonl"
+            if prob_file:
+                prob_file = f"{base_without_ext}_{req.prompt_type}_averaged_prob.jsonl"
+
+        return cli, result_file, prob_file, summary_file
     
     def launch_job(self, req: EvalRequest) -> str:
         """Launch a math evaluation job using math_eval.py"""
@@ -343,7 +358,7 @@ class MathEvalRunner:
             print(f"Created scripts_dir: {scripts_path}")
         
         # Build CLI args with job_id to avoid overwrites
-        cli, result_file, prob_file = self._build_cli_args(req, uuid_jid)
+        cli, result_file, prob_file, summary_file = self._build_cli_args(req, uuid_jid)
         
         if req.backend == Backend.local:
             local_job_id = get_next_local_job_id()
@@ -377,7 +392,9 @@ class MathEvalRunner:
                 "err_file": err_file,
                 "result_file": result_file,
                 "prob_file": prob_file,
-                "local_job_id": local_job_id
+                "summary_file": summary_file,
+                "local_job_id": local_job_id,
+                "is_ece": bool(getattr(req, "enable_ece_eval", False)),
             }
             save_job_db()
             return uuid_jid
@@ -419,9 +436,14 @@ class MathEvalRunner:
             # Build conda activation section if conda_env_path is configured
             conda_activation = ""
             if path_config.conda_env_path:
+                # Extract environment name from path (e.g., /path/to/envs/mathevalUI -> mathevalUI)
+                conda_env_name = os.path.basename(path_config.conda_env_path)
+                # If path ends with /envs/env_name, extract env_name
+                if '/envs/' in path_config.conda_env_path:
+                    conda_env_name = path_config.conda_env_path.split('/envs/')[-1]
                 conda_activation = f"""# Activate conda environment
 source {path_config.conda_env_path}/etc/profile.d/conda.sh
-conda activate math_eval
+conda activate {conda_env_name}
 """
             else:
                 conda_activation = "# Note: No conda environment configured. Using system Python.\n"
@@ -499,7 +521,9 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                             "out_file": out_file,
                             "err_file": err_file,
                             "result_file": result_file,
-                            "prob_file": prob_file
+                            "prob_file": prob_file,
+                            "summary_file": summary_file,
+                            "is_ece": bool(getattr(req, "enable_ece_eval", False)),
                         }
                         save_job_db()
                         return uuid_jid
@@ -513,7 +537,9 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                             "error": f"SLURM submission failed: {result.stderr}",
                             "backend": "slurm",
                             "result_file": result_file,
-                            "prob_file": prob_file
+                            "prob_file": prob_file,
+                            "summary_file": summary_file,
+                            "is_ece": bool(getattr(req, "enable_ece_eval", False)),
                         }
                         save_job_db()
                         return uuid_jid
@@ -526,7 +552,10 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                         "sbatch_path": str(sbatch_path),
                         "error": f"SLURM submission error: {str(e)}",
                         "backend": "slurm",
-                        "result_file": result_file
+                        "result_file": result_file,
+                        "prob_file": prob_file,
+                        "summary_file": summary_file,
+                        "is_ece": bool(getattr(req, "enable_ece_eval", False)),
                     }
                     save_job_db()
                     return uuid_jid
@@ -539,7 +568,9 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     "sbatch_path": None,
                     "backend": "bash",
                     "result_file": result_file,
-                    "prob_file": prob_file
+                    "prob_file": prob_file,
+                    "summary_file": summary_file,
+                    "is_ece": bool(getattr(req, "enable_ece_eval", False)),
                 }
                 save_job_db()
                 return uuid_jid

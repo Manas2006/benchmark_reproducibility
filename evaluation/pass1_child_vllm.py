@@ -42,10 +42,12 @@ def main():
     stop_token_ids = payload.get('stop_token_ids', None)
     gpu_memory_utilization = payload.get('gpu_memory_utilization', 0.9)
     max_model_len = payload.get('max_model_len', 4096)
+    max_num_seqs = payload.get('max_num_seqs', 16)  # Lower default to reduce OOM risk
     
     print(f"🚀 Loading model: {model_name}")
     print(f"📊 GPU memory utilization: {gpu_memory_utilization}")
     print(f"📏 Max model length: {max_model_len}")
+    print(f"📦 Max num sequences: {max_num_seqs}")
     print(f"🎲 Temperature: {temperature}, top_p: {top_p}, top_k: {top_k}")
     print(f"📝 Number of prompts: {len(prompts)}")
     
@@ -128,6 +130,7 @@ def main():
         "trust_remote_code": True,
         "gpu_memory_utilization": gpu_memory_utilization,
         "max_model_len": max_model_len,
+        "max_num_seqs": max_num_seqs,  # Limit batch size to reduce memory usage
         "tensor_parallel_size": 1,
     }
     
@@ -164,17 +167,39 @@ def main():
             sys.exit(1)
         raise
     except Exception as e:
-        error_msg = (
-            f"\n❌ Error loading vLLM model '{model_name}':\n"
-            f"   {str(e)}\n"
-            f"   \n"
-            f"   Please verify:\n"
-            f"   1. The model exists on HuggingFace: https://huggingface.co/{model_name}\n"
-            f"   2. The model is compatible with vLLM\n"
-            f"   3. You have sufficient GPU memory\n"
-            f"   4. You have access to the model (if it's private)\n"
-            f"   5. Try updating vLLM: pip install --upgrade vllm\n"
-        )
+        error_str = str(e)
+        is_oom = "out of memory" in error_str.lower() or "CUDA error: out of memory" in error_str
+        
+        if is_oom:
+            error_msg = (
+                f"\n❌ CUDA out of memory when loading vLLM model '{model_name}':\n"
+                f"   {error_str}\n"
+                f"   \n"
+                f"   Current settings:\n"
+                f"   - gpu_memory_utilization: {gpu_memory_utilization}\n"
+                f"   - max_model_len: {max_model_len}\n"
+                f"   - max_num_seqs: {max_num_seqs}\n"
+                f"   \n"
+                f"   Suggestions to fix:\n"
+                f"   1. Lower gpu_memory_utilization (try 0.7, 0.6, or 0.5)\n"
+                f"   2. Lower max_model_len (try {max_model_len // 2} or {max_model_len // 4})\n"
+                f"   3. Lower max_num_seqs (try {max_num_seqs // 2} or {max_num_seqs // 4})\n"
+                f"   4. Free up GPU memory from other processes\n"
+                f"   5. Use a smaller model or reduce batch size\n"
+                f"   6. Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to reduce fragmentation\n"
+            )
+        else:
+            error_msg = (
+                f"\n❌ Error loading vLLM model '{model_name}':\n"
+                f"   {error_str}\n"
+                f"   \n"
+                f"   Please verify:\n"
+                f"   1. The model exists on HuggingFace: https://huggingface.co/{model_name}\n"
+                f"   2. The model is compatible with vLLM\n"
+                f"   3. You have sufficient GPU memory\n"
+                f"   4. You have access to the model (if it's private)\n"
+                f"   5. Try updating vLLM: pip install --upgrade vllm\n"
+            )
         print(error_msg, file=sys.stderr)
         sys.exit(1)
     
@@ -209,6 +234,32 @@ def main():
     
     print(f"✅ Completed inference for {len(results)} prompts")
     print(f"💾 Results written to: {out_path}")
+    
+    # Explicitly free vLLM model and GPU memory before exiting
+    print("🧹 Cleaning up vLLM model and GPU memory before exit...")
+    try:
+        # Delete the LLM object to free model memory
+        del llm
+        llm = None
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
+        
+        # Clear PyTorch CUDA cache
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            # Reset peak memory stats
+            torch.cuda.reset_peak_memory_stats()
+            
+            # Verify memory is freed
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            free_gb = round(free_bytes / (1024**3), 2)
+            print(f"✅ GPU memory freed: {free_gb}GB free")
+    except Exception as e:
+        print(f"⚠️ Warning during cleanup: {e}")
     
     # Explicitly exit to free VRAM
     sys.exit(0)

@@ -72,10 +72,12 @@ start_backend() {
     
     while [ $retry -lt $max_retries ]; do
         echo "📡 Attempting to start backend server on http://localhost:$port..."
-        echo "📝 Backend logs will be written to: /tmp/backend_$port.log"
-        echo "   To view logs in real-time, run: tail -f /tmp/backend_$port.log"
+        LOG_FILE="backend/logs/backend_$port.log"
+        echo "📝 Backend logs will be written to: $LOG_FILE"
+        echo "   To view logs in real-time, run: tail -f $LOG_FILE"
         cd backend
-        uvicorn app.main:app --reload --host 0.0.0.0 --port $port > /tmp/backend_$port.log 2>&1 &
+        mkdir -p logs
+        uvicorn app.main:app --reload --host 0.0.0.0 --port $port > logs/backend_$port.log 2>&1 &
         pid=$!
         cd ..
         
@@ -85,7 +87,7 @@ start_backend() {
         # Check if backend started successfully
         if ps -p $pid > /dev/null 2>&1; then
             # Check if there are any errors in the log
-            if grep -q "Address already in use" /tmp/backend_$port.log 2>/dev/null; then
+            if grep -q "Address already in use" "$LOG_FILE" 2>/dev/null; then
                 echo "⚠️  Port $port is already in use, trying next port..."
                 kill $pid 2>/dev/null
                 port=$(find_available_port $((port + 1)))
@@ -99,13 +101,13 @@ start_backend() {
             fi
         else
             # Check log for port conflict
-            if grep -q "Address already in use" /tmp/backend_$port.log 2>/dev/null; then
+            if grep -q "Address already in use" "$LOG_FILE" 2>/dev/null; then
                 echo "⚠️  Port $port is already in use, trying next port..."
                 port=$(find_available_port $((port + 1)))
                 retry=$((retry + 1))
                 continue
             else
-                echo "❌ Error: Backend server failed to start. Check /tmp/backend_$port.log for details"
+                echo "❌ Error: Backend server failed to start. Check $LOG_FILE for details"
                 rm -f "$CONFIG_FILE"
                 exit 1
             fi
@@ -127,8 +129,10 @@ start_frontend() {
     
     while [ $retry -lt $max_retries ]; do
         echo "🌐 Attempting to start frontend server on http://localhost:$port..."
+        LOG_FILE="frontend/logs/frontend_$port.log"
         cd frontend
-        python3 -m http.server $port > /tmp/frontend_$port.log 2>&1 &
+        mkdir -p logs
+        python3 -m http.server $port > logs/frontend_$port.log 2>&1 &
         pid=$!
         cd ..
         
@@ -138,7 +142,7 @@ start_frontend() {
         # Check if frontend started successfully
         if ps -p $pid > /dev/null 2>&1; then
             # Check if there are any errors in the log
-            if grep -q "Address already in use\|OSError.*98" /tmp/frontend_$port.log 2>/dev/null; then
+            if grep -q "Address already in use\|OSError.*98" "$LOG_FILE" 2>/dev/null; then
                 echo "⚠️  Port $port is already in use, trying next port..."
                 kill $pid 2>/dev/null
                 port=$(find_available_port $((port + 1)))
@@ -152,13 +156,13 @@ start_frontend() {
             fi
         else
             # Check log for port conflict
-            if grep -q "Address already in use\|OSError.*98" /tmp/frontend_$port.log 2>/dev/null; then
+            if grep -q "Address already in use\|OSError.*98" "$LOG_FILE" 2>/dev/null; then
                 echo "⚠️  Port $port is already in use, trying next port..."
                 port=$(find_available_port $((port + 1)))
                 retry=$((retry + 1))
                 continue
             else
-                echo "❌ Error: Frontend server failed to start. Check /tmp/frontend_$port.log for details"
+                echo "❌ Error: Frontend server failed to start. Check $LOG_FILE for details"
                 kill $BACKEND_PID 2>/dev/null
                 rm -f "$CONFIG_FILE"
                 exit 1

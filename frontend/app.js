@@ -459,6 +459,8 @@ function addModelConfig() {
         enable_prob_tracking: false,
         enable_path_vectors: false,
         max_path_steps: '0',
+        enable_ece_eval: false,
+        ece_runs: '10',
         prob_plot_type: 'aggregate',
         prob_plot_sample_id: ''
     };
@@ -817,6 +819,22 @@ function renderModelConfigs() {
                     <p class="text-xs text-gray-500 mt-2">Maximum number of steps to record for path vectors.</p>
                 </div>
                 ` : ''}
+
+                <div class="md:col-span-1">
+                    <label class="inline-flex items-center mt-6">
+                        <input type="checkbox" ${config.enable_ece_eval ? 'checked' : ''} onchange="updateModelConfig(${config.id}, 'enable_ece_eval', this.checked); renderModelConfigs();" class="form-checkbox h-5 w-5 text-emerald-600">
+                        <span class="ml-2 text-sm text-gray-700">Enable ECE evaluation (multiple runs)</span>
+                    </label>
+                    <p class="text-xs text-gray-500 mt-2">Runs the evaluation N times with sampling to measure calibration.</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-2">
+                        ECE Runs (N) 
+                        ${config.enable_ece_eval ? '<span class="text-emerald-600">● Active</span>' : '<span class="text-gray-400 text-xs font-normal">(will be used when ECE is enabled)</span>'}
+                    </label>
+                    <input type="number" min="1" max="50" onchange="const val = parseInt(this.value || '10'); if (isNaN(val) || val < 1) { this.value = '10'; updateModelConfig(${config.id}, 'ece_runs', 10); } else if (val > 50) { this.value = '50'; updateModelConfig(${config.id}, 'ece_runs', 50); } else { updateModelConfig(${config.id}, 'ece_runs', val); }" class="block w-full border border-gray-300 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition-all duration-200 ${config.enable_ece_eval ? 'border-emerald-300 bg-emerald-50' : ''}" value="${config.ece_runs}">
+                    <p class="text-xs text-gray-500 mt-2">Number of independent runs to average for ECE calculation (default 10, range: 1-50).</p>
+                </div>
                 
                 <div>
                     <label class="block text-sm font-semibold text-gray-700 mb-2">Dataset (one per line)</label>
@@ -1017,7 +1035,9 @@ async function submitEvaluation() {
                                                 max_tokens: parseInt(max_token),
                                                 enable_prob_tracking: !!config.enable_prob_tracking,
                                                 enable_path_vectors: !!config.enable_path_vectors,
-                                                max_path_steps: parseInt(config.max_path_steps || '0')
+                                                max_path_steps: parseInt(config.max_path_steps || '0'),
+                                                enable_ece_eval: !!config.enable_ece_eval,
+                                                ece_runs: Math.max(1, Math.min(50, parseInt(config.ece_runs || '10') || 10))
                                             };
                                             allJobs.push(requestData);
                                         });
@@ -1075,6 +1095,8 @@ function renderJobList(jobs) {
             jobIdDisplay = job.slurm_jid;
             slurmIdLine = `<p class="text-xs text-gray-400">UUID: ${job.job_id}</p>`;
         }
+        const isEceJob = job.is_ece || (job.request && job.request.enable_ece_eval);
+        const eceLabel = isEceJob ? `<span class="ml-2 px-2 py-0.5 text-xs font-semibold bg-emerald-100 text-emerald-700 rounded-full">ECE</span>` : '';
         // Buttons for viewing results
         let resultButtonHtml = '';
         let errorButtonHtml = '';
@@ -1129,10 +1151,11 @@ function renderJobList(jobs) {
         jobDiv.innerHTML = `
             <div class="flex justify-between items-start">
                 <div>
-                    <h3 class="font-medium">Job ID: ${jobIdDisplay}</h3>
+                    <h3 class="font-medium flex items-center gap-2">Job ID: ${jobIdDisplay} ${eceLabel}</h3>
                     ${slurmIdLine}
                     <p class="text-sm text-gray-600">Model: ${job.request?.model || 'N/A'}</p>
                     <p class="text-sm text-gray-600">Dataset: ${job.request?.dataset || 'N/A'}</p>
+                    ${isEceJob ? `<p class="text-sm text-gray-600">ECE Runs: ${job.request?.ece_runs || job.ece_runs || 'N/A'}</p>` : ''}
                     <p class="text-sm text-gray-600">Status: <span class="font-medium ${getStatusColor(job.status)}">${job.status}</span></p>
                     ${job.error ? `<p class="text-sm text-red-600 font-medium mt-1">Error: ${escapeHtml(job.error)}</p>` : ''}
                 </div>
