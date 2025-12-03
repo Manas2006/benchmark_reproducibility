@@ -104,6 +104,7 @@ const AVAILABLE_MODELS = [
     'https://huggingface.co/google/gemma-7b',
     'https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct',
     'https://huggingface.co/microsoft/phi-4',
+    'https://huggingface.co/microsoft/Phi-4-reasoning',
     'Link from Hugging Face'
 ];
 
