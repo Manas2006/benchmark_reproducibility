@@ -532,6 +532,26 @@ def extract_answer(pred_str, data_name, use_last_number=True):
         # Fallback: return empty string if no match
         return ""
     
+    if effective_data_name == "commonsense_qa":
+        # CommonsenseQA: Extract multiple choice answer (A-E format)
+        # Look for "Final Answer:" pattern first
+        final_answer_match = re.search(r"Final Answer:\s*([A-E])", pred_str, re.IGNORECASE)
+        if final_answer_match:
+            return final_answer_match.group(1).upper()
+        
+        # Look for parenthesized letters: (A), (B), etc.
+        mc_parentheses = re.findall(r"\(([A-E])\)", pred_str, re.IGNORECASE)
+        if mc_parentheses:
+            return mc_parentheses[-1].upper()
+        
+        # Look for standalone letters A-E (word boundaries)
+        mc_standalone = re.findall(r"\b([A-E])\b", pred_str, re.IGNORECASE)
+        if mc_standalone:
+            return mc_standalone[-1].upper()
+        
+        # Fallback: return empty string if no match
+        return ""
+    
     if effective_data_name == "gpqa":
         # GPQA: Extract multiple choice answer (A-E format)
         # Look for parenthesized letters first: (A), (B), etc.
@@ -909,6 +929,11 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         gt_cot = None
         gt_ans = example.get("target", example.get("gt", example.get("answerKey", "")))
         # Store as "A", "B", etc. or "1", "2", etc. (preserve original format)
+    elif data_name == "commonsense_qa":
+        # CommonsenseQA: multiple choice format A, B, C, D, E
+        gt_cot = None
+        gt_ans = example.get("target", example.get("gt", example.get("answerKey", "")))
+        # Store as "A", "B", "C", "D", or "E"
     else:
         raise NotImplementedError(f"`{data_name}`")
     # post process
@@ -924,6 +949,9 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         gt_ans = str(gt_ans).strip() if gt_ans else ""
     elif data_name in ["arc_challenge", "arc_easy", "arc"]:
         # ARC: preserve answer format, only strip whitespace
+        gt_ans = str(gt_ans).strip() if gt_ans else ""
+    elif data_name == "commonsense_qa":
+        # CommonsenseQA: preserve answer format (A, B, C, D, E), only strip whitespace
         gt_ans = str(gt_ans).strip() if gt_ans else ""
     elif data_name not in STRIP_EXCEPTIONS:
         gt_ans = strip_string(gt_ans, skip_unit=data_name == "carp_en")
@@ -998,6 +1026,9 @@ def parse_question(example, data_name):
         question = example.get("question", "")
     elif data_name in ["arc_challenge", "arc_easy", "arc"]:
         # ARC: return question field (already contains options formatted as "(A) option1", etc.)
+        question = example.get("question", "")
+    elif data_name == "commonsense_qa":
+        # CommonsenseQA: return question field
         question = example.get("question", "")
     else:
         for key in ["question", "problem", "Question", "input"]:
