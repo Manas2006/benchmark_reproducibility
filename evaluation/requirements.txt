@@ -9,6 +9,9 @@ python_dateutil
 
 # math_eval
 sympy==1.12
+
+# HumanEval official evaluator
+human-eval @ git+https://github.com/openai/human-eval.git
 antlr4-python3-runtime==4.7.2 # Required by latex2sympy2
 word2number
 Pebble

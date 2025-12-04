@@ -2457,9 +2457,11 @@ def main(llm, tokenizer, data_name, args):
         samples=all_samples,
         data_name=data_name,
         prompt_type=args.prompt_type,
+        file_path=out_file,  # Pass file path for HumanEval official evaluation
         execute=True,
         eval_method=args.eval_method,
         k=args.n_sampling,  # Use n_sampling as k
+        run_humaneval_official=(data_name == "humaneval"),  # Run official eval for HumanEval
     )
 
     # After evaluation, if path vectors were enabled, ensure every sample points to the run's .npz file

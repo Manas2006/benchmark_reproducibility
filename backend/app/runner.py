@@ -706,11 +706,115 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
             print(f"Error running post-processing for job {jid}: {str(e)}")
             return False
     
+    def _run_humaneval_official_evaluation(self, jid: str, result_file: str) -> bool:
+        """Run official HumanEval evaluation on completed HumanEval job"""
+        try:
+            # Build HumanEval evaluation command
+            config = path_manager.get_config()
+            python_bin = config.python_path
+            eval_dir = Path(config.evaluation_dir)
+            humaneval_script = eval_dir / "humaneval_postprocess.py"
+            
+            if not humaneval_script.exists():
+                print(f"Warning: humaneval_postprocess.py not found at {humaneval_script}")
+                return False
+            
+            # Determine metrics file path (matches math_eval.py naming convention)
+            result_path = Path(result_file)
+            # Look for existing metrics file
+            metrics_file = None
+            for suffix in ["_humaneval_metrics.json", "_cot_metrics.json", "_metrics.json"]:
+                candidate = result_path.parent / f"{result_path.stem}{suffix}"
+                if candidate.exists():
+                    metrics_file = str(candidate)
+                    break
+            
+            # Build command
+            cmd = [
+                python_bin,
+                str(humaneval_script),
+                "--output_file", str(result_file),
+                "--output_dir", str(result_path.parent)
+            ]
+            
+            if metrics_file:
+                cmd.extend(["--metrics_file", metrics_file])
+            
+            print(f"Running HumanEval official evaluation for job {jid}: {' '.join(cmd)}")
+            
+            # Run evaluation
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=eval_dir)
+            
+            if result.returncode == 0:
+                # Update job info
+                job_db[jid]["humaneval_official_done"] = True
+                job_db[jid].pop("humaneval_official_failed", None)
+                job_db[jid].pop("humaneval_official_failure_time", None)
+                save_job_db()
+                print(f"HumanEval official evaluation completed for job {jid}")
+                print(f"Output: {result.stdout}")
+                return True
+            else:
+                # Track the failure
+                job_db[jid]["humaneval_official_failed"] = True
+                job_db[jid]["humaneval_official_failure_time"] = time.time()
+                job_db[jid]["humaneval_official_error"] = result.stderr[:500]
+                save_job_db()
+                print(f"HumanEval official evaluation failed for job {jid}: {result.stderr}")
+                return False
+                
+        except Exception as e:
+            # Track the failure
+            job_db[jid]["humaneval_official_failed"] = True
+            job_db[jid]["humaneval_official_failure_time"] = time.time()
+            job_db[jid]["humaneval_official_error"] = str(e)[:500]
+            save_job_db()
+            print(f"Error running HumanEval official evaluation for job {jid}: {str(e)}")
+            return False
+    
+    def _check_and_run_humaneval_official(self, jid: str, job_info: dict) -> None:
+        """Check if job needs HumanEval official evaluation and run it if needed"""
+        try:
+            # Check if this is a HumanEval job
+            request = job_info.get("request", {})
+            dataset = request.get("dataset", "")
+            
+            if dataset.lower() != "humaneval":
+                return
+            
+            # Check if HumanEval official evaluation has already been done
+            if job_info.get("humaneval_official_done", False):
+                return
+            
+            # Check if it previously failed (don't retry immediately)
+            if job_info.get("humaneval_official_failed", False):
+                failure_time = job_info.get("humaneval_official_failure_time", 0)
+                # Only retry if it's been more than 10 minutes since last failure
+                if time.time() - failure_time < 600:
+                    return
+            
+            # Get result file
+            result_file = job_info.get("result_file")
+            if not result_file or not Path(result_file).exists():
+                return
+            
+            # Run HumanEval official evaluation
+            self._run_humaneval_official_evaluation(jid, result_file)
+            
+        except Exception as e:
+            print(f"Error checking HumanEval official evaluation for job {jid}: {str(e)}")
+    
     def _check_and_run_post_processing(self, jid: str, job_info: dict) -> None:
         """Check if job needs post-processing and run it if needed"""
         try:
-            # Check if this job has probability tracking enabled
             request = job_info.get("request", {})
+            
+            # Check for HumanEval official evaluation
+            dataset = request.get("dataset", "")
+            if dataset.lower() == "humaneval":
+                self._check_and_run_humaneval_official(jid, job_info)
+            
+            # Check if this job has probability tracking enabled
             enable_prob_tracking = request.get("enable_prob_tracking", False)
             
             if not enable_prob_tracking:

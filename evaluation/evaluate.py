@@ -1,4 +1,5 @@
 import argparse
+import os
 import numpy as np
 from tqdm import tqdm
 from pebble import ProcessPool
@@ -10,9 +11,21 @@ from parser import *
 from utils import load_jsonl
 from python_executor import PythonExecutor
 
+# HumanEval official evaluation support
+try:
+    from humaneval_postprocess import (
+        run_humaneval_official_evaluation,
+        update_metrics_with_humaneval_scores
+    )
+    HUMANEVAL_OFFICIAL_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: HumanEval official evaluation not available: {e}")
+    HUMANEVAL_OFFICIAL_AVAILABLE = False
 
-def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, max_num_samples=None, execute=False, eval_method="pass@k", k=1):
+
+def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, max_num_samples=None, execute=False, eval_method="pass@k", k=1, run_humaneval_official=True):
     # Note: k parameter is kept for backwards compatibility but represents n_sampling internally
+    # run_humaneval_official: whether to run official HumanEval evaluation (default True for humaneval)
     assert samples or file_path, "samples or file_path must be provided"
     if not samples:
         samples = list(load_jsonl(file_path))
@@ -241,6 +254,52 @@ def evaluate(data_name, prompt_type, samples: list=None, file_path: str=None, ma
         type_scores = {k: np.round(np.array(v).mean() * 100, decimals=1) for k, v in type_scores.items()}
         type_scores = {k: v for k, v in sorted(type_scores.items(), key=lambda item: item[0])}
         result_json['type_acc'] = type_scores
+
+    # Run official HumanEval evaluation if applicable
+    if is_humaneval and run_humaneval_official and HUMANEVAL_OFFICIAL_AVAILABLE:
+        print("\n--- Running Official HumanEval Evaluation ---")
+        try:
+            # Determine output file path for official evaluation
+            humaneval_output_file = file_path
+            if not humaneval_output_file and samples:
+                # If samples were passed directly, we need to save them temporarily
+                import tempfile
+                import json
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+                    for sample in samples:
+                        f.write(json.dumps(sample) + '\n')
+                    humaneval_output_file = f.name
+            
+            if humaneval_output_file:
+                # Run official evaluation
+                humaneval_results = run_humaneval_official_evaluation(
+                    output_file=humaneval_output_file,
+                    output_dir=os.path.dirname(humaneval_output_file) if humaneval_output_file else None
+                )
+                
+                # Update result_json with official scores
+                if "accuracy" in humaneval_results:
+                    result_json["acc"] = round(humaneval_results["accuracy"], 1)
+                    result_json["humaneval_official_acc"] = round(humaneval_results["accuracy"], 1)
+                
+                # Add pass@k values from official evaluation
+                result_json["humaneval_official"] = {}
+                for key, value in humaneval_results.items():
+                    if key.startswith("pass@"):
+                        result_json["humaneval_official"][key] = value
+                
+                result_json["humaneval_official"]["k"] = humaneval_results.get("k", k)
+                result_json["humaneval_official"]["humaneval_samples_file"] = humaneval_results.get("humaneval_samples_file")
+                
+                print(f"Official HumanEval pass@1: {humaneval_results.get('pass@1', 'N/A')}")
+                if k > 1:
+                    print(f"Official HumanEval pass@{k}: {humaneval_results.get(f'pass@{k}', 'N/A')}")
+        except Exception as e:
+            print(f"Warning: Official HumanEval evaluation failed: {e}")
+            result_json["humaneval_official_error"] = str(e)
+    elif is_humaneval and run_humaneval_official and not HUMANEVAL_OFFICIAL_AVAILABLE:
+        print("Warning: HumanEval official evaluation requested but human-eval package not installed")
+        result_json["humaneval_official_error"] = "human-eval package not installed"
 
     print(result_json)
     return samples, result_json

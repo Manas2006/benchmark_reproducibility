@@ -614,21 +614,71 @@ def extract_answer(pred_str, data_name, use_last_number=True):
     
     if effective_data_name == "humaneval":
         # Extract function body from model output for HumanEval
-        # First, try to extract from markdown code blocks
-        code_block_pattern = r"```(?:python)?\s*\n(.*?)```"
+        # Simple approach: extract ```python``` code block, remove signature, preserve indentation
+        code_block_pattern = r"```(?:python)?\s*\n(.*?)\n```"
         code_blocks = re.findall(code_block_pattern, pred_str, re.DOTALL)
         if code_blocks:
             # Use the last code block (most likely the final answer)
-            pred = code_blocks[-1].strip()
-            # Normalize indentation: detect base indentation and remove it
-            lines = pred.split('\n')
-            if lines:
-                # Find minimum indentation (excluding empty lines)
-                non_empty = [line for line in lines if line.strip()]
-                if non_empty:
-                    min_indent = min(len(line) - len(line.lstrip()) for line in non_empty)
-                    # Remove base indentation from all lines
-                    pred = '\n'.join(line[min_indent:] if line.strip() else line for line in lines).strip()
+            code_block_content = code_blocks[-1]
+            lines = code_block_content.split('\n')
+            
+            # Find and remove function signature (def line) and docstring
+            body_lines = []
+            skip_def = True
+            in_docstring = False
+            docstring_quotes = None
+            
+            for line in lines:
+                stripped = line.strip()
+                
+                # Skip function signature line
+                if skip_def and stripped.startswith('def '):
+                    skip_def = False
+                    # Check if docstring starts on same line
+                    if '"""' in stripped or "'''" in stripped:
+                        # Find docstring quotes
+                        if '"""' in stripped:
+                            docstring_quotes = '"""'
+                        elif "'''" in stripped:
+                            docstring_quotes = "'''"
+                        # Check if docstring ends on same line
+                        quote_count = stripped.count(docstring_quotes)
+                        if quote_count >= 2:
+                            in_docstring = False
+                        else:
+                            in_docstring = True
+                    continue
+                
+                # Handle docstring
+                if in_docstring:
+                    if docstring_quotes in stripped:
+                        in_docstring = False
+                    continue
+                
+                # After skipping def and docstring, collect body lines
+                # Preserve original indentation (spaces before the code)
+                if not skip_def:
+                    body_lines.append(line)
+            
+            # Join body lines, preserving original indentation
+            # Ensure first line has at least 4 spaces (function body indentation)
+            if body_lines:
+                first_line = body_lines[0]
+                first_indent = len(first_line) - len(first_line.lstrip())
+                if first_indent < 4:
+                    # Add 4 spaces to first line if it has less
+                    body_lines[0] = ' ' * 4 + first_line.lstrip()
+                    # Adjust other lines to maintain relative indentation
+                    if len(body_lines) > 1:
+                        adjusted_lines = [body_lines[0]]
+                        for line in body_lines[1:]:
+                            current_indent = len(line) - len(line.lstrip())
+                            relative_indent = current_indent - first_indent
+                            new_indent = 4 + relative_indent
+                            adjusted_lines.append(' ' * new_indent + line.lstrip())
+                        body_lines = adjusted_lines
+            
+            pred = '\n'.join(body_lines).strip()
         else:
             # If no code block, extract everything after the prompt
             # Remove any leading text/explanations
@@ -684,22 +734,34 @@ def extract_answer(pred_str, data_name, use_last_number=True):
             # Remove function signature line
             pred = '\n'.join(lines[1:]).strip()
         
-        # Normalize indentation: ensure consistent indentation for function body
-        # Function body should typically be indented 4 spaces
+        # Final normalization: ensure first line has 4 spaces (function body indentation)
+        # Only normalize if first line doesn't have proper indentation
         lines = pred.split('\n')
         if lines:
-            # Find minimum indentation (excluding empty lines)
             non_empty_lines = [line for line in lines if line.strip()]
             if non_empty_lines:
-                min_indent = min(len(line) - len(line.lstrip()) for line in non_empty_lines)
-                # If code has some indentation, preserve relative indentation
-                # If code has no indentation, add 4 spaces (standard Python function body indent)
-                if min_indent == 0:
-                    # No base indentation - add 4 spaces to all non-empty lines
-                    pred = '\n'.join('    ' + line if line.strip() else line for line in lines).strip()
-                else:
-                    # Has indentation - normalize to remove base indent, then add 4 spaces
-                    pred = '\n'.join('    ' + (line[min_indent:] if line.strip() else line) for line in lines).strip()
+                first_line = non_empty_lines[0]
+                first_indent = len(first_line) - len(first_line.lstrip())
+                
+                if first_indent < 4:
+                    # First line needs indentation - add 4 spaces and adjust others
+                    min_indent = min(len(line) - len(line.lstrip()) for line in non_empty_lines)
+                    normalized_lines = []
+                    for line in lines:
+                        if line.strip():
+                            current_indent = len(line) - len(line.lstrip())
+                            relative_indent = current_indent - min_indent
+                            # First line should be 4 spaces, others maintain relative
+                            normalized_indent = 4 + relative_indent
+                            content = line.lstrip()
+                            normalized_line = ' ' * normalized_indent + content
+                            normalized_lines.append(normalized_line)
+                        else:
+                            normalized_lines.append('')
+                    pred = '\n'.join(normalized_lines)
+                    # Don't strip() here as it might remove leading spaces from first line
+                    # Only strip trailing whitespace
+                    pred = pred.rstrip()
         
         return pred
     
