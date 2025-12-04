@@ -62,6 +62,9 @@ window.WS_BASE = 'ws://localhost:$BACKEND_PORT';
 console.log('📡 Backend configured on port $BACKEND_PORT');
 EOF
 
+# Create logs directory if it doesn't exist
+mkdir -p backend/logs
+
 # Function to start backend with retry
 start_backend() {
     local start_port=$1
@@ -69,15 +72,14 @@ start_backend() {
     local max_retries=5
     local retry=0
     local pid
+    local log_file="backend/logs/backend_$port.log"
     
     while [ $retry -lt $max_retries ]; do
         echo "📡 Attempting to start backend server on http://localhost:$port..."
-        LOG_FILE="backend/logs/backend_$port.log"
-        echo "📝 Backend logs will be written to: $LOG_FILE"
-        echo "   To view logs in real-time, run: tail -f $LOG_FILE"
+        echo "📝 Backend logs will be written to: $log_file"
+        echo "   To view logs in real-time, run: tail -f $log_file"
         cd backend
-        mkdir -p logs
-        uvicorn app.main:app --reload --host 0.0.0.0 --port $port > logs/backend_$port.log 2>&1 &
+        uvicorn app.main:app --reload --host 0.0.0.0 --port $port > "logs/backend_$port.log" 2>&1 &
         pid=$!
         cd ..
         
@@ -87,27 +89,30 @@ start_backend() {
         # Check if backend started successfully
         if ps -p $pid > /dev/null 2>&1; then
             # Check if there are any errors in the log
-            if grep -q "Address already in use" "$LOG_FILE" 2>/dev/null; then
+            if grep -q "Address already in use" "$log_file" 2>/dev/null; then
                 echo "⚠️  Port $port is already in use, trying next port..."
                 kill $pid 2>/dev/null
                 port=$(find_available_port $((port + 1)))
+                log_file="backend/logs/backend_$port.log"
                 retry=$((retry + 1))
                 continue
             else
                 echo "✅ Backend server started successfully on port $port"
                 BACKEND_PID=$pid
                 BACKEND_PORT=$port
+                BACKEND_LOG=$log_file
                 return 0
             fi
         else
             # Check log for port conflict
-            if grep -q "Address already in use" "$LOG_FILE" 2>/dev/null; then
+            if grep -q "Address already in use" "$log_file" 2>/dev/null; then
                 echo "⚠️  Port $port is already in use, trying next port..."
                 port=$(find_available_port $((port + 1)))
+                log_file="backend/logs/backend_$port.log"
                 retry=$((retry + 1))
                 continue
             else
-                echo "❌ Error: Backend server failed to start. Check $LOG_FILE for details"
+                echo "❌ Error: Backend server failed to start. Check $log_file for details"
                 rm -f "$CONFIG_FILE"
                 exit 1
             fi
@@ -126,13 +131,12 @@ start_frontend() {
     local max_retries=5
     local retry=0
     local pid
+    local log_file="backend/logs/frontend_$port.log"
     
     while [ $retry -lt $max_retries ]; do
         echo "🌐 Attempting to start frontend server on http://localhost:$port..."
-        LOG_FILE="frontend/logs/frontend_$port.log"
         cd frontend
-        mkdir -p logs
-        python3 -m http.server $port > logs/frontend_$port.log 2>&1 &
+        python3 -m http.server $port > "../backend/logs/frontend_$port.log" 2>&1 &
         pid=$!
         cd ..
         
@@ -142,27 +146,30 @@ start_frontend() {
         # Check if frontend started successfully
         if ps -p $pid > /dev/null 2>&1; then
             # Check if there are any errors in the log
-            if grep -q "Address already in use\|OSError.*98" "$LOG_FILE" 2>/dev/null; then
+            if grep -q "Address already in use\|OSError.*98" "$log_file" 2>/dev/null; then
                 echo "⚠️  Port $port is already in use, trying next port..."
                 kill $pid 2>/dev/null
                 port=$(find_available_port $((port + 1)))
+                log_file="backend/logs/frontend_$port.log"
                 retry=$((retry + 1))
                 continue
             else
                 echo "✅ Frontend server started successfully on port $port"
                 FRONTEND_PID=$pid
                 FRONTEND_PORT=$port
+                FRONTEND_LOG=$log_file
                 return 0
             fi
         else
             # Check log for port conflict
-            if grep -q "Address already in use\|OSError.*98" "$LOG_FILE" 2>/dev/null; then
+            if grep -q "Address already in use\|OSError.*98" "$log_file" 2>/dev/null; then
                 echo "⚠️  Port $port is already in use, trying next port..."
                 port=$(find_available_port $((port + 1)))
+                log_file="backend/logs/frontend_$port.log"
                 retry=$((retry + 1))
                 continue
             else
-                echo "❌ Error: Frontend server failed to start. Check $LOG_FILE for details"
+                echo "❌ Error: Frontend server failed to start. Check $log_file for details"
                 kill $BACKEND_PID 2>/dev/null
                 rm -f "$CONFIG_FILE"
                 exit 1
@@ -196,20 +203,21 @@ echo "✅ Qwen Math Evaluation UI is running!"
 echo "   Backend:  http://localhost:$BACKEND_PORT"
 echo "   Frontend: http://localhost:$FRONTEND_PORT"
 echo ""
-echo "Press Ctrl+C to stop both servers"
+echo "📝 Servers are running in the background"
+echo "   Backend PID: $BACKEND_PID"
+echo "   Frontend PID: $FRONTEND_PID"
+echo ""
+echo "To stop servers, run:"
+echo "   kill $BACKEND_PID $FRONTEND_PID"
+echo ""
+echo "To view logs:"
+echo "   tail -f backend/logs/backend_$BACKEND_PORT.log"
+echo "   tail -f backend/logs/frontend_$FRONTEND_PORT.log"
 
-# Function to cleanup on exit
-cleanup() {
-    echo ""
-    echo "🛑 Stopping servers..."
-    kill $BACKEND_PID 2>/dev/null
-    kill $FRONTEND_PID 2>/dev/null
-    rm -f "$CONFIG_FILE"
-    exit 0
-}
+# Save PIDs to a file for easy cleanup
+mkdir -p backend/logs
+echo "$BACKEND_PID $FRONTEND_PID" > backend/logs/qwen_math_servers.pid
+echo "PIDs saved to backend/logs/qwen_math_servers.pid"
 
-# Set up signal handlers
-trap cleanup SIGINT SIGTERM
-
-# Wait for background processes
-wait 
+# Exit immediately - servers are running in background
+exit 0 

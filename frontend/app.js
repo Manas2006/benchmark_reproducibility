@@ -104,6 +104,7 @@ const AVAILABLE_MODELS = [
     'https://huggingface.co/google/gemma-7b',
     'https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct',
     'https://huggingface.co/microsoft/phi-4',
+    'https://huggingface.co/microsoft/Phi-4-reasoning',
     'Link from Hugging Face'
 ];
 
@@ -125,7 +126,16 @@ function getModelDisplayName(model) {
 const AVAILABLE_DATASETS = [
     'gsm8k',
     'math',
-    'gsm8k,math'
+    'gsm8k,math',
+    'math500',
+    'aqua',
+    'svamp',
+    'asdiv',
+    'humaneval',
+    'bigbenchhard',
+    'gpqa',
+    'arc_challenge',
+    'commonsense_qa'
 ];
 
 const EVAL_METHODS = [
@@ -190,6 +200,11 @@ const TOGETHER_API_MODELS = [
 let modelConfigs = [];
 let currentWebSocket = null;
 let structuredViewMode = true; // true for structured view, false for raw view
+
+// Job list pagination
+let allJobs = [];
+let jobsDisplayLimit = 15;
+const JOBS_PER_PAGE = 15;
 
 // Tab management
 function showTab(tabName, event = null) {
@@ -924,6 +939,7 @@ function renderModelConfigs() {
                         <option value="bigbenchhard" ${config.prompt_type === 'bigbenchhard' ? 'selected' : ''}>🧩 BIG-Bench Hard (Logical Reasoning)</option>
                         <option value="gpqa" ${config.prompt_type === 'gpqa' ? 'selected' : ''}>🔬 GPQA (Graduate-Level Physics QA)</option>
                         <option value="arc_challenge" ${config.prompt_type === 'arc_challenge' ? 'selected' : ''}>🎯 ARC-Challenge (Abstract Pattern Reasoning)</option>
+                        <option value="commonsense_qa" ${config.prompt_type === 'commonsense_qa' ? 'selected' : ''}>💡 CommonsenseQA (Commonsense Reasoning)</option>
                     </select>
                 </div>
                 
@@ -1078,14 +1094,25 @@ async function submitEvaluation() {
     }
 }
 
-function renderJobList(jobs) {
+function renderJobList(jobs, resetLimit = true) {
     const jobsList = document.getElementById('jobs-list');
     jobsList.innerHTML = '';
-    if (jobs.length === 0) {
+    
+    // Store all jobs and reset display limit if needed
+    allJobs = [...jobs].reverse(); // Reverse so most recent jobs appear first
+    if (resetLimit) {
+        jobsDisplayLimit = JOBS_PER_PAGE;
+    }
+    
+    if (allJobs.length === 0) {
         jobsList.innerHTML = '<p class="text-gray-500">No jobs found</p>';
         return;
     }
-    jobs.forEach(job => {
+    
+    // Only display up to jobsDisplayLimit jobs
+    const jobsToDisplay = allJobs.slice(0, jobsDisplayLimit);
+    
+    jobsToDisplay.forEach(job => {
         const jobDiv = document.createElement('div');
         jobDiv.className = 'border border-gray-200 rounded-lg p-4 mb-4 relative';
         // Always use UUID for job_id, but display SLURM job ID if present
@@ -1169,6 +1196,31 @@ function renderJobList(jobs) {
         `;
         jobsList.appendChild(jobDiv);
     });
+    
+    // Add "Load More" button if there are more jobs to show
+    if (jobsDisplayLimit < allJobs.length) {
+        const remainingJobs = allJobs.length - jobsDisplayLimit;
+        const loadMoreDiv = document.createElement('div');
+        loadMoreDiv.className = 'text-center mt-4 mb-2';
+        loadMoreDiv.innerHTML = `
+            <button onclick="loadMoreJobs()" class="px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors">
+                Load More (${remainingJobs} remaining)
+            </button>
+            <p class="text-sm text-gray-500 mt-2">Showing ${jobsDisplayLimit} of ${allJobs.length} jobs</p>
+        `;
+        jobsList.appendChild(loadMoreDiv);
+    } else if (allJobs.length > JOBS_PER_PAGE) {
+        // Show count when all jobs are displayed
+        const countDiv = document.createElement('div');
+        countDiv.className = 'text-center mt-4 text-sm text-gray-500';
+        countDiv.textContent = `Showing all ${allJobs.length} jobs`;
+        jobsList.appendChild(countDiv);
+    }
+}
+
+function loadMoreJobs() {
+    jobsDisplayLimit += JOBS_PER_PAGE;
+    renderJobList(allJobs.slice().reverse(), false); // Pass original order, don't reset limit
 }
 
 async function deleteJob(jobId) {

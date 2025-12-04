@@ -262,6 +262,21 @@ PROMPT_TEMPLATES = {
         "{output}",
         "\n\n\n",
     ),
+    "commonsense_qa": (
+        "You are a commonsense reasoning assistant. Read the question and the answer choices carefully.\n\n"
+        "Question:\n"
+        "{question}\n\n"
+        "Choices:\n"
+        "A. {A}\n"
+        "B. {B}\n"
+        "C. {C}\n"
+        "D. {D}\n"
+        "E. {E}\n\n"
+        "Think step-by-step and explain your reasoning. After you finish reasoning, give your final answer in the format:\n"
+        "Final Answer: <letter>",
+        "{output}",
+        "\n\n\n",
+    ),
 }
 
 

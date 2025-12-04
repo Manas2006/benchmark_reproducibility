@@ -224,6 +224,21 @@ Required JSON schema:
         # Build prompt and call OpenAI
         prompt = self.build_prompt(problem, cot, gold, flags_summary, evidence)
         
+        # Log judge input
+        try:
+            import logging
+            cot_logger = logging.getLogger("cot_analysis_api")
+            if cot_logger:
+                cot_logger.info(f"[JUDGE] Calling LLM judge - model={self.model}, mode={self.mode}")
+                cot_logger.info(f"[JUDGE] Input prompt (first 500 chars): {prompt[:500]}...")
+                cot_logger.info(f"[JUDGE] Full prompt length: {len(prompt)} chars")
+                cot_logger.info(f"[JUDGE] Problem: {problem[:200]}...")
+                cot_logger.info(f"[JUDGE] CoT length: {len(cot)} chars")
+                cot_logger.info(f"[JUDGE] Gold answer: {gold}")
+                cot_logger.info(f"[JUDGE] Flags summary: {flags_summary[:200]}...")
+        except Exception:
+            pass  # Don't fail if logging isn't available
+        
         try:
             resp = self.client.chat.completions.create(
                 model=self.model,
@@ -237,8 +252,30 @@ Required JSON schema:
             
             raw_output = resp.choices[0].message.content
             
+            # Log judge response
+            try:
+                import logging
+                cot_logger = logging.getLogger("cot_analysis_api")
+                if cot_logger:
+                    cot_logger.info(f"[JUDGE] LLM response received - length: {len(raw_output)} chars")
+                    cot_logger.info(f"[JUDGE] Full response: {raw_output}")
+                    cot_logger.info(f"[JUDGE] Usage - prompt_tokens: {resp.usage.prompt_tokens if hasattr(resp, 'usage') and resp.usage else 'N/A'}, completion_tokens: {resp.usage.completion_tokens if hasattr(resp, 'usage') and resp.usage else 'N/A'}")
+            except Exception:
+                pass
+            
             # Extract JSON using guard clause
-            return self._extract_json_safely(raw_output)
+            parsed_scores = self._extract_json_safely(raw_output)
+            
+            # Log parsed scores
+            try:
+                import logging
+                cot_logger = logging.getLogger("cot_analysis_api")
+                if cot_logger:
+                    cot_logger.info(f"[JUDGE] Parsed scores: {parsed_scores}")
+            except Exception:
+                pass
+            
+            return parsed_scores
             
         except Exception as e:
             warnings.warn(f"OpenAI API call failed: {str(e)}")

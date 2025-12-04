@@ -18,14 +18,16 @@ from .schemas import (
     OpenAITestResponse, QuestionPreview, HeatmapDataResponse,
     PromptPreviewRequest, PromptPreviewResponse,
     TruncationAnalysisRequest, TruncationAnalysisResponse,
-    CoTAnalysisQueueRequest, CoTAnalysisProgressResponse, CoTAnalysisQueueStatus
 )
 from .runner import launch_job, job_db, get_job_status, cancel_job, delete_job, get_job_raw_data, save_job_db, reload_job_db
 from .path_manager import path_manager
-from .cot_queue import cot_queue
+from .server_manager import get_server_manager
 import subprocess
 import shlex
 import requests
+import logging
+from datetime import datetime
+import shutil
 
 def _build_truncation_response(job_id: str, request: TruncationAnalysisRequest, output_dir: Path, computation_time: float) -> TruncationAnalysisResponse:
     """Helper function to build truncation analysis response"""
@@ -45,6 +47,41 @@ def _build_truncation_response(job_id: str, request: TruncationAnalysisRequest, 
     )
 
 app = FastAPI(title="Qwen Math Evaluation API", version="1.0.0")
+
+# Setup logging for API calls
+log_dir = Path(path_manager.get_config().logs_dir)
+log_dir.mkdir(parents=True, exist_ok=True)
+log_file = log_dir / f"cot_analysis_api_{datetime.now().strftime('%Y%m%d')}.log"
+
+# Configure logging for CoT analysis API calls
+cot_api_logger = logging.getLogger("cot_analysis_api")
+cot_api_logger.setLevel(logging.INFO)
+if not cot_api_logger.handlers:
+    handler = logging.FileHandler(log_file)
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    cot_api_logger.addHandler(handler)
+    cot_api_logger.propagate = False
+
+# Background task to clean up completed CoT analysis servers
+async def cleanup_servers_task():
+    """Background task to periodically clean up completed servers"""
+    while True:
+        try:
+            await asyncio.sleep(30)  # Check every 30 seconds
+            server_manager = get_server_manager()
+            cleaned = server_manager.cleanup_completed_servers()
+            if cleaned > 0 and cot_api_logger:
+                cot_api_logger.info(f"Cleaned up {cleaned} completed CoT analysis servers")
+        except Exception as e:
+            if cot_api_logger:
+                cot_api_logger.warning(f"Error cleaning up servers: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background cleanup task"""
+    asyncio.create_task(cleanup_servers_task())
 
 # Add CORS middleware
 app.add_middleware(
@@ -673,6 +710,10 @@ async def list_jobs():
         # Use cached status from job_db to avoid blocking on slow status checks
         # Only check status for jobs that might have changed (running/queued jobs)
         for jid, info in job_db.items():
+            # Skip CoT analysis jobs - they should only appear in the CoT Analysis tab
+            if jid.startswith("cot_analysis_"):
+                continue
+            
             # Copy job info
             job_info = info.copy()
             job_info.pop("proc", None)
@@ -1175,6 +1216,24 @@ def _get_model_and_dataset_from_job(job_id: str) -> tuple[str, str]:
     
     return model_name, dataset
 
+def _sanitize_for_excel(text: str, max_length: int = 32000) -> str:
+    """
+    Sanitize text for Excel export.
+    Excel has a cell limit of 32,767 characters, but we use 32,000 to be safe.
+    Also removes or replaces problematic characters.
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    
+    # Truncate to max_length
+    if len(text) > max_length:
+        text = text[:max_length] + "... [truncated]"
+    
+    # Remove null bytes and other problematic characters
+    text = text.replace('\x00', '')
+    
+    return text
+
 def export_cot_analysis_to_excel(job_id: str, analysis_data: dict, output_dir: Optional[Path] = None) -> str:
     """Export CoT analysis results to Excel file using Pillars v2 data"""
     try:
@@ -1247,10 +1306,23 @@ def export_cot_analysis_to_excel(job_id: str, analysis_data: dict, output_dir: O
                 flag_descriptions = [f"{f.get('pillar', 'Unknown')}: {f.get('issue', 'Unknown')}" for f in flags]
                 arith_errors = sample.get('evidence', {}).get('arith_bad_examples', [])
                 
+                # Sanitize all text fields for Excel
+                problem_text = _sanitize_for_excel(sample.get('problem', 'N/A'), max_length=1000)
+                model_output_text = _sanitize_for_excel(sample.get('model_output', 'N/A'), max_length=2000)
+                flag_descriptions_text = _sanitize_for_excel('; '.join(flag_descriptions) or 'None', max_length=1000)
+                evidence_summary = _sanitize_for_excel(
+                    f"Final: {'Correct' if sample.get('evidence', {}).get('final_correct', False) else 'Incorrect'}, Intermediate OK: {sample.get('evidence', {}).get('intermediate_ok_rate', 0):.2f}",
+                    max_length=500
+                )
+                judge_scores_text = _sanitize_for_excel(
+                    json.dumps(sample.get('judge_raw', {})) if sample.get('judge_raw') else 'N/A',
+                    max_length=500
+                )
+                
                 detailed_data.append([
                     idx + 1,
-                    (sample.get('problem', 'N/A')[:1000]),
-                    (sample.get('model_output', 'N/A')[:2000]),
+                    problem_text,
+                    model_output_text,
                     'Yes' if sample.get('evidence', {}).get('final_correct', False) else 'No',
                     sample.get('scores', {}).get('overall', 0),
                     sample.get('scores', {}).get('faithfulness', 0),
@@ -1258,9 +1330,9 @@ def export_cot_analysis_to_excel(job_id: str, analysis_data: dict, output_dir: O
                     sample.get('scores', {}).get('coherence', 0),
                     sample.get('scores', {}).get('factuality', 0),
                     len(flags),
-                    '; '.join(flag_descriptions) or 'None',
-                    f"Final: {'Correct' if sample.get('evidence', {}).get('final_correct', False) else 'Incorrect'}, Intermediate OK: {sample.get('evidence', {}).get('intermediate_ok_rate', 0):.2f}",
-                    json.dumps(sample.get('judge_raw', {}))[:500] if sample.get('judge_raw') else 'N/A',
+                    flag_descriptions_text,
+                    evidence_summary,
+                    judge_scores_text,
                     len(arith_errors) if arith_errors else 0
                 ])
             
@@ -1282,8 +1354,10 @@ def export_cot_analysis_to_excel(job_id: str, analysis_data: dict, output_dir: O
             flag_df = pd.DataFrame(flag_data[1:], columns=flag_data[0])
             flag_df.to_excel(writer, index=False, sheet_name='Flag Summary')
             
-            # 4. Raw Data Sheet
-            raw_data = [['Raw JSON Data'], [json.dumps(analysis_data, indent=2)]]
+            # 4. Raw Data Sheet - truncate JSON to avoid Excel limits
+            raw_json_text = json.dumps(analysis_data, indent=2)
+            raw_json_text = _sanitize_for_excel(raw_json_text, max_length=32000)
+            raw_data = [['Raw JSON Data'], [raw_json_text]]
             raw_df = pd.DataFrame(raw_data)
             raw_df.to_excel(writer, index=False, sheet_name='Raw Data')
         
@@ -1399,6 +1473,32 @@ async def download_all_jobs_archive():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error serving archive: {str(e)}")
 
+@app.get('/jobs/{job_id}/download')
+async def download_job_archive(job_id: str):
+    """Download zip archive of a specific job"""
+    try:
+        config = path_manager.get_config()
+        exports_dir = Path(config.exports_dir)
+        
+        # Look for zip file with this job_id
+        zip_files = list(exports_dir.glob(f'job_*_{job_id}.zip'))
+        
+        if not zip_files:
+            raise HTTPException(status_code=404, detail=f"Job archive not found for job_id: {job_id}")
+        
+        zip_file = zip_files[0]
+        
+        return FileResponse(
+            path=str(zip_file),
+            filename=zip_file.name,
+            media_type='application/zip'
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error serving archive: {str(e)}")
+
 @app.get('/jobs/{job_id}/export')
 async def export_job_excel(job_id: str):
     """Export job results to Excel file"""
@@ -1464,9 +1564,10 @@ async def check_job_data_health(job_id: str):
             "error": str(e)
         }
 
-async def run_cot_analysis_async(cot_job_id: str, job_id: str, config_dict: Dict[str, Any]):
+def _run_cot_analysis_sync(cot_job_id: str, job_id: str, config_dict: Dict[str, Any]):
     """
-    Async function to run CoT analysis with progress tracking.
+    Synchronous function to run CoT analysis.
+    This runs in a thread pool executor to avoid blocking the FastAPI event loop.
     
     Args:
         cot_job_id: The CoT analysis job ID
@@ -1483,12 +1584,15 @@ async def run_cot_analysis_async(cot_job_id: str, job_id: str, config_dict: Dict
         data_list = raw_data.get('data', [])
         
         if not data_list:
-            raise HTTPException(status_code=404, detail="No data found for analysis")
+            error_msg = "No data found for analysis"
+            if cot_api_logger:
+                cot_api_logger.error(f"[ASYNC] Error - {error_msg} - cot_job_id={cot_job_id}, job_id={job_id}")
+            raise HTTPException(status_code=404, detail=error_msg)
         
         total_samples = len(data_list)
         
-        # Update progress: starting
-        cot_queue.update_progress(cot_job_id, 0, total_samples, "Initializing analysis...")
+        if cot_api_logger:
+            cot_api_logger.info(f"[ASYNC] Analysis initialized - cot_job_id={cot_job_id}, total_samples={total_samples}")
         
         # Initialize new Pillars v2 evaluator
         from .cot_eval_v2.evaluator import PillarsEvaluator
@@ -1508,22 +1612,17 @@ async def run_cot_analysis_async(cot_job_id: str, job_id: str, config_dict: Dict
         # Initialize evaluator
         evaluator = PillarsEvaluator(judge=judge)
         
-        # Update progress: initialized
-        cot_queue.update_progress(cot_job_id, 0, total_samples, "Analysis initialized, processing samples...")
-        
         # Process each sample
         results = []
         
         print(f"🔍 Starting CoT analysis for {total_samples} samples...", flush=True)
         
         for i, sample in enumerate(data_list):
-            # Update progress before processing each sample
-            cot_queue.update_progress(
-                cot_job_id,
-                i,
-                total_samples,
-                f"Analyzing sample {i+1}/{total_samples}..."
-            )
+            
+            # Log to file every 10 samples or on first/last sample
+            if cot_api_logger and (i == 0 or i == total_samples - 1 or (i + 1) % 10 == 0):
+                cot_api_logger.info(f"[ASYNC] Processing sample {i+1}/{total_samples} - cot_job_id={cot_job_id}")
+            
             try:
                 print(f"📊 Analyzing sample {i+1}/{total_samples}...", flush=True)
                 sys.stdout.flush()
@@ -1768,9 +1867,6 @@ async def run_cot_analysis_async(cot_job_id: str, job_id: str, config_dict: Dict
         print(flush=True)
         sys.stdout.flush()
         
-        # Update progress: saving files
-        cot_queue.update_progress(cot_job_id, total_samples, total_samples, "Saving results...")
-        
         # Create organized output directory
         model_name, dataset = _get_model_and_dataset_from_job(job_id)
         timestamp_str = analysis_result.get('timestamp', time.strftime("%Y%m%d_%H%M%S")).replace(' ', '_').replace(':', '')
@@ -1792,12 +1888,11 @@ async def run_cot_analysis_async(cot_job_id: str, job_id: str, config_dict: Dict
             print(f"💾 CoT analysis saved to: {cot_analysis_file}", flush=True)
             sys.stdout.flush()
             
-            # Store JSON path in queue entry
-            queue_entry = job_db.get(f"cot_analysis_{cot_job_id}")
-            if queue_entry:
-                queue_entry["json_path"] = str(cot_analysis_file)
-                job_db[f"cot_analysis_{cot_job_id}"] = queue_entry
-                save_job_db()
+            # Store JSON path in parent job entry
+            job_info = job_db.get(job_id, {})
+            job_info["cot_analysis_json_path"] = str(cot_analysis_file)
+            job_db[job_id] = job_info
+            save_job_db()
         except Exception as e:
             print(f"⚠️ Warning: Could not save CoT analysis to file: {e}", flush=True)
             sys.stdout.flush()
@@ -1806,13 +1901,7 @@ async def run_cot_analysis_async(cot_job_id: str, job_id: str, config_dict: Dict
         try:
             excel_path = export_cot_analysis_to_excel(job_id, analysis_result, organized_dir)
             
-            # Store Excel path in queue entry and parent job_db
-            queue_entry = job_db.get(f"cot_analysis_{cot_job_id}")
-            if queue_entry:
-                queue_entry["excel_export_path"] = excel_path
-                job_db[f"cot_analysis_{cot_job_id}"] = queue_entry
-            
-            # Also update parent job_db
+            # Store Excel path in parent job_db
             job_info = job_db.get(job_id, {})
             job_info["excel_export_path"] = excel_path
             job_db[job_id] = job_info
@@ -1824,73 +1913,295 @@ async def run_cot_analysis_async(cot_job_id: str, job_id: str, config_dict: Dict
             print(f"⚠️ Warning: Could not generate Excel export: {e}", flush=True)
             sys.stdout.flush()
         
-        # Update progress: complete
-        cot_queue.update_progress(cot_job_id, total_samples, total_samples, "Analysis complete!")
-        
     except HTTPException:
         raise
     except Exception as e:
-        # Update progress: error
-        queue_entry = job_db.get(f"cot_analysis_{cot_job_id}")
-        if queue_entry:
-            queue_entry["status"] = "ERROR"
-            queue_entry["error"] = str(e)
-            queue_entry["progress"]["current_activity"] = f"Error: {str(e)}"
-            job_db[f"cot_analysis_{cot_job_id}"] = queue_entry
-            save_job_db()
+        # Log error but don't store in queue (no queue anymore)
+        if cot_api_logger:
+            cot_api_logger.error(f"[SYNC] CoT analysis error - job_id={job_id}, error={e}")
         raise
 
 @app.get("/jobs/{job_id}/cot-analysis", response_model=CoTAnalysisResponseV2)
-async def get_cot_analysis(job_id: str, queue: bool = True):
+async def get_cot_analysis(job_id: str):
     """
     Get Chain-of-Thought analysis for a job using new four-pillar evaluation.
+    Always runs synchronously.
     
     Args:
         job_id: The job ID to analyze
-        queue: If True (default), queue the analysis for async processing.
-               If False, run synchronously (backward compatible).
     """
-    if queue:
-        # Queue mode: submit to queue and return immediately
+    if cot_api_logger:
+        cot_api_logger.info(f"[API] GET /jobs/{job_id}/cot-analysis - called at {datetime.now().isoformat()}")
+    
+    # Always run synchronously
+    # First check if a completed analysis result already exists
         config = path_manager.get_config()
-        config_dict = {
-            "judge_mode": "ALWAYS",  # Default, can be made configurable
-            "diagnostic": False
+        exports_dir = Path(config.exports_dir)
+        model_name, dataset = _get_model_and_dataset_from_job(job_id)
+        safe_model_name = model_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+        organized_base = exports_dir / "cot_analysis" / safe_model_name / dataset
+        
+        cot_analysis_file = None
+        if organized_base.exists():
+            # Find directories matching job_id pattern
+            for org_dir in organized_base.iterdir():
+                if org_dir.is_dir() and org_dir.name.startswith(f"{job_id}_"):
+                    potential_file = org_dir / f"cot_analysis_{job_id}.json"
+                    if potential_file.exists():
+                        cot_analysis_file = potential_file
+                        break
+        
+        # If result file exists, load and return it instead of re-running
+        if cot_analysis_file and cot_analysis_file.exists():
+            if cot_api_logger:
+                cot_api_logger.info(f"[API] Found existing CoT analysis result, loading from {cot_analysis_file}")
+            try:
+                with open(cot_analysis_file, 'r') as f:
+                    existing_data = json.load(f)
+                # Return the existing analysis data
+                return existing_data
+            except Exception as e:
+                if cot_api_logger:
+                    cot_api_logger.warning(f"[API] Failed to load existing CoT analysis from {cot_analysis_file}: {e}, will re-run")
+                # Fall through to re-run if loading fails
+        
+        # No existing result - run synchronously in executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        analysis_result = await loop.run_in_executor(None, _run_cot_analysis_sync_direct, job_id)
+        return analysis_result
+
+def _run_cot_analysis_sync_direct(job_id: str):
+    """Run CoT analysis synchronously (called from executor)"""
+    start_time = time.time()
+    
+    try:
+        # Get raw data
+        raw_data = get_job_raw_data(job_id)
+        data_list = raw_data.get('data', [])
+        
+        if not data_list:
+            raise HTTPException(status_code=404, detail="No data found for analysis")
+        
+        # Initialize new Pillars v2 evaluator
+        from .cot_eval_v2.evaluator import PillarsEvaluator
+        from .cot_eval_v2.judge import Judge
+        
+        # Get configuration
+        config = path_manager.get_config()
+        
+        # Create judge if OpenAI key available
+        judge = None
+        if config.openai_api_key:
+            # Set the API key as environment variable for OpenAI client
+            import os
+            os.environ['OPENAI_API_KEY'] = config.openai_api_key
+            judge = Judge(mode="ALWAYS")
+        
+        # Initialize evaluator
+        evaluator = PillarsEvaluator(judge=judge)
+        
+        # Process each sample
+        results = []
+        total_samples = len(data_list)
+        
+        print(f"🔍 Starting CoT analysis for {total_samples} samples...", flush=True)
+        
+        for i, sample in enumerate(data_list):
+            try:
+                print(f"📊 Analyzing sample {i+1}/{total_samples}...", flush=True)
+                sys.stdout.flush()
+                
+                # Extract model reasoning and answer
+                model_reasoning_text = ""
+                predicted_answer_text = ""
+                
+                if sample.get('code'):
+                    code_val = sample.get('code', [''])
+                    if isinstance(code_val, list):
+                        model_reasoning_text = code_val[0] if code_val and code_val[0] else ""
+                    else:
+                        model_reasoning_text = str(code_val) if code_val else ""
+                
+                if not model_reasoning_text and sample.get('solution'):
+                    model_reasoning_text = str(sample.get('solution', ''))
+                
+                if not model_reasoning_text and sample.get('output'):
+                    output_val = sample.get('output', '')
+                    if isinstance(output_val, list):
+                        model_reasoning_text = output_val[0] if output_val and output_val[0] else ""
+                    else:
+                        model_reasoning_text = str(output_val) if output_val else ""
+                
+                if sample.get('pred'):
+                    pred_val = sample.get('pred', [''])
+                    if isinstance(pred_val, list):
+                        predicted_answer_text = str(pred_val[0]) if pred_val and pred_val[0] is not None else ""
+                    else:
+                        predicted_answer_text = str(pred_val) if pred_val else ""
+                
+                if not predicted_answer_text and sample.get('answer'):
+                    predicted_answer_text = str(sample.get('answer', ''))
+                
+                if not predicted_answer_text and model_reasoning_text:
+                    boxed_match = re.search(r'\\boxed\{([^}]+)\}', model_reasoning_text)
+                    if boxed_match:
+                        predicted_answer_text = boxed_match.group(1).strip()
+                    else:
+                        framebox_match = re.search(r'\\framebox\{([^}]+)\}', model_reasoning_text)
+                        if framebox_match:
+                            predicted_answer_text = framebox_match.group(1).strip()
+                
+                if predicted_answer_text:
+                    full_cot_text = f"{model_reasoning_text}\n#### {predicted_answer_text}"
+                else:
+                    full_cot_text = model_reasoning_text
+                
+                existing_scores = sample.get('score', [])
+                is_correct = existing_scores[0] if existing_scores else False
+                
+                # Run analysis
+                flags, evidence, rule_scores, judge_scores, fused_scores = evaluator.analyze(
+                    problem=sample.get('question', ''),
+                    cot_text=full_cot_text,
+                    gold=sample.get('gt', '')
+                )
+                
+                evidence['final_correct'] = is_correct
+                
+                from .cot_eval_v2.scoring import rule_scores as calc_rule_scores
+                rule_scores = calc_rule_scores(evidence)
+                
+                from .cot_eval_v2.scoring import fuse_with_judge
+                fused_scores = fuse_with_judge(rule_scores, judge_scores, evidence)
+                
+                flags_dict = {}
+                for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
+                    pillar_flags = flags.get_flags_by_pillar(pillar)
+                    flags_dict[pillar] = [flag.to_dict() for flag in pillar_flags]
+                
+                sample_result = {
+                    "sample_id": i,
+                    "problem": sample.get('question', ''),
+                    "cot_text": full_cot_text,
+                    "gold_answer": sample.get('gt', ''),
+                    "flags": flags_dict,
+                    "evidence": evidence,
+                    "rule_scores": rule_scores,
+                    "judge_scores": judge_scores,
+                    "fused_scores": fused_scores,
+                    "final_answer": predicted_answer_text
+                }
+                
+                results.append(sample_result)
+                
+            except Exception as e:
+                print(f"Error processing sample {i}: {e}", flush=True)
+                sys.stdout.flush()
+                results.append({
+                    "sample_id": i,
+                    "problem": sample.get('question', ''),
+                    "cot_text": "",
+                    "gold_answer": sample.get('gt', ''),
+                    "error": str(e),
+                    "flags": {},
+                    "evidence": {},
+                    "rule_scores": {},
+                    "judge_scores": {},
+                    "fused_scores": {},
+                    "final_answer": ""
+                })
+        
+        # Calculate summary statistics
+        valid_results = [r for r in results if "error" not in r]
+        if valid_results:
+            avg_scores = {}
+            for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
+                scores = [r["fused_scores"].get(pillar, 0) for r in valid_results]
+                avg_scores[pillar] = sum(scores) / len(scores) if scores else 0
+            avg_scores["overall"] = sum(avg_scores.values()) / len(avg_scores)
+            
+            flag_counts = {}
+            for result in valid_results:
+                for flag_type, flags in result["flags"].items():
+                    if flag_type not in flag_counts:
+                        flag_counts[flag_type] = 0
+                    flag_counts[flag_type] += len(flags)
+        else:
+            avg_scores = {"faithfulness": 0, "utility": 0, "coherence": 0, "factuality": 0, "overall": 0}
+            flag_counts = {}
+        
+        # Convert results to proper schema format
+        per_sample = []
+        for result in results:
+            if "error" not in result:
+                flags_list = []
+                for pillar, flags in result["flags"].items():
+                    for flag in flags:
+                        flags_list.append({
+                            "pillar": pillar,
+                            "step": flag.get("step", "unknown"),
+                            "issue": flag.get("issue", "unknown"),
+                            "details": flag.get("details", {})
+                        })
+                
+                scores = {
+                    "faithfulness": result["fused_scores"].get("faithfulness", 0.0),
+                    "utility": result["fused_scores"].get("utility", 0.0),
+                    "coherence": result["fused_scores"].get("coherence", 0.0),
+                    "factuality": result["fused_scores"].get("factuality", 0.0),
+                    "overall": result["fused_scores"].get("overall", 0.0)
+                }
+                
+                per_sample.append({
+                    "scores": scores,
+                    "flags": flags_list,
+                    "evidence": result["evidence"],
+                    "rules_raw": result["rule_scores"],
+                    "judge_raw": result["judge_scores"],
+                    "config_snapshot": {"judge_available": judge is not None},
+                    "problem": result["problem"],
+                    "model_output": result["cot_text"],
+                    "gold": result["gold_answer"]
+                })
+        
+        # Create summary
+        summary = {
+            "avg_faithfulness": avg_scores.get("faithfulness", 0.0),
+            "avg_utility": avg_scores.get("utility", 0.0),
+            "avg_coherence": avg_scores.get("coherence", 0.0),
+            "avg_factuality": avg_scores.get("factuality", 0.0),
+            "avg_overall": avg_scores.get("overall", 0.0),
+            "total_flags": sum(flag_counts.values()),
+            "flags_by_pillar": flag_counts,
+            "judge_call_rate": 1.0 if judge is not None else 0.0,
+            "judge_budget_used": 0,
+            "judge_budget_total": 0,
+            "total_samples": total_samples,
+            "analysis_time": time.time() - start_time,
+            "avg_time_per_sample": (time.time() - start_time) / total_samples if total_samples > 0 else 0.0
         }
         
-        cot_job_id = await cot_queue.submit(job_id, config_dict, run_cot_analysis_async)
-        
-        # Return a minimal response indicating the job was queued
-        # The actual analysis result will be available via the progress endpoint
-        queue_entry = cot_queue.get_status(cot_job_id)
-        
-        # Return a response that matches the schema (minimal valid response)
-        return {
+        # Build final response
+        analysis_result = {
             "job_id": job_id,
-            "per_sample": [],
-            "summary": {
-                "avg_faithfulness": 0.0,
-                "avg_utility": 0.0,
-                "avg_coherence": 0.0,
-                "avg_factuality": 0.0,
-                "avg_overall": 0.0,
-                "total_flags": 0,
-                "flags_by_pillar": {},
-                "judge_call_rate": 0.0,
-                "judge_budget_used": 0,
-                "judge_budget_total": 0,
-                "total_samples": 0,
-                "analysis_time": 0.0,
-                "avg_time_per_sample": 0.0
-            },
+            "per_sample": per_sample,
+            "summary": summary,
             "analysis_method": "pillars_v2",
-            "config": {"judge_available": config.openai_api_key is not None, "queued": True, "cot_job_id": cot_job_id},
+            "config": {"judge_available": judge is not None},
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         }
-    else:
-        # Synchronous mode (backward compatible)
-        start_time = time.time()
         
+        # Save to organized folder
+        model_name, dataset = _get_model_and_dataset_from_job(job_id)
+        timestamp_str = analysis_result.get('timestamp', time.strftime("%Y%m%d_%H%M%S")).replace(' ', '_').replace(':', '')
+        judge_mode_str = "ALWAYS"
+        
+        config_path = path_manager.get_config()
+        exports_dir = Path(config_path.exports_dir)
+        organized_dir = exports_dir / "cot_analysis" / model_name / dataset / f"{job_id}_{timestamp_str}_{judge_mode_str}"
+        organized_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save JSON
         try:
             # Get raw data
             raw_data = get_job_raw_data(job_id)
@@ -2140,137 +2451,40 @@ async def get_cot_analysis(job_id: str, queue: bool = True):
             except Exception as e:
                 print(f"⚠️ Warning: Could not generate Excel export: {e}", flush=True)
         
+            # Save CoT analysis to JSON file
+            try:
+                cot_analysis_file = organized_dir / f"cot_analysis_{job_id}.json"
+                with open(cot_analysis_file, 'w') as f:
+                    json.dump(analysis_result, f, indent=2)
+                print(f"💾 CoT analysis saved to: {cot_analysis_file}", flush=True)
+            except Exception as e:
+                print(f"⚠️ Warning: Could not save CoT analysis to file: {e}", flush=True)
+        
             return analysis_result
         
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error performing CoT analysis: {str(e)}")
-
-@app.post("/jobs/{job_id}/cot-analysis/queue")
-async def queue_cot_analysis(job_id: str, request: CoTAnalysisQueueRequest):
-    """Explicitly queue a CoT analysis job"""
-    try:
-        config_dict = {
-            "judge_mode": request.judge_mode,
-            "diagnostic": request.diagnostic
-        }
+            print(f"⚠️ Warning: Could not save CoT analysis to file: {e}", flush=True)
         
-        cot_job_id = await cot_queue.submit(job_id, config_dict, run_cot_analysis_async)
+        # Generate Excel
+        try:
+            excel_path = export_cot_analysis_to_excel(job_id, analysis_result, organized_dir)
+            job_info = job_db.get(job_id, {})
+            job_info["excel_export_path"] = excel_path
+            job_db[job_id] = job_info
+            save_job_db()
+            print(f"📊 Excel export saved to: {excel_path}", flush=True)
+        except Exception as e:
+            print(f"⚠️ Warning: Could not generate Excel export: {e}", flush=True)
         
-        # Return status
-        queue_entry = cot_queue.get_status(cot_job_id)
-        return {
-            "cot_job_id": cot_job_id,
-            "parent_job_id": job_id,
-            "status": queue_entry.get("status", "QUEUED"),
-            "queue_position": queue_entry.get("queue_position"),
-            "message": "CoT analysis queued for processing"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error queuing CoT analysis: {str(e)}")
-
-@app.get("/cot-analyses/queue")
-async def list_cot_analyses_queue():
-    """List all queued/running CoT analysis jobs"""
-    try:
-        jobs = cot_queue.list_jobs()
+        return analysis_result
         
-        # Convert to response format
-        response_jobs = []
-        for job in jobs:
-            progress = job.get("progress", {})
-            response_jobs.append({
-                "cot_job_id": job.get("cot_job_id"),
-                "parent_job_id": job.get("parent_job_id"),
-                "status": job.get("status", "UNKNOWN"),
-                "queue_position": job.get("queue_position"),
-                "created_at": job.get("created_at"),
-                "started_at": job.get("started_at"),
-                "completed_at": job.get("completed_at"),
-                "model_name": job.get("model_name"),
-                "dataset": job.get("dataset"),
-                "judge_mode": job.get("judge_mode"),
-                "progress": {
-                    "current_sample": progress.get("current_sample", 0),
-                    "total_samples": progress.get("total_samples", 0),
-                    "processed_samples": progress.get("processed_samples", 0),
-                    "percentage": progress.get("percentage", 0.0),
-                    "estimated_time_remaining": progress.get("estimated_time_remaining"),
-                    "current_activity": progress.get("current_activity", "")
-                },
-                "error": job.get("error")
-            })
-        
-        return {"jobs": response_jobs}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error listing CoT analyses: {str(e)}")
-
-@app.get("/cot-analyses/{cot_job_id}/status", response_model=CoTAnalysisQueueStatus)
-async def get_cot_analysis_status(cot_job_id: str):
-    """Get status of a CoT analysis job"""
-    try:
-        queue_entry = cot_queue.get_status(cot_job_id)
-        if not queue_entry:
-            raise HTTPException(status_code=404, detail="CoT analysis job not found")
-        
-        progress = queue_entry.get("progress", {})
-        progress_response = CoTAnalysisProgressResponse(
-            cot_job_id=cot_job_id,
-            status=queue_entry.get("status", "UNKNOWN"),
-            current_sample=progress.get("current_sample", 0),
-            total_samples=progress.get("total_samples", 0),
-            processed_samples=progress.get("processed_samples", 0),
-            percentage=progress.get("percentage", 0.0),
-            estimated_time_remaining=progress.get("estimated_time_remaining"),
-            start_time=progress.get("start_time"),
-            current_activity=progress.get("current_activity"),
-            queue_position=queue_entry.get("queue_position")
-        )
-        
-        return CoTAnalysisQueueStatus(
-            cot_job_id=cot_job_id,
-            parent_job_id=queue_entry.get("parent_job_id"),
-            status=queue_entry.get("status", "UNKNOWN"),
-            queue_position=queue_entry.get("queue_position"),
-            created_at=queue_entry.get("created_at", time.time()),
-            started_at=queue_entry.get("started_at"),
-            completed_at=queue_entry.get("completed_at"),
-            model_name=queue_entry.get("model_name"),
-            dataset=queue_entry.get("dataset"),
-            judge_mode=queue_entry.get("judge_mode"),
-            progress=progress_response
-        )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting CoT analysis status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error performing CoT analysis: {str(e)}")
 
-@app.get("/cot-analyses/{cot_job_id}/progress", response_model=CoTAnalysisProgressResponse)
-async def get_cot_analysis_progress(cot_job_id: str):
-    """Get detailed progress info for a running CoT analysis"""
-    try:
-        queue_entry = cot_queue.get_status(cot_job_id)
-        if not queue_entry:
-            raise HTTPException(status_code=404, detail="CoT analysis job not found")
-        
-        progress = queue_entry.get("progress", {})
-        return CoTAnalysisProgressResponse(
-            cot_job_id=cot_job_id,
-            status=queue_entry.get("status", "UNKNOWN"),
-            current_sample=progress.get("current_sample", 0),
-            total_samples=progress.get("total_samples", 0),
-            processed_samples=progress.get("processed_samples", 0),
-            percentage=progress.get("percentage", 0.0),
-            estimated_time_remaining=progress.get("estimated_time_remaining"),
-            start_time=progress.get("start_time"),
-            current_activity=progress.get("current_activity", ""),
-            queue_position=queue_entry.get("queue_position")
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting CoT analysis progress: {str(e)}")
 
 @app.post("/jobs/{job_id}/cot-analysis/compute")
 async def compute_cot_analysis(job_id: str):
@@ -2289,6 +2503,9 @@ async def list_cot_analyses():
         analyses = []
         
         for job_id, job_info in job_db.items():
+            # Skip CoT analysis job entries (only process parent jobs)
+            if job_id.startswith("cot_analysis_"):
+                continue
             # Check if job has CoT analysis (either Excel export or JSON file)
             excel_export_path = job_info.get("excel_export_path")
             result_file = job_info.get("result_file")
@@ -2297,21 +2514,71 @@ async def list_cot_analyses():
             has_excel = excel_export_path and Path(excel_export_path).exists()
             
             # Check if JSON analysis file exists
+            # First check if there's a json_path stored in the CoT analysis job entry
             has_json = False
             cot_analysis_data = None
-            if result_file:
+            cot_analysis_file = None
+            
+            # Check if there's a CoT analysis job entry with json_path
+            cot_job_entries = [
+                (jid, info) for jid, info in job_db.items()
+                if jid.startswith("cot_analysis_") and info.get("parent_job_id") == job_id
+            ]
+            
+            # Get the most recent CoT analysis job for this parent job
+            if cot_job_entries:
+                # Sort by created_at (newest first)
+                cot_job_entries.sort(key=lambda x: x[1].get("created_at", 0), reverse=True)
+                latest_cot_job_id, latest_cot_job_info = cot_job_entries[0]
+                json_path = latest_cot_job_info.get("json_path")
+                if json_path and Path(json_path).exists():
+                    cot_analysis_file = Path(json_path)
+                    has_json = True
+            
+            # If not found in job entry, check organized directory structure
+            if not has_json:
+                config = path_manager.get_config()
+                exports_dir = Path(config.exports_dir)
+                
+                # Use the same function that was used to create the directory
+                model_name, dataset = _get_model_and_dataset_from_job(job_id)
+                
+                # Sanitize model name exactly as done when saving (from _get_model_and_dataset_from_job)
+                # This ensures we match the directory structure
+                safe_model_name = model_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+                
+                # Look for organized directory with pattern: {job_id}_*
+                organized_base = exports_dir / "cot_analysis" / safe_model_name / dataset
+                if organized_base.exists():
+                    # Find directories matching job_id pattern
+                    for org_dir in organized_base.iterdir():
+                        if org_dir.is_dir() and org_dir.name.startswith(f"{job_id}_"):
+                            potential_file = org_dir / f"cot_analysis_{job_id}.json"
+                            if potential_file.exists():
+                                cot_analysis_file = potential_file
+                                has_json = True
+                                if cot_api_logger:
+                                    cot_api_logger.info(f"[API] Found CoT analysis JSON in organized dir: {cot_analysis_file}")
+                                break
+            
+            # Fallback: check old location (for backward compatibility)
+            if not has_json and result_file:
                 result_path = Path(result_file)
                 output_dir = result_path.parent
                 cot_analysis_file = output_dir / f"cot_analysis_{job_id}.json"
                 has_json = cot_analysis_file.exists()
-                
-                # Try to load summary data if JSON exists
-                if has_json:
-                    try:
-                        with open(cot_analysis_file, 'r') as f:
-                            cot_analysis_data = json.load(f)
-                    except Exception:
-                        pass
+            
+            # Try to load summary data if JSON exists
+            if has_json and cot_analysis_file:
+                try:
+                    with open(cot_analysis_file, 'r') as f:
+                        cot_analysis_data = json.load(f)
+                    if cot_api_logger:
+                        cot_api_logger.info(f"[API] Loaded CoT analysis JSON from {cot_analysis_file}, summary keys: {list(cot_analysis_data.get('summary', {}).keys())}")
+                except Exception as e:
+                    if cot_api_logger:
+                        cot_api_logger.warning(f"[API] Failed to load CoT analysis JSON from {cot_analysis_file}: {e}")
+                    pass
             
             # Only include jobs that have CoT analysis
             if has_excel or has_json:
@@ -2358,6 +2625,105 @@ async def list_cot_analyses():
         import traceback
         traceback.print_exc()
         return {"analyses": [], "error": str(e)}
+
+@app.delete("/cot-analyses/{job_id}")
+async def delete_cot_analysis(job_id: str):
+    """Delete a CoT analysis (removes files, directories, and job_db entries)"""
+    try:
+        if job_id.startswith("cot_analysis_"):
+            return {"success": False, "error": "Cannot delete CoT analysis job entries directly. Use the parent job ID."}
+        
+        # Check if parent job exists
+        if job_id not in job_db:
+            return {"success": False, "error": f"Job {job_id} not found"}
+        
+        job_info = job_db[job_id]
+        deleted_items = []
+        errors = []
+        
+        # Find all CoT analysis job entries for this parent job
+        cot_job_entries = [
+            (cid, cinfo) for cid, cinfo in job_db.items()
+            if cid.startswith("cot_analysis_") and cinfo.get("parent_job_id") == job_id
+        ]
+        
+        # Delete CoT analysis job entries from job_db
+        for cot_job_id, cot_job_info in cot_job_entries:
+            # Delete Excel file if it exists
+            excel_path = cot_job_info.get("excel_export_path")
+            if excel_path and Path(excel_path).exists():
+                try:
+                    Path(excel_path).unlink()
+                    deleted_items.append(f"Excel file: {excel_path}")
+                except Exception as e:
+                    errors.append(f"Failed to delete Excel file {excel_path}: {e}")
+            
+            # Delete JSON file if it exists
+            json_path = cot_job_info.get("json_path")
+            if json_path and Path(json_path).exists():
+                try:
+                    json_file = Path(json_path)
+                    json_dir = json_file.parent
+                    # Delete the JSON file
+                    json_file.unlink()
+                    deleted_items.append(f"JSON file: {json_path}")
+                    
+                    # Try to delete the directory if it's empty or only contains the Excel file
+                    try:
+                        remaining_files = list(json_dir.glob("*"))
+                        # If directory only contains Excel (already deleted) or is empty, delete it
+                        if len(remaining_files) == 0:
+                            json_dir.rmdir()
+                            deleted_items.append(f"Directory: {json_dir}")
+                        elif len(remaining_files) == 1 and remaining_files[0].suffix == ".xlsx":
+                            # If only Excel remains, delete it and the directory
+                            remaining_files[0].unlink()
+                            json_dir.rmdir()
+                            deleted_items.append(f"Directory: {json_dir}")
+                    except Exception:
+                        pass  # Directory not empty or can't be deleted
+                        
+                except Exception as e:
+                    errors.append(f"Failed to delete JSON file {json_path}: {e}")
+            
+            # Remove CoT analysis job entry from job_db
+            if cot_job_id in job_db:
+                del job_db[cot_job_id]
+                deleted_items.append(f"Job DB entry: {cot_job_id}")
+        
+        # Remove Excel export path from parent job if it points to a CoT analysis Excel
+        parent_excel_path = job_info.get("excel_export_path")
+        if parent_excel_path:
+            excel_file = Path(parent_excel_path)
+            # Check if it's in a cot_analysis directory
+            if "cot_analysis" in str(excel_file):
+                job_info.pop("excel_export_path", None)
+                deleted_items.append(f"Removed Excel export path from parent job")
+        
+        # Save job_db
+        try:
+            save_job_db()
+        except Exception as e:
+            errors.append(f"Failed to save job_db: {e}")
+        
+        if errors:
+            return {
+                "success": True,
+                "message": f"Deleted CoT analysis for job {job_id} with some errors",
+                "deleted": deleted_items,
+                "errors": errors
+            }
+        else:
+            return {
+                "success": True,
+                "message": f"Successfully deleted CoT analysis for job {job_id}",
+                "deleted": deleted_items
+            }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": f"Failed to delete CoT analysis: {str(e)}"}
 
 @app.post("/config")
 async def save_configuration(request: dict):

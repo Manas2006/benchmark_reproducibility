@@ -90,20 +90,56 @@ class CoTAnalysisQueue:
             "error": None
         }
         
-        async with self._queue_lock:
-            # Calculate queue position (jobs in QUEUED or RUNNING state)
+        # Check if we can start immediately BEFORE queuing
+        running_count = sum(
+            1 for jid, info in job_db.items()
+            if jid.startswith("cot_analysis_") and info.get("status") == "RUNNING"
+        )
+        
+        # Log attempt to start
+        try:
+            import logging
+            cot_logger = logging.getLogger("cot_analysis_api")
+            if cot_logger:
+                cot_logger.info(f"[QUEUE] submit() - cot_job_id={cot_job_id}, running_count={running_count}, max={MAX_CONCURRENT_JOBS}, can_start_immediately={running_count < MAX_CONCURRENT_JOBS}")
+        except:
+            pass
+        
+        # If we have capacity, mark as RUNNING immediately instead of QUEUED
+        can_start_immediately = running_count < MAX_CONCURRENT_JOBS
+        if can_start_immediately:
+            queue_entry["status"] = "RUNNING"
+            queue_entry["started_at"] = time.time()
+            queue_entry["queue_position"] = None
+            queue_entry["progress"]["start_time"] = time.time()
+            queue_entry["progress"]["current_activity"] = "Starting analysis..."
+        else:
+            # Calculate queue position
             queued_jobs = [
                 (jid, info) for jid, info in job_db.items()
                 if jid.startswith("cot_analysis_") and info.get("status") in ["QUEUED", "RUNNING"]
             ]
             queue_entry["queue_position"] = len(queued_jobs)
-            
+        
+        async with self._queue_lock:
             # Store in job_db with prefix
             job_db[f"cot_analysis_{cot_job_id}"] = queue_entry
             save_job_db()
+        
+        # Start immediately if we have capacity (fire and forget)
+        if can_start_immediately:
+            # Get parent_job_id and config from queue_entry
+            parent_job_id = queue_entry.get("parent_job_id")
+            config = queue_entry.get("config", {})
             
-            # Start processing if we're under the limit
-            await self._try_start_next_job(cot_job_id, execute_fn)
+            # Start the task immediately
+            task = asyncio.create_task(
+                self._run_with_semaphore(cot_job_id, parent_job_id, config, execute_fn)
+            )
+            self._running_jobs[cot_job_id] = task
+            
+            if cot_logger:
+                cot_logger.info(f"[QUEUE] Job started immediately - cot_job_id={cot_job_id}, parent_job_id={parent_job_id}")
         
         return cot_job_id
     
@@ -121,15 +157,25 @@ class CoTAnalysisQueue:
             if jid.startswith("cot_analysis_") and info.get("status") == "RUNNING"
         )
         
+        # Log for debugging
+        import logging
+        cot_logger = logging.getLogger("cot_analysis_api")
+        if cot_logger:
+            cot_logger.info(f"[QUEUE] _try_start_next_job called - cot_job_id={cot_job_id}, running_count={running_count}, max={MAX_CONCURRENT_JOBS}")
+        
         # Check if we can start this job
         if running_count < MAX_CONCURRENT_JOBS:
             queue_entry = job_db.get(f"cot_analysis_{cot_job_id}")
             if queue_entry and queue_entry.get("status") == "QUEUED":
+                if cot_logger:
+                    cot_logger.info(f"[QUEUE] Job is QUEUED, attempting to start - cot_job_id={cot_job_id}")
                 # Start the job
                 async with self._queue_lock:
                     # Double-check status hasn't changed
                     queue_entry = job_db.get(f"cot_analysis_{cot_job_id}")
                     if queue_entry and queue_entry.get("status") == "QUEUED":
+                        if cot_logger:
+                            cot_logger.info(f"[QUEUE] Starting job now - cot_job_id={cot_job_id}")
                         # Update status to RUNNING
                         queue_entry["status"] = "RUNNING"
                         queue_entry["started_at"] = time.time()
@@ -143,11 +189,26 @@ class CoTAnalysisQueue:
                         parent_job_id = queue_entry.get("parent_job_id")
                         config = queue_entry.get("config", {})
                         
+                        if cot_logger:
+                            cot_logger.info(f"[QUEUE] Creating task - cot_job_id={cot_job_id}, parent_job_id={parent_job_id}")
+                        
                         # Start the task
                         task = asyncio.create_task(
                             self._run_with_semaphore(cot_job_id, parent_job_id, config, execute_fn)
                         )
                         self._running_jobs[cot_job_id] = task
+                        
+                        if cot_logger:
+                            cot_logger.info(f"[QUEUE] Task created successfully - cot_job_id={cot_job_id}")
+                    else:
+                        if cot_logger:
+                            cot_logger.warning(f"[QUEUE] Job status changed, not starting - cot_job_id={cot_job_id}, status={queue_entry.get('status') if queue_entry else 'NOT_FOUND'}")
+            else:
+                if cot_logger:
+                    cot_logger.warning(f"[QUEUE] Job not found or not QUEUED - cot_job_id={cot_job_id}, entry={queue_entry is not None}, status={queue_entry.get('status') if queue_entry else 'N/A'}")
+        else:
+            if cot_logger:
+                cot_logger.info(f"[QUEUE] At capacity, cannot start job - cot_job_id={cot_job_id}, running_count={running_count}, max={MAX_CONCURRENT_JOBS}")
     
     async def _run_with_semaphore(self, cot_job_id: str, parent_job_id: str, config: Dict[str, Any], execute_fn: Callable[[str, str, Dict[str, Any]], None]):
         """
@@ -253,15 +314,28 @@ class CoTAnalysisQueue:
         Returns:
             List of job status dictionaries
         """
-        jobs = []
-        for jid, info in job_db.items():
-            if jid.startswith("cot_analysis_"):
-                jobs.append(info)
-        
-        # Sort by creation time (newest first)
-        jobs.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-        
-        return jobs
+        try:
+            # Make a shallow copy to avoid blocking on reads during writes
+            jobs = []
+            # Use items() for atomic snapshot
+            items_snapshot = list(job_db.items())
+            for jid, info in items_snapshot:
+                if jid.startswith("cot_analysis_"):
+                    # Make a shallow copy of the job info to avoid reference issues
+                    job_copy = info.copy()
+                    jobs.append(job_copy)
+            
+            # Sort by creation time (newest first)
+            jobs.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+            
+            return jobs
+        except Exception as e:
+            # If there's any error reading job_db, return empty list rather than blocking
+            import logging
+            cot_logger = logging.getLogger("cot_analysis_api")
+            if cot_logger:
+                cot_logger.error(f"[QUEUE] Error listing jobs: {e}")
+            return []
     
     def update_progress(
         self,
@@ -315,9 +389,38 @@ class CoTAnalysisQueue:
         queue_entry["progress"] = progress
         job_db[f"cot_analysis_{cot_job_id}"] = queue_entry
         
-        # Save periodically (not on every update to avoid excessive writes)
-        # In production, you might want to add debouncing here
-        save_job_db()
+        # Save less frequently to avoid blocking the API endpoint
+        # The CoT analysis runs in a thread pool, but frequent file writes can still cause contention
+        # Save only every 20 samples or on important milestones
+        processed_samples = progress.get("processed_samples", 0)
+        total_samples = progress.get("total_samples", 0)
+        
+        should_save = (
+            processed_samples % 20 == 0 or  # Every 20 samples
+            processed_samples == 1 or  # First sample
+            processed_samples == total_samples or  # Last sample (completion)
+            processed_samples == 0  # Initialization
+        )
+        
+        if should_save:
+            try:
+                save_job_db()
+            except Exception as save_error:
+                # Don't fail progress updates if save fails - just log it
+                import logging
+                cot_logger = logging.getLogger("cot_analysis_api")
+                if cot_logger:
+                    cot_logger.warning(f"[PROGRESS] Failed to save job_db during progress update: {save_error}")
+        
+        # Log progress updates to file
+        try:
+            import logging
+            cot_logger = logging.getLogger("cot_analysis_api")
+            if cot_logger and cot_logger.handlers:
+                cot_logger.info(f"[PROGRESS] cot_job_id={cot_job_id}, sample={current_sample}/{total_samples}, "
+                              f"percentage={progress.get('percentage', 0):.1f}%, activity={current_activity or progress.get('current_activity', 'N/A')}")
+        except Exception:
+            pass  # Don't fail if logging isn't set up
 
 # Global queue instance
 cot_queue = CoTAnalysisQueue()

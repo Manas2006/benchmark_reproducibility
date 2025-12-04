@@ -33,16 +33,23 @@ def parse_result_filename(filename: str) -> Optional[Dict[str, Any]]:
     
     Expected format: test_{prompt_type}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}[_{job_id}].jsonl
     
+    Note: prompt_type can be "custom_custom" when a custom prompt is provided.
+    
     Returns dict with parsed information or None if format doesn't match.
     """
     # Pattern: test_{prompt_type}_{num_test_sample}_seed{seed}_t{temperature}_s{start}_e{end}[_{job_id}].jsonl
-    pattern = r'test_([^_]+)_(-?\d+)_seed(\d+)_t([\d.]+)_s(\d+)_e(-?\d+)(?:_([a-f0-9-]+))?\.jsonl$'
+    # Allow prompt_type to be either a single word or "custom_custom"
+    pattern = r'test_((?:[^_]+|custom_custom))_(-?\d+)_seed(\d+)_t([\d.]+)_s(\d+)_e(-?\d+)(?:_([a-f0-9-]+))?\.jsonl$'
     match = re.match(pattern, filename)
     
     if not match:
         return None
     
     prompt_type, num_test_sample, seed, temperature, start, end, job_id = match.groups()
+    
+    # Normalize prompt_type: if it's "custom_custom", use "custom" for the database
+    if prompt_type == "custom_custom":
+        prompt_type = "custom"
     
     return {
         'prompt_type': prompt_type,

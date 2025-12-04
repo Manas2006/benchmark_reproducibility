@@ -532,6 +532,26 @@ def extract_answer(pred_str, data_name, use_last_number=True):
         # Fallback: return empty string if no match
         return ""
     
+    if effective_data_name == "commonsense_qa":
+        # CommonsenseQA: Extract multiple choice answer (A-E format)
+        # Look for "Final Answer:" pattern first
+        final_answer_match = re.search(r"Final Answer:\s*([A-E])", pred_str, re.IGNORECASE)
+        if final_answer_match:
+            return final_answer_match.group(1).upper()
+        
+        # Look for parenthesized letters: (A), (B), etc.
+        mc_parentheses = re.findall(r"\(([A-E])\)", pred_str, re.IGNORECASE)
+        if mc_parentheses:
+            return mc_parentheses[-1].upper()
+        
+        # Look for standalone letters A-E (word boundaries)
+        mc_standalone = re.findall(r"\b([A-E])\b", pred_str, re.IGNORECASE)
+        if mc_standalone:
+            return mc_standalone[-1].upper()
+        
+        # Fallback: return empty string if no match
+        return ""
+    
     if effective_data_name == "gpqa":
         # GPQA: Extract multiple choice answer (A-E format)
         # Look for parenthesized letters first: (A), (B), etc.
@@ -614,8 +634,13 @@ def extract_answer(pred_str, data_name, use_last_number=True):
     
     if effective_data_name == "humaneval":
         # Extract function body from model output for HumanEval
-        # Simple approach: extract ```python``` code block, remove signature, preserve indentation
-        code_block_pattern = r"```(?:python)?\s*\n(.*?)\n```"
+        # Apply stopping logic similar to reference implementation:
+        # Stop at <|endoftext|>, \n\n\n, \n\n, or def (next function definition)
+        # This matches the behavior of the reference HumanEval evaluation code
+        # But apply it AFTER trying to extract from code blocks
+        
+        # First, try to extract from markdown code blocks
+        code_block_pattern = r"```(?:python)?\s*\n(.*?)```"
         code_blocks = re.findall(code_block_pattern, pred_str, re.DOTALL)
         if code_blocks:
             # Use the last code block (most likely the final answer)
@@ -656,30 +681,55 @@ def extract_answer(pred_str, data_name, use_last_number=True):
                     continue
                 
                 # After skipping def and docstring, collect body lines
-                # Preserve original indentation (spaces before the code)
                 if not skip_def:
                     body_lines.append(line)
             
-            # Join body lines, preserving original indentation
-            # Ensure first line has at least 4 spaces (function body indentation)
+            # Normalize indentation: normalize to standard Python indentation (multiples of 4)
             if body_lines:
-                first_line = body_lines[0]
-                first_indent = len(first_line) - len(first_line.lstrip())
-                if first_indent < 4:
-                    # Add 4 spaces to first line if it has less
-                    body_lines[0] = ' ' * 4 + first_line.lstrip()
-                    # Adjust other lines to maintain relative indentation
-                    if len(body_lines) > 1:
-                        adjusted_lines = [body_lines[0]]
-                        for line in body_lines[1:]:
+                # Find minimum indentation (excluding empty lines)
+                non_empty = [line for line in body_lines if line.strip()]
+                if non_empty:
+                    min_indent = min(len(line) - len(line.lstrip()) for line in non_empty)
+                    # Remove base indentation from all lines
+                    pred = '\n'.join(line[min_indent:] if line.strip() else line for line in body_lines).rstrip()
+                    # Now normalize relative indentation to multiples of 4
+                    normalized_lines = []
+                    for line in pred.split('\n'):
+                        if line.strip():
+                            # Calculate current indent
                             current_indent = len(line) - len(line.lstrip())
-                            relative_indent = current_indent - first_indent
-                            new_indent = 4 + relative_indent
-                            adjusted_lines.append(' ' * new_indent + line.lstrip())
-                        body_lines = adjusted_lines
-            
-            pred = '\n'.join(body_lines).strip()
+                            # Round to nearest multiple of 4, but ensure at least 4 spaces for function body
+                            normalized_indent = max(4, ((current_indent + 2) // 4) * 4)
+                            normalized_lines.append(' ' * normalized_indent + line.lstrip())
+                        else:
+                            normalized_lines.append(line)
+                    pred = '\n'.join(normalized_lines).rstrip()
+                else:
+                    pred = '\n'.join(body_lines).rstrip()
+            else:
+                pred = ""
         else:
+            # No code blocks found - apply stopping logic to raw text
+            # Stop at <|endoftext|>
+            if "<|endoftext|>" in pred_str:
+                pred_str = pred_str.split("<|endoftext|>")[0]
+            
+            # Stop at triple newline
+            if "\n\n\n" in pred_str:
+                pred_str = pred_str.split("\n\n\n")[0]
+            
+            # Stop at double newline
+            if "\n\n" in pred_str:
+                pred_str = pred_str.split("\n\n")[0]
+            
+            # Stop at next function definition (def after the prompt)
+            # Find the first 'def ' that's not part of the prompt
+            # The prompt already contains a function definition, so we want to stop at the NEXT one
+            def_positions = [m.start() for m in re.finditer(r'\bdef\s+', pred_str)]
+            if len(def_positions) > 1:
+                # There's a second 'def ' - stop there (this is the next function)
+                pred_str = pred_str[:def_positions[1]]
+            
             # If no code block, extract everything after the prompt
             # Remove any leading text/explanations
             pred = pred_str.strip()
@@ -734,36 +784,29 @@ def extract_answer(pred_str, data_name, use_last_number=True):
             # Remove function signature line
             pred = '\n'.join(lines[1:]).strip()
         
-        # Final normalization: ensure first line has 4 spaces (function body indentation)
-        # Only normalize if first line doesn't have proper indentation
+        # Normalize indentation: ensure consistent indentation for function body
+        # Function body should typically be indented 4 spaces
+        # Normalize relative indentation to standard Python levels (multiples of 4)
         lines = pred.split('\n')
         if lines:
-            non_empty_lines = [line for line in lines if line.strip()]
-            if non_empty_lines:
-                first_line = non_empty_lines[0]
-                first_indent = len(first_line) - len(first_line.lstrip())
-                
-                if first_indent < 4:
-                    # First line needs indentation - add 4 spaces and adjust others
-                    min_indent = min(len(line) - len(line.lstrip()) for line in non_empty_lines)
-                    normalized_lines = []
-                    for line in lines:
-                        if line.strip():
-                            current_indent = len(line) - len(line.lstrip())
-                            relative_indent = current_indent - min_indent
-                            # First line should be 4 spaces, others maintain relative
-                            normalized_indent = 4 + relative_indent
-                            content = line.lstrip()
-                            normalized_line = ' ' * normalized_indent + content
-                            normalized_lines.append(normalized_line)
-                        else:
-                            normalized_lines.append('')
-                    pred = '\n'.join(normalized_lines)
-                    # Don't strip() here as it might remove leading spaces from first line
-                    # Only strip trailing whitespace
-                    pred = pred.rstrip()
+            normalized_lines = []
+            for line in lines:
+                if line.strip():
+                    # Calculate current indent
+                    current_indent = len(line) - len(line.lstrip())
+                    # Normalize to multiples of 4, ensuring at least 4 spaces for function body
+                    # If current indent is 0, use 4. Otherwise, round to nearest multiple of 4
+                    if current_indent == 0:
+                        normalized_indent = 4
+                    else:
+                        # Round to nearest multiple of 4, but ensure minimum of 4
+                        normalized_indent = max(4, ((current_indent + 2) // 4) * 4)
+                    normalized_lines.append(' ' * normalized_indent + line.lstrip())
+                else:
+                    normalized_lines.append(line)
+            pred = '\n'.join(normalized_lines).rstrip()
         
-        return pred
+        return pred.rstrip()
     
     if effective_data_name in ["mmlu_stem", "sat_math", "aqua", "gaokao2023"]:
         # TODO check multiple choice
@@ -928,6 +971,11 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         gt_cot = None
         gt_ans = example.get("target", example.get("gt", example.get("answerKey", "")))
         # Store as "A", "B", etc. or "1", "2", etc. (preserve original format)
+    elif data_name == "commonsense_qa":
+        # CommonsenseQA: multiple choice format A, B, C, D, E
+        gt_cot = None
+        gt_ans = example.get("target", example.get("gt", example.get("answerKey", "")))
+        # Store as "A", "B", "C", "D", or "E"
     else:
         raise NotImplementedError(f"`{data_name}`")
     # post process
@@ -943,6 +991,9 @@ def parse_ground_truth(example: Dict[str, Any], data_name):
         gt_ans = str(gt_ans).strip() if gt_ans else ""
     elif data_name in ["arc_challenge", "arc_easy", "arc"]:
         # ARC: preserve answer format, only strip whitespace
+        gt_ans = str(gt_ans).strip() if gt_ans else ""
+    elif data_name == "commonsense_qa":
+        # CommonsenseQA: preserve answer format (A, B, C, D, E), only strip whitespace
         gt_ans = str(gt_ans).strip() if gt_ans else ""
     elif data_name not in STRIP_EXCEPTIONS:
         gt_ans = strip_string(gt_ans, skip_unit=data_name == "carp_en")
@@ -1017,6 +1068,9 @@ def parse_question(example, data_name):
         question = example.get("question", "")
     elif data_name in ["arc_challenge", "arc_easy", "arc"]:
         # ARC: return question field (already contains options formatted as "(A) option1", etc.)
+        question = example.get("question", "")
+    elif data_name == "commonsense_qa":
+        # CommonsenseQA: return question field
         question = example.get("question", "")
     else:
         for key in ["question", "problem", "Question", "input"]:
