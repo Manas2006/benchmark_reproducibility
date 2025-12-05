@@ -633,11 +633,12 @@ def extract_answer(pred_str, data_name, use_last_number=True):
     
     if effective_data_name == "humaneval":
         # Extract function body from model output for HumanEval
-        # Apply stopping logic similar to reference implementation:
-        # Stop at <|endoftext|>, \n\n\n, \n\n, or def (next function definition)
-        # This matches the behavior of the reference HumanEval evaluation code
-        # But apply it AFTER trying to extract from code blocks
+        # Enhanced extraction with multiple strategies:
+        # 1. Look for "### Solution Code" or similar headers
+        # 2. Extract from triple backticks (```python...``` or ```...```)
+        # 3. Find lines starting with "def"
         
+<<<<<<< HEAD
         # First, try to extract from markdown code blocks
         code_block_pattern = r"```(?:python)?\s*\n(.*?)```"
         code_blocks = re.findall(code_block_pattern, pred_str, re.DOTALL)
@@ -771,11 +772,158 @@ def extract_answer(pred_str, data_name, use_last_number=True):
                     
                     if not in_docstring:
                         body_lines.append(line)
+=======
+        pred = None
+        
+        # Strategy 1: Look for section headers like "### Solution Code", "## Code", "Solution:", etc.
+        section_patterns = [
+            r'###?\s*Solution\s*(?:Code)?[:\s]*\n',
+            r'###?\s*Code[:\s]*\n',
+            r'###?\s*Implementation[:\s]*\n',
+            r'###?\s*Answer[:\s]*\n',
+            r'\*\*Solution[:\s]*\*\*\s*\n',
+            r'^Solution:\s*\n',  # Simple "Solution:" at start of line
+            r'\nSolution:\s*\n',  # "Solution:" after newline
+        ]
+        
+        for section_pattern in section_patterns:
+            section_match = re.search(section_pattern, pred_str, re.IGNORECASE)
+            if section_match:
+                # Extract content after the section header
+                after_header = pred_str[section_match.end():]
+>>>>>>> 2aca5ed9d53e63544d5d14372b64aa827272c46d
                 
-                pred = '\n'.join(body_lines).strip()
+                # Look for code block after header
+                code_block_match = re.search(r'```(?:python)?\s*\n(.*?)```', after_header, re.DOTALL)
+                if code_block_match:
+                    pred = code_block_match.group(1).rstrip()
+                    break
+                else:
+                    # Look for def in the content after header (may start with newlines)
+                    # Stop at "Problem:" or next section header (use greedy .* to get full function)
+                    def_match = re.search(r'(def\s+\w+[^P]*)(?=Problem:|$)', 
+                                         after_header, re.DOTALL)
+                    if def_match:
+                        pred = def_match.group(1).rstrip()
+                        break
+        
+        # Strategy 2: Extract from markdown code blocks (try multiple patterns)
+        if pred is None:
+            # Try various code block formats
+            code_block_patterns = [
+                r'```python\s*\n(.*?)```',           # ```python\n...\n```
+                r'```\s*python\s*\n(.*?)```',        # ``` python\n...\n```
+                r'```\n(.*?)```',                     # ```\n...\n```
+                r'```(.*?)```',                       # ```...``` (any format)
+            ]
+            
+            for pattern in code_block_patterns:
+                code_blocks = re.findall(pattern, pred_str, re.DOTALL)
+                if code_blocks:
+                    # Find the code block that contains a function definition
+                    for block in code_blocks:
+                        if re.search(r'\bdef\s+\w+\s*\(', block):
+                            pred = block.rstrip()
+                            break
+                    # If no block with def found, use the last block
+                    if pred is None and code_blocks:
+                        pred = code_blocks[-1].rstrip()
+                    break
+        
+        # Strategy 3: Look for lines starting with "def" in raw text
+        if pred is None:
+            # Find all function definitions
+            def_matches = list(re.finditer(r'^def\s+\w+\s*\([^)]*\)\s*(?:->.*?)?:', pred_str, re.MULTILINE))
+            
+            if def_matches:
+                # Take the first function definition
+                start_pos = def_matches[0].start()
+                
+                # Find where this function ends (next def, triple newline, or end)
+                remaining = pred_str[start_pos:]
+                
+                # Stop at next function definition (if any)
+                next_def = re.search(r'\n(?=def\s+\w+)', remaining[10:])  # Skip current def
+                if next_def:
+                    remaining = remaining[:next_def.start() + 10]
+                
+                # Stop at section headers
+                section_end = re.search(r'\n###|\n\*\*[A-Z]|\n## ', remaining)
+                if section_end:
+                    remaining = remaining[:section_end.start()]
+                
+                # Stop at triple newline
+                if "\n\n\n" in remaining:
+                    remaining = remaining.split("\n\n\n")[0]
+                
+                pred = remaining.rstrip()
+        
+        # Strategy 4: Fallback - look for any indented code after stopping tokens
+        if pred is None:
+            work_str = pred_str
+            
+            # Stop at common end tokens
+            if "<|endoftext|>" in work_str:
+                work_str = work_str.split("<|endoftext|>")[0]
+            
+            # Look for indented lines (potential function body)
+            lines = work_str.split('\n')
+            code_lines = []
+            in_code = False
+            
+            for line in lines:
+                stripped = line.strip()
+                # Start capturing when we see indented code or return/if/for/while
+                if not in_code:
+                    if (line.startswith('    ') or line.startswith('\t')) and stripped:
+                        if any(stripped.startswith(kw) for kw in ['return ', 'if ', 'for ', 'while ', 'try:', 'with ']):
+                            in_code = True
+                            code_lines.append(line)
+                else:
+                    if stripped == '' or line.startswith('    ') or line.startswith('\t'):
+                        code_lines.append(line)
+                    elif stripped.startswith('#'):
+                        code_lines.append(line)
+                    else:
+                        # Non-indented non-empty line - stop
+                        break
+            
+            if code_lines:
+                pred = '\n'.join(code_lines).rstrip()
             else:
-                # No function signature found, use the whole thing
-                pred = pred.strip()
+                pred = ""
+        
+        # Clean up extracted code
+        if pred:
+            # Remove function signature if present (HumanEval wants just the body)
+            lines = pred.split('\n')
+            if lines and lines[0].strip().startswith('def '):
+                # Keep lines after the def line
+                pred = '\n'.join(lines[1:])
+            
+            # Skip docstrings
+            lines = pred.split('\n')
+            clean_lines = []
+            in_docstring = False
+            docstring_quotes = None
+            
+            for line in lines:
+                stripped = line.strip()
+                if not in_docstring:
+                    if stripped.startswith('"""') or stripped.startswith("'''"):
+                        in_docstring = True
+                        docstring_quotes = stripped[:3]
+                        # Check if docstring ends on same line
+                        if stripped.count(docstring_quotes) >= 2:
+                            in_docstring = False
+                        continue
+                    clean_lines.append(line)
+                else:
+                    if docstring_quotes in stripped:
+                        in_docstring = False
+                    continue
+            
+            pred = '\n'.join(clean_lines)
         
         # Clean up: remove function signature if present
         lines = pred.split('\n')
@@ -1069,8 +1217,14 @@ def parse_question(example, data_name):
         # ARC: return question field (already contains options formatted as "(A) option1", etc.)
         question = example.get("question", "")
     elif data_name == "commonsense_qa":
-        # CommonsenseQA: return question field
-        question = example.get("question", "")
+        # CommonsenseQA: format question with choices
+        q = example.get("question", "")
+        choices_text = []
+        for letter in ["A", "B", "C", "D", "E"]:
+            choice = example.get(letter, "")
+            if choice:
+                choices_text.append(f"{letter}. {choice}")
+        question = f"Question:\n{q}\n\nChoices:\n" + "\n".join(choices_text)
     else:
         for key in ["question", "problem", "Question", "input"]:
             if key in example:
