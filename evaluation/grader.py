@@ -324,7 +324,8 @@ def humaneval_check(generated_code: str, prompt: str, test_code: str, entry_poin
     try:
         # Combine prompt (function signature) + generated code (function body) + test code
         # The prompt already contains the function signature, we just need to add the body
-        full_code = prompt.rstrip() + "\n" + generated_code.strip() + "\n" + test_code.strip()
+        # Note: preserve leading indentation in generated_code (use rstrip not strip)
+        full_code = prompt.rstrip() + "\n" + generated_code.rstrip() + "\n" + test_code.strip()
         
         # Add a call to check() function with the entry_point function
         # The test code defines check(candidate), so we need to call it
