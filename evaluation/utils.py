@@ -319,6 +319,17 @@ def construct_prompt(example, data_name, args):
     if args.prompt_type == "qwen25-math-cot":
         # Hotfix to support putting all demos into a single turn
         demo_prompt = splitter.join([q + "\n" + a for q, a in demos])
+    elif args.prompt_type == "commonsense_qa":
+        # For commonsense_qa, demos are (question_string, answer) pairs
+        # The template needs {question}, {A}, {B}, {C}, {D}, {E} but demos only have question strings
+        # So we'll format with just the question and empty choices for demos
+        # (Few-shot might not be fully supported for commonsense_qa with this template format)
+        demo_prompt = splitter.join(
+            [
+                input_template.format(question=q, A="", B="", C="", D="", E="") + output_template.format(output=a)
+                for q, a in demos
+            ]
+        )
     else:
         demo_prompt = splitter.join(
             [
@@ -326,16 +337,67 @@ def construct_prompt(example, data_name, args):
                 for q, a in demos
             ]
         )
-    context = input_template.format(input=example["question"])
+    # Safely get question with fallback
+    question = example.get("question", "")
+    if not question:
+        # Try alternative keys if question is missing
+        for key in ["problem", "Question", "input", "content"]:
+            if key in example:
+                question = str(example[key])
+                break
+    
+    if not question:
+        raise ValueError(f"Could not find question field in example. Available keys: {list(example.keys())}")
+    
+    # Special handling for commonsense_qa which uses {question}, {A}, {B}, {C}, {D}, {E} placeholders
+    if args.prompt_type == "commonsense_qa":
+        # Format the template with all required fields from the example
+        format_dict = {
+            "question": question,
+            "A": example.get("A", example.get("choices", {}).get("A", "")),
+            "B": example.get("B", example.get("choices", {}).get("B", "")),
+            "C": example.get("C", example.get("choices", {}).get("C", "")),
+            "D": example.get("D", example.get("choices", {}).get("D", "")),
+            "E": example.get("E", example.get("choices", {}).get("E", "")),
+        }
+        context = input_template.format(**format_dict)
+    else:
+        context = input_template.format(input=question)
+    
     if len(demo_prompt) == 0 or (
-        args.adapt_few_shot and example["gt_ans"] not in ["A", "B", "C", "D", "E"]
+        args.adapt_few_shot and example.get("gt_ans", "") not in ["A", "B", "C", "D", "E"]
     ):
         full_prompt = context
     else:
         if args.prompt_type == "qwen25-math-cot":
             # Hotfix to supportting put all demos into a single turn
-            full_prompt = demo_prompt + splitter + example["question"]
-            full_prompt = input_template.format(input=full_prompt)
+            full_prompt = demo_prompt + splitter + question
+            if args.prompt_type == "commonsense_qa":
+                # For commonsense_qa, format with all required fields
+                format_dict = {
+                    "question": full_prompt,
+                    "A": example.get("A", example.get("choices", {}).get("A", "")),
+                    "B": example.get("B", example.get("choices", {}).get("B", "")),
+                    "C": example.get("C", example.get("choices", {}).get("C", "")),
+                    "D": example.get("D", example.get("choices", {}).get("D", "")),
+                    "E": example.get("E", example.get("choices", {}).get("E", "")),
+                }
+                full_prompt = input_template.format(**format_dict)
+            else:
+                full_prompt = input_template.format(input=full_prompt)
+        elif args.prompt_type == "commonsense_qa":
+            # For commonsense_qa with few-shot, combine demo_prompt with current question
+            # The demo_prompt already has formatted examples, so we just need to add the current question
+            format_dict = {
+                "question": question,
+                "A": example.get("A", example.get("choices", {}).get("A", "")),
+                "B": example.get("B", example.get("choices", {}).get("B", "")),
+                "C": example.get("C", example.get("choices", {}).get("C", "")),
+                "D": example.get("D", example.get("choices", {}).get("D", "")),
+                "E": example.get("E", example.get("choices", {}).get("E", "")),
+            }
+            current_context = input_template.format(**format_dict)
+            full_prompt = demo_prompt + splitter + current_context
         else:
             full_prompt = demo_prompt + splitter + context
 
@@ -349,7 +411,7 @@ def construct_prompt(example, data_name, args):
 
     if prompt_type == "tora":
         full_prompt = (
-            """Integrate step-by-step reasoning and Python code to solve math problems using the following guidelines:
+            r"""Integrate step-by-step reasoning and Python code to solve math problems using the following guidelines:
 
 - Analyze the question and write functions to solve the problem; the function should not take any arguments.
 - Present the final result in LaTeX using a `\boxed{}` without any units.
