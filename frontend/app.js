@@ -205,6 +205,7 @@ let structuredViewMode = true; // true for structured view, false for raw view
 let allJobs = [];
 let jobsDisplayLimit = 15;
 const JOBS_PER_PAGE = 15;
+let jobSortOrder = 'oldest-first'; // 'oldest-first' or 'newest-first'
 
 // Tab management
 function showTab(tabName, event = null) {
@@ -1098,8 +1099,16 @@ function renderJobList(jobs, resetLimit = true) {
     const jobsList = document.getElementById('jobs-list');
     jobsList.innerHTML = '';
     
-    // Store all jobs and reset display limit if needed
-    allJobs = [...jobs].reverse(); // Reverse so most recent jobs appear first
+    // Store all jobs and apply sorting
+    allJobs = [...jobs];
+    
+    // Sort jobs by job_id (which reflects creation order)
+    // For oldest-first: keep original order (earliest created first)
+    // For newest-first: reverse order (latest created first)
+    if (jobSortOrder === 'newest-first') {
+        allJobs.reverse();
+    }
+    
     if (resetLimit) {
         jobsDisplayLimit = JOBS_PER_PAGE;
     }
@@ -1220,7 +1229,28 @@ function renderJobList(jobs, resetLimit = true) {
 
 function loadMoreJobs() {
     jobsDisplayLimit += JOBS_PER_PAGE;
-    renderJobList(allJobs.slice().reverse(), false); // Pass original order, don't reset limit
+    // Re-render with current sort order, don't reset limit
+    renderJobList(allJobs, false);
+}
+
+function toggleJobSortOrder() {
+    // Toggle between oldest-first and newest-first
+    jobSortOrder = jobSortOrder === 'oldest-first' ? 'newest-first' : 'oldest-first';
+    
+    // Update button text
+    const sortButton = document.getElementById('job-sort-button');
+    if (sortButton) {
+        if (jobSortOrder === 'oldest-first') {
+            sortButton.innerHTML = '📅 Sort: Oldest First';
+            sortButton.title = 'Click to sort by newest first';
+        } else {
+            sortButton.innerHTML = '📅 Sort: Newest First';
+            sortButton.title = 'Click to sort by oldest first';
+        }
+    }
+    
+    // Re-render the job list with new sort order
+    renderJobList(allJobs, false);
 }
 
 async function deleteJob(jobId) {
