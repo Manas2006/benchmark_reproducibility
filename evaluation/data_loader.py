@@ -7,6 +7,10 @@ from utils import load_jsonl, lower_keys
 
 
 def load_data(data_name, split, data_dir="./data"):
+    # Normalize common aliases (e.g. "commonsenseqa" -> "commonsense_qa")
+    _aliases = {"commonsenseqa": "commonsense_qa"}
+    data_name = _aliases.get(data_name, data_name)
+
     # Check if data_name is a HuggingFace dataset URL and extract identifier
     hf_dataset_identifier = None
     data_name_sanitized = None

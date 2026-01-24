@@ -32,11 +32,41 @@ async function detectBackend() {
 
     const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
     const hostname = window.location.hostname;
+    const frontendPort = parseInt(window.location.port) || 3000;
+
+    console.log(`[Config] Frontend running on port ${frontendPort}`);
+    
+    // Calculate corresponding backend port (3000->8000, 3001->8001, etc.)
+    // Frontend ports 3000-3005 correspond to backend ports 8000-8005
+    let correspondingBackendPort = null;
+    if (frontendPort >= 3000 && frontendPort <= 3005) {
+        correspondingBackendPort = frontendPort + 5000; // 3000->8000, 3001->8001, etc.
+    }
+    
+    // First, try the corresponding backend port
+    if (correspondingBackendPort) {
+        const url = `${protocol}//${hostname}:${correspondingBackendPort}`;
+        console.log(`[Config] Trying corresponding backend at ${url}...`);
+        
+        const isAvailable = await checkBackendHealth(protocol, hostname, correspondingBackendPort);
+        
+        if (isAvailable) {
+            API_BASE = url;
+            WS_BASE = API_BASE.replace(/^http/, 'ws');
+            console.log(`[Config] ✅ Backend detected at corresponding port ${API_BASE}`);
+            return API_BASE;
+        } else {
+            console.log(`[Config] ❌ Corresponding backend not available at ${url}, trying other ports...`);
+        }
+    }
 
     console.log(`[Config] Auto-detecting backend server...`);
     
-    // Try each port in order
+    // Try each port in order (fallback)
     for (const port of BACKEND_PORTS) {
+        // Skip the corresponding port if we already tried it
+        if (port === correspondingBackendPort) continue;
+        
         const url = `${protocol}//${hostname}:${port}`;
         console.log(`[Config] Trying backend at ${url}...`);
         
@@ -931,15 +961,21 @@ function renderModelConfigs() {
                         <option value="direct" ${config.prompt_type === 'direct' ? 'selected' : ''}>Direct</option>
                         <option value="aime" ${config.prompt_type === 'aime' ? 'selected' : ''}>AIME (American Invitational Mathematics Examination)</option>
                         <option value="gsm8k" ${config.prompt_type === 'gsm8k' ? 'selected' : ''}>📘 GSM8K</option>
+                        <option value="gsm8k_fewshot" ${config.prompt_type === 'gsm8k_fewshot' ? 'selected' : ''}>📘 GSM8K (2-shot)</option>
                         <option value="math500" ${config.prompt_type === 'math500' ? 'selected' : ''}>🧠 MATH500</option>
+                        <option value="math500_fewshot" ${config.prompt_type === 'math500_fewshot' ? 'selected' : ''}>🧠 MATH500 (2-shot)</option>
                         <option value="aqua" ${config.prompt_type === 'aqua' ? 'selected' : ''}>🧮 AQuA-RAT</option>
+                        <option value="aqua_fewshot" ${config.prompt_type === 'aqua_fewshot' ? 'selected' : ''}>🧮 AQuA-RAT (2-shot)</option>
                         <option value="svamp" ${config.prompt_type === 'svamp' ? 'selected' : ''}>✏️ SVAMP</option>
+                        <option value="svamp_fewshot" ${config.prompt_type === 'svamp_fewshot' ? 'selected' : ''}>✏️ SVAMP (2-shot)</option>
                         <option value="asdiv" ${config.prompt_type === 'asdiv' ? 'selected' : ''}>📊 ASDiv (Algebraic Word Problems)</option>
                         <option value="humaneval" ${config.prompt_type === 'humaneval' ? 'selected' : ''}>💻 HumanEval+ (Coding Reasoning)</option>
                         <option value="bigbenchhard" ${config.prompt_type === 'bigbenchhard' ? 'selected' : ''}>🧩 BIG-Bench Hard (Logical Reasoning)</option>
                         <option value="gpqa" ${config.prompt_type === 'gpqa' ? 'selected' : ''}>🔬 GPQA (Graduate-Level Physics QA)</option>
+                        <option value="gpqa_fewshot" ${config.prompt_type === 'gpqa_fewshot' ? 'selected' : ''}>🔬 GPQA (2-shot)</option>
                         <option value="arc_challenge" ${config.prompt_type === 'arc_challenge' ? 'selected' : ''}>🎯 ARC-Challenge (Abstract Pattern Reasoning)</option>
                         <option value="commonsense_qa" ${config.prompt_type === 'commonsense_qa' ? 'selected' : ''}>💡 CommonsenseQA (Commonsense Reasoning)</option>
+                        <option value="commonsense_qa_fewshot" ${config.prompt_type === 'commonsense_qa_fewshot' ? 'selected' : ''}>💡 CommonsenseQA (2-shot)</option>
                     </select>
                 </div>
                 
@@ -1483,18 +1519,21 @@ async function refreshJobs() {
         console.log(`[refreshJobs] Response data:`, data);
         let jobs = data.jobs || [];
         
-        // Filter out CoT analysis jobs (they should only appear in CoT Analysis tab)
+        // Filter out CoT analysis and truncation jobs (they have their own UIs)
         jobs = jobs.filter(job => {
-            const jobId = job.job_id || job.slurm_jid || '';
-            // Exclude CoT analysis jobs
+            const jobId = (job.job_id || job.slurm_jid || '').toString();
             if (jobId.startsWith('cot_analysis_') || jobId.startsWith('cot_')) {
                 console.log(`[refreshJobs] Filtering out CoT job: ${jobId}`);
+                return false;
+            }
+            if (jobId.startsWith('truncation_')) {
+                console.log(`[refreshJobs] Filtering out truncation job: ${jobId}`);
                 return false;
             }
             return true;
         });
         
-        console.log(`[refreshJobs] Refreshed jobs list: ${jobs.length} jobs found (after filtering CoT jobs)`);
+        console.log(`[refreshJobs] Refreshed jobs list: ${jobs.length} jobs found (after filtering CoT/truncation jobs)`);
         if (jobs.length > 0) {
             console.log(`[refreshJobs] Job IDs:`, jobs.map(j => j.job_id || j.slurm_jid || 'unknown'));
         }
@@ -1533,9 +1572,14 @@ async function showMetricsModal(jobId, title = 'Metrics') {
 
         // Then get metrics
         const apiBase = await getApiBase();
-        const url = `${apiBase}/metrics/${jobId}`;
+        const url = `${apiBase}/metrics/${jobId}?t=${Date.now()}`;
         console.log(`Fetching metrics from: ${url}`);
-        const response = await fetch(url);
+        const response = await fetch(url, {
+            cache: 'no-store',
+            headers: {
+                'Cache-Control': 'no-cache'
+            }
+        });
         if (!response.ok) {
             let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
             if (response.status === 404) {
@@ -2526,6 +2570,9 @@ async function deleteCoTAnalysis(jobId) {
     }
 }
 
+// Track running CoT analyses to prevent duplicates
+let runningCoTAnalyses = new Set();
+
 async function runCoTAnalysis() {
     const jobSelect = document.getElementById('cot-job-select');
     if (!jobSelect) {
@@ -2537,6 +2584,12 @@ async function runCoTAnalysis() {
     const jobId = jobSelect.value;
     if (!jobId) {
         showCoTError('Please select a job to analyze');
+        return;
+    }
+
+    // Prevent duplicate runs
+    if (runningCoTAnalyses.has(jobId)) {
+        console.log(`CoT analysis already running for job ${jobId}, skipping duplicate request`);
         return;
     }
 
@@ -2555,6 +2608,16 @@ async function runCoTAnalysis() {
     hideCoTError();
     hideCoTResults();
 
+    // Mark this job as having a running analysis
+    runningCoTAnalyses.add(jobId);
+    
+    // Disable the analyze button to prevent duplicate clicks
+    const analyzeBtn = document.getElementById('analyze-btn');
+    if (analyzeBtn) {
+        analyzeBtn.disabled = true;
+        analyzeBtn.textContent = 'Analyzing...';
+    }
+
     try {
         console.log(`Running CoT analysis for job: ${jobId}`);
 
@@ -2563,6 +2626,12 @@ async function runCoTAnalysis() {
 
         if (!response.ok) {
             const errorData = await response.json();
+            // Handle duplicate analysis conflict
+            if (response.status === 409) {
+                console.log('CoT analysis already in progress for this job');
+                showCoTError('Analysis already in progress for this job. Please wait for it to complete.');
+                return;
+            }
             throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
         }
 
@@ -2584,6 +2653,16 @@ async function runCoTAnalysis() {
         console.error('Error running CoT analysis:', error);
         hideCoTLoading();
         showCoTError(`Analysis failed: ${error.message}`);
+    } finally {
+        // Always release the lock when done
+        runningCoTAnalyses.delete(jobId);
+        
+        // Re-enable the analyze button
+        const analyzeBtn = document.getElementById('analyze-btn');
+        if (analyzeBtn) {
+            analyzeBtn.disabled = false;
+            analyzeBtn.textContent = 'Analyze CoT';
+        }
     }
 }
 
@@ -4455,14 +4534,14 @@ function renderHeatmap(tokens, probs, containerId) {
     });
 }
 
-// Convert probability (0-1) to white-to-red color
+// Convert probability (0-1) to red-to-white color
 function getHeatmapColor(prob) {
     // Clamp probability between 0 and 1
     prob = Math.max(0, Math.min(1, prob));
-    // Interpolate from white (low) to red (high)
+    // Interpolate from red (unconfident/low) to white (confident/high)
     const r = 255;
-    const g = Math.round(255 * (1 - prob));
-    const b = Math.round(255 * (1 - prob));
+    const g = Math.round(255 * prob);
+    const b = Math.round(255 * prob);
     return `rgb(${r}, ${g}, ${b})`;
 }
 

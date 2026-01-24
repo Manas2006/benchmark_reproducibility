@@ -64,6 +64,9 @@ if not cot_api_logger.handlers:
     cot_api_logger.addHandler(handler)
     cot_api_logger.propagate = False
 
+# Track running CoT analyses to prevent duplicates (server-side)
+running_cot_analyses = set()
+
 # Background task to clean up completed CoT analysis servers
 async def cleanup_servers_task():
     """Background task to periodically clean up completed servers"""
@@ -216,7 +219,35 @@ async def job_status(jid: str):
             except Exception as e:
                 print(f"Warning: failed to parse ECE summary for job {jid}: {e}")
 
-    return {"job_id": jid, "slurm_jid": slurm_jid, **status_info, "result_file": result_file, "prob_file": prob_file, "summary_file": summary_file}
+    # Try to load metrics file and include in response
+    metrics_data = None
+    if result_file:
+        try:
+            result_path = Path(result_file)
+            if result_path.exists():
+                base_name = result_path.stem
+                prompt_type = request_cfg.get("prompt_type", "cot")
+                
+                possible_metrics_files = [
+                    result_path.parent / f"{base_name}_{prompt_type}_metrics.json",
+                    result_path.parent / f"{base_name}_metrics.json",
+                    result_path.parent / f"{result_path.stem}_{prompt_type}_metrics.json",
+                    result_path.parent / f"{result_path.stem}_metrics.json"
+                ]
+                
+                for possible_file in possible_metrics_files:
+                    if possible_file.exists():
+                        with open(possible_file, "r") as f:
+                            metrics_data = json.load(f)
+                        break
+        except Exception as e:
+            print(f"Warning: failed to load metrics for job {jid}: {e}")
+
+    response = {"job_id": jid, "slurm_jid": slurm_jid, **status_info, "result_file": result_file, "prob_file": prob_file, "summary_file": summary_file}
+    if metrics_data:
+        response["metrics"] = metrics_data
+    
+    return response
 
 @app.get("/jobs/{jid}/prob-file")
 async def get_prob_file(jid: str):
@@ -681,11 +712,18 @@ async def get_metrics_file(job_id: str):
                 detail=f"Metrics file not found for job {job_id}. The job may still be running or may have failed."
             )
         
-        # Return the metrics file
-        return FileResponse(
-            path=str(metrics_file),
-            filename=metrics_file.name,
-            media_type='application/json'
+        # Return the metrics file with no-cache headers
+        from fastapi.responses import Response
+        with open(metrics_file, 'r') as f:
+            content = f.read()
+        return Response(
+            content=content,
+            media_type='application/json',
+            headers={
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            }
         )
         
     except HTTPException:
@@ -713,6 +751,9 @@ async def list_jobs():
             # Skip CoT analysis jobs - they should only appear in the CoT Analysis tab
             if jid.startswith("cot_analysis_"):
                 continue
+            # Skip truncation analysis jobs - they have their own UI and use "queued" (never updated)
+            if jid.startswith("truncation_"):
+                continue
             
             # Copy job info
             job_info = info.copy()
@@ -720,8 +761,9 @@ async def list_jobs():
             job_info.pop("cli", None)
             
             # Only do expensive status checks for jobs that are still running/queued
+            # Use case-insensitive check so "queued" (e.g. legacy truncation) is also re-checked
             current_status = job_info.get("status", "")
-            if current_status in ["RUNNING", "QUEUED"]:
+            if current_status and str(current_status).upper() in ("RUNNING", "QUEUED"):
                 # Do async status check with timeout
                 try:
                     # Run status check in executor to avoid blocking
@@ -1425,16 +1467,39 @@ def export_results_to_excel(job_id: str, job_info: dict) -> str:
             summary_df = pd.DataFrame(summary_data, columns=['Metric', 'Value'])
             summary_df.to_excel(writer, index=False, sheet_name='Summary')
             
-            # Results sheet
+            # Helpers: full model output (use 'answer' or first of 'code' list)
+            def _full_output(r: dict) -> str:
+                a = r.get('answer')
+                if a is not None and isinstance(a, str) and a.strip():
+                    return a
+                code = r.get('code', [])
+                if isinstance(code, list) and code:
+                    c = code[0]
+                    return c if isinstance(c, str) else str(c)
+                if isinstance(code, str) and code.strip():
+                    return code
+                return 'N/A'
+
+            def _full_prompt(r: dict) -> str:
+                p = r.get('prompt', '') or ''
+                return p if isinstance(p, str) else str(p) if p else 'N/A'
+
+            # Results sheet: add Complete model output, Complete model prompt
             results_data = []
             for idx, result in enumerate(results):
+                full_out = _full_output(result)
+                full_prompt = _full_prompt(result)
+                # Truncated answer for backward compatibility (quick view)
+                answer_preview = full_out if full_out == 'N/A' or len(full_out) <= 2000 else (full_out[:2000] + '...')
                 results_data.append({
                     'Sample #': idx + 1,
-                    'Question': result.get('question', 'N/A')[:1000],
+                    'Question': (result.get('question') or 'N/A')[:1000],
                     'Ground Truth': result.get('gt', 'N/A'),
-                    'Prediction': result.get('pred', ['N/A'])[0] if result.get('pred') else 'N/A',
-                    'Correct': 'Yes' if result.get('score', [False])[0] else 'No',
-                    'Answer': (result.get('answer', 'N/A')[:2000] if isinstance(result.get('answer'), str) else str(result.get('answer', 'N/A'))[:2000]),
+                    'Prediction': (result.get('pred') or ['N/A'])[0] if result.get('pred') else 'N/A',
+                    'Correct': 'Yes' if (result.get('score') or [False])[0] else 'No',
+                    'Answer': answer_preview,
+                    'Complete model output': full_out,
+                    'Complete model prompt': full_prompt,
                 })
             
             results_df = pd.DataFrame(results_data)
@@ -1933,42 +1998,54 @@ async def get_cot_analysis(job_id: str):
     if cot_api_logger:
         cot_api_logger.info(f"[API] GET /jobs/{job_id}/cot-analysis - called at {datetime.now().isoformat()}")
     
-    # Always run synchronously
+    # Check if analysis is already running for this job (server-side duplicate prevention)
+    if job_id in running_cot_analyses:
+        if cot_api_logger:
+            cot_api_logger.info(f"[API] CoT analysis already running for job {job_id}, returning 409 Conflict")
+        raise HTTPException(status_code=409, detail=f"CoT analysis already in progress for job {job_id}")
+    
     # First check if a completed analysis result already exists
-        config = path_manager.get_config()
-        exports_dir = Path(config.exports_dir)
-        model_name, dataset = _get_model_and_dataset_from_job(job_id)
-        safe_model_name = model_name.replace("/", "_").replace("\\", "_").replace(":", "_")
-        organized_base = exports_dir / "cot_analysis" / safe_model_name / dataset
-        
-        cot_analysis_file = None
-        if organized_base.exists():
-            # Find directories matching job_id pattern
-            for org_dir in organized_base.iterdir():
-                if org_dir.is_dir() and org_dir.name.startswith(f"{job_id}_"):
-                    potential_file = org_dir / f"cot_analysis_{job_id}.json"
-                    if potential_file.exists():
-                        cot_analysis_file = potential_file
-                        break
-        
-        # If result file exists, load and return it instead of re-running
-        if cot_analysis_file and cot_analysis_file.exists():
+    config = path_manager.get_config()
+    exports_dir = Path(config.exports_dir)
+    model_name, dataset = _get_model_and_dataset_from_job(job_id)
+    safe_model_name = model_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+    organized_base = exports_dir / "cot_analysis" / safe_model_name / dataset
+    
+    cot_analysis_file = None
+    if organized_base.exists():
+        # Find directories matching job_id pattern
+        for org_dir in organized_base.iterdir():
+            if org_dir.is_dir() and org_dir.name.startswith(f"{job_id}_"):
+                potential_file = org_dir / f"cot_analysis_{job_id}.json"
+                if potential_file.exists():
+                    cot_analysis_file = potential_file
+                    break
+    
+    # If result file exists, load and return it instead of re-running
+    if cot_analysis_file and cot_analysis_file.exists():
+        if cot_api_logger:
+            cot_api_logger.info(f"[API] Found existing CoT analysis result, loading from {cot_analysis_file}")
+        try:
+            with open(cot_analysis_file, 'r') as f:
+                existing_data = json.load(f)
+            # Return the existing analysis data
+            return existing_data
+        except Exception as e:
             if cot_api_logger:
-                cot_api_logger.info(f"[API] Found existing CoT analysis result, loading from {cot_analysis_file}")
-            try:
-                with open(cot_analysis_file, 'r') as f:
-                    existing_data = json.load(f)
-                # Return the existing analysis data
-                return existing_data
-            except Exception as e:
-                if cot_api_logger:
-                    cot_api_logger.warning(f"[API] Failed to load existing CoT analysis from {cot_analysis_file}: {e}, will re-run")
-                # Fall through to re-run if loading fails
-        
+                cot_api_logger.warning(f"[API] Failed to load existing CoT analysis from {cot_analysis_file}: {e}, will re-run")
+            # Fall through to re-run if loading fails
+    
+    # Mark this job as having a running analysis
+    running_cot_analyses.add(job_id)
+    
+    try:
         # No existing result - run synchronously in executor to avoid blocking
         loop = asyncio.get_event_loop()
         analysis_result = await loop.run_in_executor(None, _run_cot_analysis_sync_direct, job_id)
         return analysis_result
+    finally:
+        # Always release the lock when done
+        running_cot_analyses.discard(job_id)
 
 def _run_cot_analysis_sync_direct(job_id: str):
     """Run CoT analysis synchronously (called from executor)"""
@@ -2203,267 +2280,10 @@ def _run_cot_analysis_sync_direct(job_id: str):
         
         # Save JSON
         try:
-            # Get raw data
-            raw_data = get_job_raw_data(job_id)
-            data_list = raw_data.get('data', [])
-            
-            if not data_list:
-                raise HTTPException(status_code=404, detail="No data found for analysis")
-            
-            # Initialize new Pillars v2 evaluator
-            from .cot_eval_v2.evaluator import PillarsEvaluator
-            from .cot_eval_v2.judge import Judge
-            
-            # Get configuration
-            config = path_manager.get_config()
-            
-            # Create judge if OpenAI key available
-            judge = None
-            if config.openai_api_key:
-                # Set the API key as environment variable for OpenAI client
-                import os
-                os.environ['OPENAI_API_KEY'] = config.openai_api_key
-                judge = Judge(mode="ALWAYS")
-            
-            # Initialize evaluator
-            evaluator = PillarsEvaluator(judge=judge)
-            
-            # Process each sample (same logic as async function but without progress tracking)
-            results = []
-            total_samples = len(data_list)
-            
-            print(f"🔍 Starting CoT analysis for {total_samples} samples...", flush=True)
-            
-            for i, sample in enumerate(data_list):
-                try:
-                    print(f"📊 Analyzing sample {i+1}/{total_samples}...", flush=True)
-                    sys.stdout.flush()
-                    
-                    # Extract model reasoning and answer (same as async function)
-                    model_reasoning_text = ""
-                    predicted_answer_text = ""
-                    
-                    if sample.get('code'):
-                        code_val = sample.get('code', [''])
-                        if isinstance(code_val, list):
-                            model_reasoning_text = code_val[0] if code_val and code_val[0] else ""
-                        else:
-                            model_reasoning_text = str(code_val) if code_val else ""
-                    
-                    if not model_reasoning_text and sample.get('solution'):
-                        model_reasoning_text = str(sample.get('solution', ''))
-                    
-                    if not model_reasoning_text and sample.get('output'):
-                        output_val = sample.get('output', '')
-                        if isinstance(output_val, list):
-                            model_reasoning_text = output_val[0] if output_val and output_val[0] else ""
-                        else:
-                            model_reasoning_text = str(output_val) if output_val else ""
-                    
-                    if sample.get('pred'):
-                        pred_val = sample.get('pred', [''])
-                        if isinstance(pred_val, list):
-                            predicted_answer_text = str(pred_val[0]) if pred_val and pred_val[0] is not None else ""
-                        else:
-                            predicted_answer_text = str(pred_val) if pred_val else ""
-                    
-                    if not predicted_answer_text and sample.get('answer'):
-                        predicted_answer_text = str(sample.get('answer', ''))
-                    
-                    if not predicted_answer_text and model_reasoning_text:
-                        boxed_match = re.search(r'\\boxed\{([^}]+)\}', model_reasoning_text)
-                        if boxed_match:
-                            predicted_answer_text = boxed_match.group(1).strip()
-                        else:
-                            framebox_match = re.search(r'\\framebox\{([^}]+)\}', model_reasoning_text)
-                            if framebox_match:
-                                predicted_answer_text = framebox_match.group(1).strip()
-                    
-                    if predicted_answer_text:
-                        full_cot_text = f"{model_reasoning_text}\n#### {predicted_answer_text}"
-                    else:
-                        full_cot_text = model_reasoning_text
-                    
-                    existing_scores = sample.get('score', [])
-                    is_correct = existing_scores[0] if existing_scores else False
-                    
-                    # Run analysis
-                    flags, evidence, rule_scores, judge_scores, fused_scores = evaluator.analyze(
-                        problem=sample.get('question', ''),
-                        cot_text=full_cot_text,
-                        gold=sample.get('gt', '')
-                    )
-                    
-                    evidence['final_correct'] = is_correct
-                    
-                    from .cot_eval_v2.scoring import rule_scores as calc_rule_scores
-                    rule_scores = calc_rule_scores(evidence)
-                    
-                    from .cot_eval_v2.scoring import fuse_with_judge
-                    fused_scores = fuse_with_judge(rule_scores, judge_scores, evidence)
-                    
-                    flags_summary = flags.summarize_for_prompt()
-                    
-                    flags_dict = {}
-                    for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
-                        pillar_flags = flags.get_flags_by_pillar(pillar)
-                        flags_dict[pillar] = [flag.to_dict() for flag in pillar_flags]
-                    
-                    sample_result = {
-                        "sample_id": i,
-                        "problem": sample.get('question', ''),
-                        "cot_text": full_cot_text,
-                        "gold_answer": sample.get('gt', ''),
-                        "flags": flags_dict,
-                        "evidence": evidence,
-                        "rule_scores": rule_scores,
-                        "judge_scores": judge_scores,
-                        "fused_scores": fused_scores,
-                        "final_answer": predicted_answer_text
-                    }
-                    
-                    results.append(sample_result)
-                    
-                except Exception as e:
-                    print(f"Error processing sample {i}: {e}", flush=True)
-                    sys.stdout.flush()
-                    results.append({
-                        "sample_id": i,
-                        "problem": sample.get('question', ''),
-                        "cot_text": "",
-                        "gold_answer": sample.get('gt', ''),
-                        "error": str(e),
-                        "flags": {},
-                        "evidence": {},
-                        "rule_scores": {},
-                        "judge_scores": {},
-                        "fused_scores": {},
-                        "final_answer": ""
-                    })
-            
-            # Calculate summary statistics (same as async function)
-            valid_results = [r for r in results if "error" not in r]
-            if valid_results:
-                avg_scores = {}
-                for pillar in ["faithfulness", "utility", "coherence", "factuality"]:
-                    scores = [r["fused_scores"].get(pillar, 0) for r in valid_results]
-                    avg_scores[pillar] = sum(scores) / len(scores) if scores else 0
-                avg_scores["overall"] = sum(avg_scores.values()) / len(avg_scores)
-                
-                flag_counts = {}
-                for result in valid_results:
-                    for flag_type, flags in result["flags"].items():
-                        if flag_type not in flag_counts:
-                            flag_counts[flag_type] = 0
-                        flag_counts[flag_type] += len(flags)
-            else:
-                avg_scores = {"faithfulness": 0, "utility": 0, "coherence": 0, "factuality": 0, "overall": 0}
-                flag_counts = {}
-            
-            # Convert results to proper schema format
-            per_sample = []
-            for result in results:
-                if "error" not in result:
-                    flags_list = []
-                    for pillar, flags in result["flags"].items():
-                        for flag in flags:
-                            flags_list.append({
-                                "pillar": pillar,
-                                "step": flag.get("step", "unknown"),
-                                "issue": flag.get("issue", "unknown"),
-                                "details": flag.get("details", {})
-                            })
-                    
-                    scores = {
-                        "faithfulness": result["fused_scores"].get("faithfulness", 0.0),
-                        "utility": result["fused_scores"].get("utility", 0.0),
-                        "coherence": result["fused_scores"].get("coherence", 0.0),
-                        "factuality": result["fused_scores"].get("factuality", 0.0),
-                        "overall": result["fused_scores"].get("overall", 0.0)
-                    }
-                    
-                    per_sample.append({
-                        "scores": scores,
-                        "flags": flags_list,
-                        "evidence": result["evidence"],
-                        "rules_raw": result["rule_scores"],
-                        "judge_raw": result["judge_scores"],
-                        "config_snapshot": {"judge_available": judge is not None},
-                        "problem": result["problem"],
-                        "model_output": result["cot_text"],
-                        "gold": result["gold_answer"]
-                    })
-            
-            # Create summary
-            summary = {
-                "avg_faithfulness": avg_scores.get("faithfulness", 0.0),
-                "avg_utility": avg_scores.get("utility", 0.0),
-                "avg_coherence": avg_scores.get("coherence", 0.0),
-                "avg_factuality": avg_scores.get("factuality", 0.0),
-                "avg_overall": avg_scores.get("overall", 0.0),
-                "total_flags": sum(flag_counts.values()),
-                "flags_by_pillar": flag_counts,
-                "judge_call_rate": 1.0 if judge is not None else 0.0,
-                "judge_budget_used": 0,
-                "judge_budget_total": 0,
-                "total_samples": total_samples,
-                "analysis_time": time.time() - start_time,
-                "avg_time_per_sample": (time.time() - start_time) / total_samples if total_samples > 0 else 0.0
-            }
-            
-            # Build final response
-            analysis_result = {
-                "job_id": job_id,
-                "per_sample": per_sample,
-                "summary": summary,
-                "analysis_method": "pillars_v2",
-                "config": {"judge_available": judge is not None},
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-            }
-            
-            # Save to organized folder (same as async function)
-            model_name, dataset = _get_model_and_dataset_from_job(job_id)
-            timestamp_str = analysis_result.get('timestamp', time.strftime("%Y%m%d_%H%M%S")).replace(' ', '_').replace(':', '')
-            judge_mode_str = "ALWAYS"
-            
-            config_path = path_manager.get_config()
-            exports_dir = Path(config_path.exports_dir)
-            organized_dir = exports_dir / "cot_analysis" / model_name / dataset / f"{job_id}_{timestamp_str}_{judge_mode_str}"
-            organized_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Save JSON
-            try:
-                cot_analysis_file = organized_dir / f"cot_analysis_{job_id}.json"
-                with open(cot_analysis_file, 'w') as f:
-                    json.dump(analysis_result, f, indent=2)
-                print(f"💾 CoT analysis saved to: {cot_analysis_file}", flush=True)
-            except Exception as e:
-                print(f"⚠️ Warning: Could not save CoT analysis to file: {e}", flush=True)
-            
-            # Generate Excel
-            try:
-                excel_path = export_cot_analysis_to_excel(job_id, analysis_result, organized_dir)
-                job_info = job_db.get(job_id, {})
-                job_info["excel_export_path"] = excel_path
-                job_db[job_id] = job_info
-                save_job_db()
-                print(f"📊 Excel export saved to: {excel_path}", flush=True)
-            except Exception as e:
-                print(f"⚠️ Warning: Could not generate Excel export: {e}", flush=True)
-        
-            # Save CoT analysis to JSON file
-            try:
-                cot_analysis_file = organized_dir / f"cot_analysis_{job_id}.json"
-                with open(cot_analysis_file, 'w') as f:
-                    json.dump(analysis_result, f, indent=2)
-                print(f"💾 CoT analysis saved to: {cot_analysis_file}", flush=True)
-            except Exception as e:
-                print(f"⚠️ Warning: Could not save CoT analysis to file: {e}", flush=True)
-        
-            return analysis_result
-        
-        except HTTPException:
-            raise
+            cot_analysis_file = organized_dir / f"cot_analysis_{job_id}.json"
+            with open(cot_analysis_file, 'w') as f:
+                json.dump(analysis_result, f, indent=2)
+            print(f"💾 CoT analysis saved to: {cot_analysis_file}", flush=True)
         except Exception as e:
             print(f"⚠️ Warning: Could not save CoT analysis to file: {e}", flush=True)
         
@@ -2915,8 +2735,14 @@ async def run_truncation_analysis(job_id: str, request: TruncationAnalysisReques
                 # If path ends with /envs/env_name, extract env_name
                 if '/envs/' in config.conda_env_path:
                     conda_env_name = config.conda_env_path.split('/envs/')[-1]
+                    # Get base conda installation path (parent of envs directory)
+                    base_conda_path = config.conda_env_path.split('/envs/')[0]
+                    conda_sh_path = f"{base_conda_path}/etc/profile.d/conda.sh"
+                else:
+                    # If not in envs, assume it's the base installation
+                    conda_sh_path = f"{config.conda_env_path}/etc/profile.d/conda.sh"
                 conda_activation = f"""# Activate conda environment
-source {config.conda_env_path}/etc/profile.d/conda.sh
+source {conda_sh_path}
 conda activate {conda_env_name}
 """
             else:
@@ -2985,7 +2811,7 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     # Store the truncation job info
                     truncation_job_id_full = f"truncation_{job_id}_{slurm_jid}"
                     job_db[truncation_job_id_full] = {
-                        "status": "queued",
+                        "status": "QUEUED",
                         "request": request.dict(),
                         "parent_job_id": job_id,
                         "run_path": str(script_path),
@@ -3006,7 +2832,7 @@ export CUDA_VISIBLE_DEVICES=${{CUDA_VISIBLE_DEVICES:-0}}
                     
                     return TruncationAnalysisResponse(
                         job_id=job_id,
-                        status="queued",
+                        status="QUEUED",
                         message=f"Truncation analysis queued on SLURM with job ID {slurm_jid}",
                         raw_curves_path=None,
                         correct_plot_path=None,
